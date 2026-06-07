@@ -1,0 +1,26 @@
+DevTailor 是浏览器页面 ↔ ACP Agent 前端开发桥接工具，由「Chrome 浏览器扩展 + 本地 Bridge 服务」双组件构成。
+
+它打通真实运行页面与编码 Agent 的数据、指令链路，让 Agent 能直接获取页面 DOM、截图、元素标记、控制台信息，并在修改代码后回到浏览器执行点击、填写、断言和截图验证。
+
+组件分工：
+- Chrome 扩展：页面悬浮 Chat 面板、元素标记、截图、元素库、Browser MCP 工具调用和消息流式展示
+- Local Bridge：通过 SSE/HTTP 对接扩展，通过 ACP stdio 转发给兼容 Agent，并路由 Agent 的浏览器指令到已接管 tab
+
+核心能力：
+- 页面元素打点标注：点击 DOM 元素 + 备注描述，一键打包上下文发给 Agent
+- 截图能力：可见区域截图、网格辅助定位截图、图片粘贴入对话
+- 元素库：保存常用业务控件，通过 targetId / targetName 快速复用
+- Browser MCP 工具：页面快照、控制台日志、点击、填写、按键、等待、断言、运行 JS、批量操作流程
+- 项目级会话和元素目标持久化，存储在项目 .devtailor/ 目录
+- 支持 Claude、Copilot、Gemini、Qwen、Codex、OpenCode、Kiro、Kimi，以及自定义 ACP 命令
+
+适用场景：
+- 本地调试前端 UI 异常，省去大段文字描述元素位置
+- 让 Agent 获取真实页面 DOM、运行时错误和截图来定位代码缺陷
+- Agent 修改源码后，自动在浏览器执行点击、输入、断言，即时验证效果
+- 介于手动测试和重型 E2E 测试框架之间的轻量化调试自动化
+
+Credits:
+- DOM Review — https://github.com/AAnkacHH/web-review-extention — MIT
+- VisBug — https://github.com/GoogleChromeLabs/ProjectVisBug — Apache-2.0
+- wechat-acp — https://github.com/formulahendry/wechat-acp — MIT

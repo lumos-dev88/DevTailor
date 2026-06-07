@@ -1,0 +1,21 @@
+/* DOM Review — Shadow DOM Styles (Reference File)
+   These styles are inlined in shadow-ui.js.
+   Edit this file as the source of truth, then copy to the JS. */
+
+:host {
+  --dr-bg-primary: #1e293b;
+  --dr-bg-secondary: #334155;
+  --dr-bg-hover: #475569;
+  --dr-text-primary: #f8fafc;
+  --dr-text-secondary: #94a3b8;
+  --dr-accent: #3b82f6;
+  --dr-accent-hover: #2563eb;
+  --dr-danger: #ef4444;
+  --dr-warning: #f59e0b;
+  --dr-success: #22c55e;
+  --dr-radius: 8px;
+  --dr-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --dr-font: system-ui, -apple-system, sans-serif;
+  --dr-font-size: 14px;
+  --dr-z-base: 2147483647;
+}

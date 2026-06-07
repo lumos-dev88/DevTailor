@@ -1,0 +1,13 @@
+{
+    "permissions": {
+      "allow": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(npm run *)",
+        "Bash(npx vue-tsc *)"
+      ]
+    }
+}
