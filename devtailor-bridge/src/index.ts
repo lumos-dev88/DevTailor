@@ -3,8 +3,8 @@
  * DevTailor Bridge — CLI Entry
  *
  * Usage:
+ *   npx devtailor [dir] [options]
  *   npx devtailor --agent claude --dir /path/to/project
- *   npx devtailor --agent gemini --dir . --port 7777
  *   npx devtailor agents
  *   npx devtailor --daemon
  *   npx devtailor stop
@@ -17,43 +17,122 @@ import { resolve, join } from 'path';
 import { WSServer } from './ws-server';
 import { listBuiltInAgents, resolveAgent, ResolvedAgent } from './agent-presets';
 
+const VERSION = '0.1.0';
 const DEFAULT_PORT = 34781;
 const DEFAULT_AGENT = 'claude';
 const PID_FILE = '/tmp/devtailor-bridge.pid';
 
-function parseArgs(): { agent: string; dir: string; port: number; daemon: boolean; command: string } {
+function printHelp(): void {
+  console.log(`
+DevTailor Bridge v${VERSION}
+
+Usage:
+  devtailor [dir] [options]
+  devtailor <command>
+
+Arguments:
+  dir                      project directory (default: current directory)
+
+Options:
+  -a, --agent <agent>      agent type or command (default: ${DEFAULT_AGENT})
+  -d, --daemon             run in background
+  -h, --help               show this help message
+  -v, --version            show version
+
+Commands:
+  agents                   list available built-in agents
+  start                    start bridge (default)
+  stop                     stop daemon process
+  status                   check daemon status
+
+Examples:
+  devtailor                              # start in current directory
+  devtailor /path/to/project             # start in specific directory
+  devtailor --agent gemini               # use gemini agent
+  devtailor --daemon                     # run in background
+  devtailor agents                       # list available agents
+  devtailor stop                         # stop daemon
+
+Environment Variables:
+  DEVTAILOR_AGENT          default agent (overrides --agent)
+
+Note:
+  Bridge runs on fixed port ${DEFAULT_PORT} (required by extension)
+  `);
+}
+
+function printVersion(): void {
+  console.log(VERSION);
+}
+
+function parseArgs(): { agent: string; dir: string; daemon: boolean; command: string } {
   const args = process.argv.slice(2);
-  let agent = DEFAULT_AGENT;
+
+  // Handle help and version first
+  if (args.includes('-h') || args.includes('--help')) {
+    printHelp();
+    process.exit(0);
+  }
+
+  if (args.includes('-v') || args.includes('--version')) {
+    printVersion();
+    process.exit(0);
+  }
+
+  // Environment variable support
+  let agent = process.env.DEVTAILOR_AGENT || DEFAULT_AGENT;
   let dir = process.cwd();
-  let port = DEFAULT_PORT;
   let daemon = false;
   let command = 'start';
+
+  // First non-flag argument is the directory
+  if (args[0] && !args[0].startsWith('-') && !['stop', 'status', 'agents'].includes(args[0])) {
+    dir = resolve(args[0]);
+    args.shift();
+  }
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     switch (arg) {
+      case '-a':
       case '--agent':
-        agent = args[++i] || agent;
+        if (!args[i + 1]) {
+          console.error('Error: --agent requires a value');
+          console.log('Run with --help for usage information');
+          process.exit(1);
+        }
+        agent = args[++i];
         break;
+
       case '--dir':
       case '--cwd':
-        dir = resolve(args[++i] || dir);
+        if (!args[i + 1]) {
+          console.error('Error: --dir requires a value');
+          console.log('Run with --help for usage information');
+          process.exit(1);
+        }
+        dir = resolve(args[++i]);
         break;
-      case '--port':
-        port = parseInt(args[++i] || String(port), 10);
-        break;
+
+      case '-d':
       case '--daemon':
         daemon = true;
         break;
+
       case 'stop':
       case 'status':
       case 'agents':
         command = arg;
         break;
+
+      default:
+        console.error(`Error: unknown option '${arg}'`);
+        console.log('Run with --help for usage information');
+        process.exit(1);
     }
   }
 
-  return { agent, dir, port, daemon, command };
+  return { agent, dir, daemon, command };
 }
 
 function checkAgent(agent: ResolvedAgent): void {
@@ -67,8 +146,8 @@ function checkAgent(agent: ResolvedAgent): void {
   }
 }
 
-function startDaemon(agent: string, dir: string, port: number): void {
-  const child = spawn(process.execPath, [__filename, '--agent', agent, '--dir', dir, '--port', String(port)], {
+function startDaemon(agent: string, dir: string): void {
+  const child = spawn(process.execPath, [__filename, '--agent', agent, '--dir', dir], {
     detached: true,
     stdio: 'ignore',
   });
@@ -130,7 +209,7 @@ function killProcessOnPort(port: number): void {
 }
 
 async function main(): Promise<void> {
-  const { agent, dir, port, daemon, command } = parseArgs();
+  const { agent, dir, daemon, command } = parseArgs();
 
   if (command === 'agents') {
     printAgents();
@@ -148,19 +227,20 @@ async function main(): Promise<void> {
   }
 
   if (!existsSync(dir)) {
-    console.error(`Error: dir does not exist: ${dir}`);
+    console.error(`Error: directory does not exist: ${dir}`);
+    console.log('Run with --help for usage information');
     process.exit(1);
   }
 
   if (daemon) {
-    startDaemon(agent, dir, port);
+    startDaemon(agent, dir);
     return;
   }
 
   const resolvedAgent = resolveAgent(agent);
   checkAgent(resolvedAgent);
 
-  killProcessOnPort(port);
+  killProcessOnPort(DEFAULT_PORT);
 
   const dataDir = join(dir, '.devtailor');
 
@@ -168,10 +248,10 @@ async function main(): Promise<void> {
   console.log(`  Agent: ${resolvedAgent.label}`);
   console.log(`  Cmd:   ${[resolvedAgent.command, ...resolvedAgent.args].join(' ')}`);
   console.log(`  Dir:   ${dir}`);
-  console.log(`  Port:  ${port}`);
+  console.log(`  Port:  ${DEFAULT_PORT}`);
 
   const server = new WSServer(
-    port,
+    DEFAULT_PORT,
     resolvedAgent.command,
     dir,
     resolvedAgent.args,

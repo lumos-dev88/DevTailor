@@ -54,15 +54,15 @@
         right: 24px;
         top: 84px;
         z-index: 2147483647;
-        width: min(420px, calc(100vw - 32px));
+        width: min(480px, calc(100vw - 32px));
         max-height: min(720px, calc(100vh - 112px));
         display: flex;
         flex-direction: column;
         color: #e2e8f0;
-        background: #111827;
-        border: 1px solid rgba(148, 163, 184, 0.26);
+        background: linear-gradient(135deg, rgba(15,23,42,0.95), rgba(30,41,59,0.92));
+        border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 12px;
-        box-shadow: 0 24px 80px rgba(15, 23, 42, 0.46);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
         font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       .dt-element-save-card * { box-sizing: border-box; }
@@ -71,63 +71,114 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 13px 14px;
+        padding: 12px 14px;
         border-bottom: 1px solid rgba(148, 163, 184, 0.18);
         cursor: grab;
         flex-shrink: 0;
+        background: linear-gradient(135deg, rgba(30,41,59,0.4), rgba(15,23,42,0.2));
       }
       .dt-element-save-card__head.is-dragging {
         cursor: grabbing;
       }
       .dt-element-save-card__title {
         margin: 0;
-        font-size: 14px;
-        font-weight: 750;
-        color: #f8fafc;
+        font-size: 13px;
+        font-weight: 600;
+        color: #f1f5f9;
+        letter-spacing: 0;
         user-select: none;
       }
       .dt-element-save-card__body {
         padding: 14px;
         display: grid;
-        gap: 11px;
+        gap: 12px;
         overflow-y: auto;
         overflow-x: hidden;
         flex: 1;
         min-height: 0;
       }
+      .dt-element-save-card__summary {
+        display: grid;
+        gap: 10px;
+        padding: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.38);
+      }
+      .dt-element-save-card__summary-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+      }
+      .dt-element-save-card__scope-title {
+        color: #e2e8f0;
+        font-size: 12px;
+        font-weight: 650;
+        min-width: 0;
+      }
+      .dt-element-save-card__scope-note {
+        margin-top: 2px;
+        color: #94a3b8;
+        font-size: 11.5px;
+        line-height: 1.45;
+      }
+      .dt-element-save-card__count {
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
+        padding: 0 8px;
+        border-radius: 999px;
+        color: #bfdbfe;
+        background: rgba(59, 130, 246, 0.14);
+        border: 1px solid rgba(96, 165, 250, 0.2);
+        font-size: 11px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .dt-element-save-card__toolbar {
+        display: block;
+      }
+      .dt-element-save-card__search {
+        height: 32px;
+      }
       .dt-element-save-card label {
         display: grid;
-        gap: 5px;
+        gap: 6px;
         color: #94a3b8;
-        font-size: 12px;
+        font-size: 11.5px;
+        font-weight: 500;
       }
       .dt-element-save-card input,
       .dt-element-save-card textarea {
         width: 100%;
-        border: 1px solid rgba(148, 163, 184, 0.28);
+        border: 1px solid rgba(148, 163, 184, 0.2);
         border-radius: 8px;
         color: #f8fafc;
-        background: #0f172a;
+        background: rgba(15, 23, 42, 0.6);
         outline: none;
-        padding: 8px 9px;
-        font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 8px 10px;
+        font: 13px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
       }
       .dt-element-save-card textarea {
         min-height: 70px;
         resize: vertical;
+        line-height: 1.6;
       }
       .dt-element-save-card input:focus,
       .dt-element-save-card textarea:focus {
         border-color: #3b82f6;
-        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+        background: rgba(15, 23, 42, 0.8);
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
       }
       .dt-element-save-card__meta {
         display: grid;
         gap: 5px;
-        padding: 9px;
+        padding: 9px 10px;
         border-radius: 8px;
-        background: rgba(15, 23, 42, 0.74);
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: rgba(0, 0, 0, 0.25);
+        border: 1px solid rgba(148, 163, 184, 0.15);
         color: #94a3b8;
         font-family: "SF Mono", ui-monospace, monospace;
         font-size: 11px;
@@ -135,46 +186,80 @@
       }
       .dt-element-save-card__list {
         display: grid;
-        gap: 9px;
+        gap: 7px;
         min-width: 0;
       }
       .dt-element-save-card__empty {
-        padding: 18px 14px;
+        padding: 20px 14px;
         border: 1px dashed rgba(148, 163, 184, 0.24);
         border-radius: 10px;
         color: #94a3b8;
         text-align: center;
+        font-size: 12px;
       }
       .dt-element-target-card {
         display: grid;
-        gap: 7px;
-        padding: 10px;
-        border-radius: 10px;
-        background: rgba(15, 23, 42, 0.66);
+        gap: 5px;
+        padding: 7px 8px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, rgba(15,23,42,0.5), rgba(30,41,59,0.4));
         border: 1px solid rgba(148, 163, 184, 0.18);
         min-width: 0;
         max-width: 100%;
         overflow: hidden;
+        transition: border-color 0.2s, background 0.2s;
+      }
+      .dt-element-target-card:hover {
+        border-color: rgba(148, 163, 184, 0.28);
+        background: linear-gradient(135deg, rgba(15,23,42,0.65), rgba(30,41,59,0.5));
       }
       .dt-element-target-card__top {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: flex-start;
-        gap: 10px;
+        gap: 8px;
         min-width: 0;
       }
       .dt-element-target-card__name {
-        color: #f8fafc;
-        font-weight: 720;
+        color: #f1f5f9;
+        font-weight: 600;
+        font-size: 12.5px;
         min-width: 0;
         max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .dt-element-target-card__badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        min-width: 0;
+      }
+      .dt-element-target-card__badge {
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
+        height: 18px;
+        padding: 0 6px;
+        border-radius: 999px;
+        color: #94a3b8;
+        background: rgba(100, 116, 139, 0.14);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+        font: 10px/1 "SF Mono", ui-monospace, monospace;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .dt-element-target-card__badge--global {
+        color: #fde68a;
+        background: rgba(245, 158, 11, 0.12);
+        border-color: rgba(251, 191, 36, 0.18);
+      }
       .dt-element-target-card__desc {
         color: #94a3b8;
-        font-size: 12px;
+        font-size: 11px;
+        line-height: 1.35;
         overflow: hidden;
         display: -webkit-box;
         -webkit-line-clamp: 2;
@@ -182,68 +267,125 @@
       }
       .dt-element-target-card__meta {
         color: #64748b;
-        font: 11px/1.4 "SF Mono", ui-monospace, monospace;
+        font: 10px/1.3 "SF Mono", ui-monospace, monospace;
         min-width: 0;
         max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        background: rgba(100, 116, 139, 0.15);
+        padding: 1px 5px;
+        border-radius: 4px;
+        width: fit-content;
+      }
+      .dt-element-target-card__meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        min-width: 0;
       }
       .dt-element-target-card button[data-action="delete-target"] {
         flex-shrink: 0;
-        height: 28px;
-        padding: 0 9px;
+        height: 24px;
+        padding: 0 8px;
         color: #fecaca;
-        background: rgba(239, 68, 68, 0.16);
-        font-size: 12px;
-        line-height: 28px;
+        background: rgba(239, 68, 68, 0.18);
+        border: 1px solid rgba(239, 68, 68, 0.25);
+        border-radius: 5px;
+        font-size: 10.5px;
+        font-weight: 600;
+        line-height: 1;
+        cursor: pointer;
+        transition: all 0.2s;
       }
       .dt-element-target-card button[data-action="delete-target"]:hover {
         color: #fff;
-        background: rgba(239, 68, 68, 0.34);
+        background: rgba(239, 68, 68, 0.3);
+        border-color: rgba(239, 68, 68, 0.4);
+        transform: translateY(-1px);
       }
       .dt-element-save-card details {
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 8px;
-        background: rgba(15, 23, 42, 0.5);
+        background: linear-gradient(135deg, rgba(15, 23, 42, 0.45), rgba(30, 41, 59, 0.35));
+        overflow: hidden;
       }
       .dt-element-save-card summary {
         cursor: pointer;
-        padding: 8px 9px;
+        padding: 9px 10px;
         color: #cbd5e1;
+        font-size: 12px;
+        font-weight: 500;
+        transition: color 0.2s, background 0.2s;
+      }
+      .dt-element-save-card summary:hover {
+        color: #f1f5f9;
+        background: rgba(255, 255, 255, 0.03);
       }
       .dt-element-save-card pre {
         margin: 0;
         max-height: 220px;
         overflow: auto;
-        padding: 0 9px 9px;
+        padding: 10px;
         color: #94a3b8;
         white-space: pre-wrap;
         word-break: break-word;
-        font: 11px/1.45 "SF Mono", ui-monospace, monospace;
+        font: 10.5px/1.5 "SF Mono", ui-monospace, monospace;
+        background: rgba(0, 0, 0, 0.2);
+        border-top: 1px solid rgba(148, 163, 184, 0.12);
       }
       .dt-element-save-card__actions {
         display: flex;
         justify-content: flex-end;
         gap: 8px;
-        padding: 12px 14px 14px;
-        border-top: 1px solid rgba(148, 163, 184, 0.16);
+        padding: 12px 14px;
+        border-top: 1px solid rgba(148, 163, 184, 0.18);
+        background: linear-gradient(135deg, rgba(30,41,59,0.3), rgba(15,23,42,0.2));
         flex-shrink: 0;
       }
       .dt-element-save-card button {
-        height: 34px;
-        padding: 0 13px;
-        border: 0;
-        border-radius: 8px;
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 7px;
         color: #cbd5e1;
-        background: rgba(148, 163, 184, 0.14);
+        background: rgba(148, 163, 184, 0.12);
         cursor: pointer;
-        font: 13px/34px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font: 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-weight: 600;
+        transition: all 0.15s;
       }
-      .dt-element-save-card button:hover { color: #f8fafc; background: rgba(148, 163, 184, 0.22); }
-      .dt-element-save-card button[data-action="save"] { color: #dbeafe; background: #2563eb; }
-      .dt-element-save-card button[data-action="save"]:hover { background: #3b82f6; }
-      .dt-element-save-card button:disabled { opacity: 0.58; cursor: not-allowed; }
+      .dt-element-save-card button:hover {
+        color: #f8fafc;
+        background: rgba(148, 163, 184, 0.2);
+        border-color: rgba(148, 163, 184, 0.28);
+        transform: translateY(-1px);
+      }
+      .dt-element-save-card button[data-action="save"] {
+        color: white;
+        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+        border-color: transparent;
+        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+      }
+      .dt-element-save-card button[data-action="save"]:hover {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+      }
+      .dt-element-save-card button[data-action="start-select"] {
+        color: white;
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        border-color: transparent;
+        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.24);
+      }
+      .dt-element-save-card button[data-action="start-select"]:hover {
+        background: linear-gradient(135deg, #059669 0%, #047857 100%);
+        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.32);
+      }
+      .dt-element-save-card button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none !important;
+      }
     `;
     document.documentElement.appendChild(style);
   }
@@ -423,9 +565,47 @@
     return 'locatorRecipes';
   }
 
+  function targetPageLabel(target) {
+    const pattern = String(target?.pagePattern || '').trim();
+    if (!pattern) return '全站';
+    try {
+      const parsed = new URL(pattern, location.origin);
+      return `${parsed.pathname}${pattern.endsWith('*') ? '*' : ''}`;
+    } catch {
+      return pattern;
+    }
+  }
+
+  function targetSearchText(target) {
+    return [
+      target?.name,
+      target?.description,
+      target?.id,
+      target?.targetId,
+      target?.pagePattern,
+      target?.selector,
+      target?.xpath,
+      bestLocatorSummary(target),
+      target?.semantic?.text,
+      target?.semantic?.label,
+      target?.semantic?.role,
+      target?.context?.sectionTitle,
+      ...(Array.isArray(target?.context?.nearbyTexts) ? target.context.nearbyTexts : []),
+    ].filter(Boolean).join(' ').toLowerCase();
+  }
+
+  function formattedUpdatedAt(target) {
+    const raw = target?.updatedAt || target?.createdAt;
+    if (!raw) return '';
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return '';
+    const pad = value => String(value).padStart(2, '0');
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
   function showLibraryCard() {
     const elementTargets = window.__domReview.elementTargets;
-    if (!elementTargets?.listCurrentPage) {
+    if (!elementTargets?.listAllTargets) {
       window.__domReview.chatPanel?.showHint?.('元素库不可用，请确认 Bridge 已启动');
       return;
     }
@@ -440,8 +620,17 @@
         <button type="button" data-action="cancel" title="关闭">×</button>
       </div>
       <div class="dt-element-save-card__body">
-        <div class="dt-element-save-card__meta">
-          当前页面：${escapeHtml(location.origin + location.pathname)}
+        <div class="dt-element-save-card__summary">
+          <div class="dt-element-save-card__summary-row">
+            <div>
+              <div class="dt-element-save-card__scope-title">项目元素库</div>
+              <div class="dt-element-save-card__scope-note">显示本项目保存的全部元素目标。</div>
+            </div>
+            <div class="dt-element-save-card__count" data-role="target-count">0 个</div>
+          </div>
+          <div class="dt-element-save-card__toolbar">
+            <input class="dt-element-save-card__search" data-field="targetSearch" placeholder="搜索名称、targetId、页面或定位信息" />
+          </div>
         </div>
         <div class="dt-element-save-card__list" data-role="target-list">
           <div class="dt-element-save-card__empty">正在加载元素库…</div>
@@ -456,6 +645,7 @@
 
     saveCard.addEventListener('pointerdown', event => event.stopPropagation());
     saveCard.addEventListener('click', handleSaveCardClick);
+    saveCard.addEventListener('input', handleSaveCardInput);
     saveCard.addEventListener('keydown', (event) => {
       event.stopPropagation();
       if (event.key === 'Escape') closeSaveCard();
@@ -472,19 +662,34 @@
     if (!list) return;
     list.innerHTML = '<div class="dt-element-save-card__empty">正在加载元素库…</div>';
     try {
-      const targets = await window.__domReview.elementTargets.listCurrentPage();
-      renderElementLibrary(targets);
+      const targets = await window.__domReview.elementTargets.listAllTargets();
+      saveCard.__elementTargets = Array.isArray(targets) ? targets : [];
+      renderElementLibrary();
     } catch (err) {
       list.innerHTML = `<div class="dt-element-save-card__empty">加载失败：${escapeHtml(err.message || err)}</div>`;
     }
   }
 
-  function renderElementLibrary(targets) {
+  function renderElementLibrary() {
     if (!saveCard) return;
     const list = saveCard.querySelector('[data-role="target-list"]');
     if (!list) return;
-    if (!Array.isArray(targets) || targets.length === 0) {
-      list.innerHTML = '<div class="dt-element-save-card__empty">当前页面还没有保存元素。点击“选择元素”添加一个。</div>';
+    const allTargets = Array.isArray(saveCard.__elementTargets) ? saveCard.__elementTargets : [];
+    const query = String(saveCard.querySelector('[data-field="targetSearch"]')?.value || '').trim().toLowerCase();
+    const count = saveCard.querySelector('[data-role="target-count"]');
+    if (count) count.textContent = `${allTargets.length} 个`;
+
+    let targets = allTargets.slice();
+    if (query) {
+      targets = targets.filter(target => targetSearchText(target).includes(query));
+    }
+
+    if (!allTargets.length) {
+      list.innerHTML = '<div class="dt-element-save-card__empty">项目里还没有保存元素。点击“选择元素”添加一个常用控件。</div>';
+      return;
+    }
+    if (!targets.length) {
+      list.innerHTML = '<div class="dt-element-save-card__empty">没有匹配的元素目标。换个关键词试试。</div>';
       return;
     }
     list.innerHTML = targets.map(target => `
@@ -493,9 +698,16 @@
           <div class="dt-element-target-card__name" title="${escapeHtml(target.name || '')}">${escapeHtml(target.name || '未命名元素')}</div>
           <button type="button" data-action="delete-target" data-target-id="${escapeHtml(target.id || target.targetId || '')}">删除</button>
         </div>
+        <div class="dt-element-target-card__badges">
+          <span class="dt-element-target-card__badge">${escapeHtml(targetPageLabel(target))}</span>
+          ${!target.pagePattern ? '<span class="dt-element-target-card__badge dt-element-target-card__badge--global">全站可用</span>' : ''}
+          ${formattedUpdatedAt(target) ? `<span class="dt-element-target-card__badge">${escapeHtml(formattedUpdatedAt(target))}</span>` : ''}
+        </div>
         ${target.description ? `<div class="dt-element-target-card__desc">${escapeHtml(target.description)}</div>` : ''}
-        <div class="dt-element-target-card__meta">${escapeHtml(bestLocatorSummary(target))}</div>
-        <div class="dt-element-target-card__meta">targetId: ${escapeHtml(target.id || target.targetId || '')}</div>
+        <div class="dt-element-target-card__meta-row">
+          <div class="dt-element-target-card__meta" title="${escapeHtml(bestLocatorSummary(target))}">${escapeHtml(bestLocatorSummary(target))}</div>
+          <div class="dt-element-target-card__meta" title="targetId: ${escapeHtml(target.id || target.targetId || '')}">targetId: ${escapeHtml(target.id || target.targetId || '')}</div>
+        </div>
       </div>
     `).join('');
   }
@@ -600,6 +812,12 @@
       return;
     }
     if (btn.dataset.action === 'save') submitSaveCard();
+  }
+
+  function handleSaveCardInput(event) {
+    if (event.target?.matches?.('[data-field="targetSearch"]')) {
+      renderElementLibrary();
+    }
   }
 
   async function deleteElementTarget(targetId, btn) {

@@ -26,6 +26,7 @@
         node.id === 'dom-review-host' ||
         node.id === 'dom-review-badges' ||
         node.id === 'dom-review-selector-overlay' ||
+        node.id === 'dom-review-selector-hint' ||
         node.id === 'dom-review-highlights' ||
         node.id === 'devtailor-host' ||
         node.id === 'devtailor-badges' ||

@@ -768,25 +768,6 @@ export class WSServer {
     }
   }
 
-  private pageKey(urlValue: string): string {
-    try {
-      const parsed = new URL(urlValue);
-      return `${parsed.origin}${parsed.pathname}`;
-    } catch {
-      return urlValue.split('?')[0] || '';
-    }
-  }
-
-  private targetMatchesUrl(target: StoredElementTarget, urlValue: string): boolean {
-    if (!urlValue) return true;
-    const pagePattern = target.pagePattern || String(target.payload?.pagePattern || '');
-    if (!pagePattern) return true;
-    const key = this.pageKey(urlValue);
-    if (pagePattern === urlValue || pagePattern === key) return true;
-    if (pagePattern.endsWith('*')) return key.startsWith(pagePattern.slice(0, -1));
-    return false;
-  }
-
   private publicElementTarget(target: StoredElementTarget): Record<string, unknown> {
     return {
       ...target.payload,
@@ -801,10 +782,8 @@ export class WSServer {
     };
   }
 
-  private handleElementTargetsList(url: URL, res: ServerResponse): void {
-    const pageUrl = url.searchParams.get('url') || '';
+  private handleElementTargetsList(_url: URL, res: ServerResponse): void {
     const targets = [...this.elementTargets.values()]
-      .filter(target => this.targetMatchesUrl(target, pageUrl))
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map(target => this.publicElementTarget(target));
     this.sendJson(res, 200, { ok: true, targets });
@@ -882,9 +861,6 @@ export class WSServer {
     try {
       switch (action) {
         case 'get_element_targets': {
-          // Return all targets; the MCP tool description does not filter by URL.
-          // Extension-side listCurrentPage() filters by URL, but Bridge-local
-          // returns all since we don't track the active tab's URL here.
           const targets = [...this.elementTargets.values()]
             .sort((a, b) => b.updatedAt - a.updatedAt)
             .map(target => this.publicElementTarget(target));

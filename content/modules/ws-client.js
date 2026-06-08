@@ -11,8 +11,9 @@
   window.__domReview = window.__domReview || {};
 
   const BRIDGE_URL = 'http://localhost:34781';
-  const MAX_RECONNECT_ATTEMPTS = 3;
   const RECONNECT_BASE_DELAY = 1000;
+  const RECONNECT_MAX_DELAY = 30000;
+  const HEARTBEAT_INTERVAL = 30000; // 30 秒心跳
   const FALLBACK_CLIENT_ID_KEY = 'devtailor:fallback-client-id';
 
   let clientId = null;
@@ -20,6 +21,8 @@
   let status = 'disconnected';
   let reconnectAttempts = 0;
   let reconnectTimer = null;
+  let heartbeatTimer = null;
+  let lastHeartbeatTime = 0;
   let listeners = [];
   let statusListeners = [];
   let projectListeners = [];
@@ -145,31 +148,50 @@
       return;
     }
 
-    events.onopen = () => {
+    events.onopen = async () => {
       console.log('[DevTailor] SSE connected');
       reconnectAttempts = 0;
       setStatus('connected');
+      lastHeartbeatTime = Date.now();
+      startHeartbeat();
 
       // Detect bridge restart (new projectId means all agent sessions are gone)
-      fetch(`${BRIDGE_URL}/health`)
-        .then(r => r.ok ? r.json() : null)
-        .then(info => {
-          if (!info || !info.projectId) return;
-          if (projectInfo && projectInfo.projectId !== info.projectId) {
-            emit({ type: 'session_reset', reason: 'bridge_restarted' });
-          }
-          setProjectInfo(info);
-          if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
-            setActiveClient(info.activeClientId || null);
-          }
-          if (info.activeSessionId || info.activeSessionTitle) {
-            setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
-          }
-        })
-        .catch(() => {});
+      // Use async/await to ensure projectInfo is set before notifying listeners
+      try {
+        const response = await fetch(`${BRIDGE_URL}/health`);
+        if (!response.ok) {
+          console.warn('[DevTailor] Health check failed:', response.status);
+          return;
+        }
+
+        const info = await response.json();
+        if (!info || !info.projectId) {
+          console.warn('[DevTailor] Invalid health response:', info);
+          return;
+        }
+
+        // Detect bridge restart
+        if (projectInfo && projectInfo.projectId !== info.projectId) {
+          emit({ type: 'session_reset', reason: 'bridge_restarted' });
+        }
+
+        // Set project info first (this will trigger projectListeners)
+        setProjectInfo(info);
+
+        // Then set active client and session info
+        if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
+          setActiveClient(info.activeClientId || null);
+        }
+        if (info.activeSessionId || info.activeSessionTitle) {
+          setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
+        }
+      } catch (err) {
+        console.error('[DevTailor] Health check error:', err);
+      }
     };
 
     events.onmessage = (event) => {
+      lastHeartbeatTime = Date.now(); // 收到任何消息都更新心跳时间
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'browser_action') {
@@ -209,9 +231,10 @@
 
   function disconnect(stopReconnect = true) {
     if (stopReconnect) {
-      reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
       clearTimeout(reconnectTimer);
+      reconnectAttempts = 0;
     }
+    stopHeartbeat();
     if (events) {
       events.close();
       events = null;
@@ -219,21 +242,54 @@
     setStatus('disconnected');
   }
 
-  function scheduleReconnect() {
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.warn('[DevTailor] Max SSE reconnect attempts reached');
-      setStatus('disconnected');
-      return;
-    }
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      const timeSinceLastHeartbeat = now - lastHeartbeatTime;
 
+      // 如果超过 60 秒没收到消息，认为连接可能已断开
+      if (timeSinceLastHeartbeat > 60000) {
+        console.warn('[DevTailor] SSE heartbeat timeout, reconnecting...');
+        disconnect(false);
+        scheduleReconnect();
+        return;
+      }
+
+      // 发送心跳请求
+      if (status === 'connected') {
+        fetch(`${BRIDGE_URL}/health`, { method: 'GET' })
+          .then(response => {
+            if (response.ok) {
+              lastHeartbeatTime = now;
+            } else {
+              console.warn('[DevTailor] Heartbeat failed:', response.status);
+            }
+          })
+          .catch(err => {
+            console.warn('[DevTailor] Heartbeat error:', err.message);
+          });
+      }
+    }, HEARTBEAT_INTERVAL);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  }
+
+  function scheduleReconnect() {
     reconnectAttempts++;
-    const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts - 1);
+    const delay = Math.min(RECONNECT_MAX_DELAY, RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts - 1));
     setStatus('connecting');
     reconnectTimer = setTimeout(connect, delay);
   }
 
   function send(payload, options = {}) {
     if (status !== 'connected') {
+      connect();
       return { ok: false, queued: false, status };
     }
     if (!isActiveClient) {
@@ -288,6 +344,7 @@
 
   async function activate() {
     if (status !== 'connected') {
+      connect();
       return { ok: false, status };
     }
 

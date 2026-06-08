@@ -21,8 +21,11 @@
   let candidateCount = 0;
   let overlay = null;
   let label = null;
+  let hint = null;
   let suppressClickUntil = 0;
   let passThrough = false;
+  let quickMark = false;
+  let quickMarkKeyDown = false;
 
   const MARK_COLORS = [
     '#3b82f6', '#ef4444', '#f59e0b', '#22c55e', '#a855f7',
@@ -94,6 +97,43 @@
     document.documentElement.appendChild(overlay);
   }
 
+  function createHint() {
+    if (hint) return;
+    hint = document.createElement('div');
+    hint.id = 'dom-review-selector-hint';
+    hint.style.cssText = [
+      'position: fixed',
+      'left: 50%',
+      'bottom: 22px',
+      'z-index: 2147483646',
+      'transform: translateX(-50%) translateY(8px)',
+      'pointer-events: none',
+      'padding: 8px 11px',
+      'border-radius: 9px',
+      'background: rgba(15, 23, 42, 0.92)',
+      'color: #e2e8f0',
+      'font: 12px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      'box-shadow: 0 14px 36px rgba(15, 23, 42, 0.28)',
+      'border: 1px solid rgba(148, 163, 184, 0.22)',
+      'opacity: 0',
+      'transition: opacity 140ms ease-out, transform 140ms ease-out'
+    ].join(';');
+    document.documentElement.appendChild(hint);
+  }
+
+  function showHint(message) {
+    createHint();
+    hint.textContent = message;
+    hint.style.opacity = '1';
+    hint.style.transform = 'translateX(-50%) translateY(0)';
+  }
+
+  function hideHint() {
+    if (!hint) return;
+    hint.style.opacity = '0';
+    hint.style.transform = 'translateX(-50%) translateY(8px)';
+  }
+
   function clearHighlight() {
     hoveredElement = null;
     candidateCount = 0;
@@ -129,7 +169,9 @@
     overlay.style.top = `${Math.max(0, rect.top)}px`;
     overlay.style.width = `${Math.max(1, rect.width)}px`;
     overlay.style.height = `${Math.max(1, rect.height)}px`;
-    label.textContent = describeElement(hoveredElement);
+    label.textContent = quickMark
+      ? `${describeElement(hoveredElement)} · 快速标记`
+      : describeElement(hoveredElement);
 
     if (rect.top < 28) {
       label.style.top = 'auto';
@@ -170,7 +212,15 @@
 
   function handlePointerMove(e) {
     if (!active || paused) return;
-    if (e.altKey) {
+    quickMark = isQuickMarkEvent(e);
+    if (quickMark) {
+      if (passThrough) {
+        passThrough = false;
+        hideHint();
+        document.documentElement.style.cursor = 'crosshair';
+        emitStateChange();
+      }
+    } else if (e.altKey) {
       enterPassThrough();
       return;
     }
@@ -195,6 +245,10 @@
     return paused ? 'describing' : 'selecting';
   }
 
+  function isQuickMarkEvent(event) {
+    return quickMarkKeyDown || Boolean(event && event.shiftKey);
+  }
+
   function emitStateChange() {
     const state = { active, paused, passThrough, mode: getMode() };
     stateCallbacks.forEach(fn => {
@@ -204,9 +258,12 @@
 
   function enterPassThrough() {
     if (!active || paused || passThrough) return;
+    quickMark = false;
+    quickMarkKeyDown = false;
     passThrough = true;
     document.documentElement.style.cursor = '';
     clearHighlight();
+    showHint('穿透模式：可以直接操作页面元素，松开 Alt 继续标记');
     emitStateChange();
   }
 
@@ -214,6 +271,7 @@
     if (!passThrough) return;
     passThrough = false;
     suppressClickUntil = performance.now() + 250;
+    hideHint();
     if (active && !paused) {
       document.documentElement.style.cursor = 'crosshair';
       if (lastPoint) updateCandidatesFromPoint(lastPoint.x, lastPoint.y);
@@ -222,16 +280,50 @@
   }
 
   function handleKeyDown(e) {
+    if (!active || paused) return;
+    if (e.key === 'Shift') {
+      quickMark = true;
+      quickMarkKeyDown = true;
+      if (passThrough) {
+        passThrough = false;
+        hideHint();
+        suppressClickUntil = 0;
+        document.documentElement.style.cursor = 'crosshair';
+        emitStateChange();
+      }
+      return;
+    }
+    if (isQuickMarkEvent(e)) {
+      quickMark = true;
+      if (passThrough) {
+        passThrough = false;
+        hideHint();
+        suppressClickUntil = 0;
+        document.documentElement.style.cursor = 'crosshair';
+        emitStateChange();
+      }
+      return;
+    }
     if (e.key === 'Alt' || e.altKey) enterPassThrough();
   }
 
   function handleKeyUp(e) {
-    if (e.key === 'Alt') exitPassThrough();
+    if (e.key === 'Shift') {
+      quickMark = false;
+      quickMarkKeyDown = false;
+      return;
+    }
+    if (e.key === 'Alt') {
+      quickMark = false;
+      exitPassThrough();
+    }
   }
 
   function handleClick(e) {
     if (!active || paused) return;
-    if (passThrough || e.altKey) return;
+    const quick = isQuickMarkEvent(e);
+    if (passThrough && !quick) return;
+    if (e.altKey && !quick) return;
     if (hitTest().isOwnElement(e.target)) return;
     if (performance.now() < suppressClickUntil) return;
 
@@ -239,12 +331,20 @@
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const target = hoveredElement || e.target;
+    let target = hoveredElement || e.target;
+    if (quick) {
+      const result = hitTest().pick(e.clientX, e.clientY);
+      target = result.element || target;
+      passThrough = false;
+      quickMark = false;
+      quickMarkKeyDown = false;
+      hideHint();
+    }
     if (!hitTest().isSelectable(target, { allowPointerEventsNone: target === hoveredElement })) return;
 
     clearHighlight();
     selectCallbacks.forEach(fn => {
-      try { fn(target); } catch (err) { console.warn('[DevTailor] selector callback error:', err); }
+      try { fn(target, { quick }); } catch (err) { console.warn('[DevTailor] selector callback error:', err); }
     });
   }
 
@@ -253,6 +353,8 @@
     active = true;
     paused = false;
     passThrough = false;
+    quickMark = false;
+    quickMarkKeyDown = false;
     createOverlay();
     document.documentElement.style.cursor = 'crosshair';
     document.addEventListener('pointermove', handlePointerMove, true);
@@ -270,8 +372,11 @@
     active = false;
     paused = false;
     passThrough = false;
+    quickMark = false;
+    quickMarkKeyDown = false;
     document.documentElement.style.cursor = '';
     clearHighlight();
+    hideHint();
     document.removeEventListener('pointermove', handlePointerMove, true);
     document.removeEventListener('click', handleClick, true);
     window.removeEventListener('keydown', handleKeyDown, true);
@@ -297,9 +402,12 @@
   function pause() {
     if (!active || paused) return;
     passThrough = false;
+    quickMark = false;
+    quickMarkKeyDown = false;
     paused = true;
     document.documentElement.style.cursor = '';
     clearHighlight();
+    hideHint();
     emitStateChange();
   }
 
@@ -307,6 +415,8 @@
     if (!active || !paused) return;
     paused = false;
     passThrough = false;
+    quickMark = false;
+    quickMarkKeyDown = false;
     suppressClickUntil = performance.now() + 250;
     document.documentElement.style.cursor = 'crosshair';
     if (lastPoint) updateCandidatesFromPoint(lastPoint.x, lastPoint.y);

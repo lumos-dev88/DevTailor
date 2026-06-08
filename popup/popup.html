@@ -5,37 +5,44 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      width: 340px;
-      padding: 16px;
+      width: 330px;
+      padding: 0;
       font-family: system-ui, -apple-system, sans-serif;
-      font-size: 14px;
-      background: #1e293b;
+      font-size: 13px;
+      background: #0f172a;
       color: #f8fafc;
     }
     .header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 14px;
+      padding: 14px 14px 10px;
+      background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     }
     .header h2 {
       font-size: 16px;
       font-weight: 700;
+      letter-spacing: -0.3px;
     }
     .badge {
       background: #ef4444;
       color: white;
-      border-radius: 12px;
-      min-width: 22px;
-      height: 22px;
+      border-radius: 10px;
+      min-width: 18px;
+      height: 18px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      font-size: 12px;
+      font-size: 10px;
       font-weight: 700;
-      padding: 0 6px;
+      padding: 0 5px;
+      box-shadow: 0 2px 4px rgba(239, 68, 68, 0.3);
     }
-    .badge--zero { background: #475569; }
+    .badge--zero {
+      background: #334155;
+      box-shadow: none;
+    }
     .header-right {
       display: flex;
       align-items: center;
@@ -51,115 +58,139 @@
     }
     .toggle-track {
       display: block;
-      width: 34px;
-      height: 18px;
-      border-radius: 9px;
-      background: #475569;
+      width: 38px;
+      height: 22px;
+      border-radius: 11px;
+      background: #334155;
       position: relative;
       transition: background 0.2s;
       pointer-events: none;
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
     }
     .toggle-thumb {
       display: block;
-      width: 14px;
-      height: 14px;
+      width: 18px;
+      height: 18px;
       border-radius: 50%;
-      background: #94a3b8;
+      background: #64748b;
       position: absolute;
       top: 2px;
       left: 2px;
       transition: transform 0.2s, background 0.2s;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     }
-    .toggle-btn.active .toggle-track { background: #3b82f6; }
-    .toggle-btn.active .toggle-thumb { transform: translateX(16px); background: #f8fafc; }
-    body.disabled #main-content,
+    .toggle-btn.active .toggle-track {
+      background: #3b82f6;
+      box-shadow: inset 0 1px 3px rgba(59, 130, 246, 0.3);
+    }
+    .toggle-btn.active .toggle-thumb {
+      transform: translateX(16px);
+      background: #f8fafc;
+    }
+
     body.disabled #no-page,
-    body.disabled .status,
-    body.disabled .divider:first-of-type { opacity: 0.35; pointer-events: none; }
-    .status {
-      font-size: 13px;
-      color: #94a3b8;
-      margin-bottom: 14px;
-      line-height: 1.5;
+    body.disabled .section { opacity: 0.4; pointer-events: none; }
+
+    .content {
+      padding: 12px;
+      max-height: 480px;
+      overflow-y: auto;
     }
-    .status strong { color: #f8fafc; }
-    .divider {
-      border: none;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-      margin: 12px 0;
+
+    .section {
+      margin-bottom: 16px;
     }
+    .section:first-child {
+      margin-top: 0;
+    }
+    .section:last-child {
+      margin-bottom: 0;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
     .section-title {
       font-size: 11px;
       font-weight: 600;
-      color: #64748b;
+      color: #94a3b8;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      margin-bottom: 8px;
+    }
+
+    .section-badge {
+      font-size: 9px;
+      color: #64748b;
+      background: #1e293b;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-weight: 500;
     }
     .btn-group {
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 8px;
     }
     .btn {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       width: 100%;
-      padding: 8px 12px;
-      border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      background: #334155;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: #1e293b;
       color: #f8fafc;
       font-size: 13px;
+      font-weight: 500;
       font-family: system-ui, -apple-system, sans-serif;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: all 0.15s;
     }
-    .btn:hover { background: #475569; }
-    .btn:active { transform: scale(0.98); }
-    .btn--primary { background: #3b82f6; border-color: #3b82f6; }
-    .btn--primary:hover { background: #2563eb; }
-    .btn-icon { font-size: 16px; flex-shrink: 0; width: 20px; text-align: center; }
-    .btn-label { flex: 1; text-align: left; }
-    .prompt-group { margin-top: 6px; display: none; flex-direction: column; gap: 4px; }
-    .prompt-group.open { display: flex; }
-    .prompt-btn {
-      display: block;
-      width: 100%;
-      padding: 7px 10px;
-      border-radius: 5px;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      background: #1e293b;
-      color: #94a3b8;
-      font-size: 12px;
-      font-family: system-ui, -apple-system, sans-serif;
-      cursor: pointer;
+    .btn:hover {
+      background: #334155;
+      border-color: rgba(255, 255, 255, 0.12);
+      transform: translateY(-1px);
+    }
+    .btn:active { transform: translateY(0); }
+    .btn--primary {
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      border-color: transparent;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+    }
+    .btn--primary:hover {
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    }
+    .btn-icon {
+      font-size: 18px;
+      flex-shrink: 0;
+      width: 20px;
+      text-align: center;
+      opacity: 0.9;
+    }
+    .btn-label {
+      flex: 1;
       text-align: left;
-      transition: background 0.15s, color 0.15s;
     }
-    .prompt-btn:hover { background: #334155; color: #f8fafc; }
-    .toast {
-      display: none;
-      position: fixed;
-      bottom: 12px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: #22c55e;
-      color: white;
-      padding: 6px 14px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      z-index: 100;
-      pointer-events: none;
+
+    .card {
+      background: #1e293b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 12px;
     }
-    .toast.show { display: block; }
+
     .no-page {
       color: #64748b;
-      font-size: 13px;
+      font-size: 12px;
       text-align: center;
-      padding: 20px 0;
+      padding: 20px 12px;
+      line-height: 1.6;
     }
 
     /* Allowed Sites */
@@ -167,84 +198,115 @@
       list-style: none;
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 6px;
+      margin-bottom: 8px;
     }
     .site-item {
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 5px 8px;
-      border-radius: 5px;
-      background: #334155;
-      font-size: 12px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      background: #1e293b;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 11px;
       font-family: 'SF Mono', 'Consolas', monospace;
       color: #cbd5e1;
+      transition: background 0.15s, border-color 0.15s;
     }
-    .site-item--default { opacity: 0.7; }
+    .site-item:hover {
+      background: #334155;
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+    .site-item--default {
+      opacity: 0.6;
+      border-style: dashed;
+    }
     .site-label {
       flex: 1;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
     }
     .site-tag {
-      font-size: 10px;
+      font-size: 8px;
       font-family: system-ui, -apple-system, sans-serif;
       color: #64748b;
-      background: #1e293b;
-      padding: 1px 6px;
+      background: #0f172a;
+      padding: 2px 5px;
       border-radius: 3px;
       flex-shrink: 0;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      font-weight: 600;
     }
     .site-remove {
       background: none;
       border: none;
       color: #64748b;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 15px;
       line-height: 1;
-      padding: 0 2px;
+      padding: 2px 3px;
       flex-shrink: 0;
       transition: color 0.15s;
+      border-radius: 3px;
     }
-    .site-remove:hover { color: #ef4444; }
+    .site-remove:hover {
+      color: #ef4444;
+      background: rgba(239, 68, 68, 0.1);
+    }
     .add-site-row {
       display: flex;
       gap: 6px;
-      margin-top: 8px;
     }
     .add-site-input {
       flex: 1;
-      padding: 6px 8px;
-      border-radius: 5px;
+      min-width: 0;
+      padding: 7px 8px;
+      border-radius: 6px;
       border: 1px solid rgba(255, 255, 255, 0.1);
-      background: #0f172a;
+      background: #1e293b;
       color: #f8fafc;
-      font-size: 12px;
+      font-size: 11px;
       font-family: 'SF Mono', 'Consolas', monospace;
       outline: none;
+      transition: border-color 0.15s, background 0.15s;
     }
     .add-site-input::placeholder { color: #475569; }
-    .add-site-input:focus { border-color: #3b82f6; }
+    .add-site-input:focus {
+      border-color: #3b82f6;
+      background: #0f172a;
+    }
     .add-site-btn {
-      padding: 6px 12px;
-      border-radius: 5px;
+      padding: 7px 12px;
+      border-radius: 6px;
       border: none;
       background: #3b82f6;
       color: white;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
       font-family: system-ui, -apple-system, sans-serif;
       cursor: pointer;
       flex-shrink: 0;
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.15s;
     }
-    .add-site-btn:hover { background: #2563eb; }
+    .add-site-btn:hover {
+      background: #2563eb;
+      transform: translateY(-1px);
+    }
+    .add-site-btn:active { transform: translateY(0); }
     .add-site-error {
       display: none;
-      font-size: 11px;
+      font-size: 10px;
       color: #f87171;
-      margin-top: 4px;
+      margin-top: 6px;
+      padding: 6px 8px;
+      background: rgba(239, 68, 68, 0.1);
+      border-radius: 4px;
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      line-height: 1.4;
     }
     .size-presets {
       display: grid;
@@ -253,23 +315,28 @@
     }
     .size-preset {
       border: 1px solid rgba(255, 255, 255, 0.08);
-      background: #334155;
+      background: #1e293b;
       color: #cbd5e1;
-      border-radius: 6px;
-      padding: 7px 6px;
-      font-size: 12px;
+      border-radius: 7px;
+      padding: 8px 6px;
+      font-size: 11px;
       font-weight: 600;
       cursor: pointer;
-      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      transition: all 0.15s;
+      text-align: center;
     }
     .size-preset:hover {
-      background: #475569;
+      background: #334155;
+      border-color: rgba(255, 255, 255, 0.15);
       color: #f8fafc;
+      transform: translateY(-1px);
     }
+    .size-preset:active { transform: translateY(0); }
     .size-preset.active {
       background: #3b82f6;
       border-color: #3b82f6;
       color: #fff;
+      box-shadow: 0 2px 6px rgba(59, 130, 246, 0.3);
     }
     .custom-size-row {
       display: none;
@@ -280,33 +347,85 @@
     .custom-size-row.show { display: grid; }
     .size-apply {
       grid-column: 1 / -1;
-      padding: 7px 10px;
-      border-radius: 5px;
+      padding: 8px 10px;
+      border-radius: 6px;
       border: none;
       background: #3b82f6;
       color: white;
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
       cursor: pointer;
+      transition: background 0.15s, transform 0.15s;
     }
+    .size-apply:hover {
+      background: #2563eb;
+      transform: translateY(-1px);
+    }
+    .size-apply:active { transform: translateY(0); }
     .size-input {
       min-width: 0;
       padding: 7px 8px;
-      border-radius: 5px;
+      border-radius: 6px;
       border: 1px solid rgba(255, 255, 255, 0.1);
       background: #0f172a;
       color: #f8fafc;
-      font-size: 12px;
+      font-size: 11px;
       font-family: 'SF Mono', 'Consolas', monospace;
       outline: none;
+      text-align: center;
+      transition: border-color 0.15s;
+    }
+    .size-input::placeholder {
+      color: #475569;
+      font-size: 10px;
     }
     .size-input:focus { border-color: #3b82f6; }
     .size-hint {
       margin-top: 6px;
       color: #64748b;
-      font-size: 11px;
-      line-height: 1.4;
+      font-size: 10px;
+      line-height: 1.5;
     }
+
+    .toast {
+      display: none;
+      position: fixed;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #22c55e;
+      color: white;
+      padding: 7px 14px;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      z-index: 100;
+      pointer-events: none;
+      box-shadow: 0 4px 12px rgba(34, 197, 94, 0.4);
+    }
+    .toast.show {
+      display: block;
+      animation: toast-in 0.2s ease-out;
+    }
+    @keyframes toast-in {
+      from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+    }
+
+    /* Scrollbar */
+    .content::-webkit-scrollbar { width: 5px; }
+    .content::-webkit-scrollbar-track { background: transparent; }
+    .content::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    .content::-webkit-scrollbar-thumb:hover { background: #475569; }
   </style>
 </head>
 <body>
@@ -319,49 +438,42 @@
       </button>
     </div>
   </div>
-  <div class="status" id="status">加载中...</div>
-  <hr class="divider">
 
-  <div id="main-content">
-    <div class="section-title">侧边栏</div>
-    <div class="btn-group">
-      <button class="btn btn--primary" id="btn-toggle-sidebar">
-        <span class="btn-icon">&#9776;</span>
-        <span class="btn-label">切换侧边栏</span>
-      </button>
+  <div class="content">
+    <div id="no-page" class="no-page" style="display:none;">
+      此页面未激活扩展<br>
+      请在下方添加站点或访问已允许的页面
     </div>
-  </div>
 
-  <div id="no-page" class="no-page" style="display:none;">
-    扩展在此页面未激活。<br>请在下方添加当前站点，或打开已允许的页面。
-  </div>
+    <div id="panel-size-section" class="section">
+      <div class="section-header">
+        <div class="section-title">悬浮卡片尺寸</div>
+      </div>
+      <div class="size-presets" id="size-presets">
+        <button class="size-preset" data-size-mode="compact">紧凑</button>
+        <button class="size-preset" data-size-mode="default">默认</button>
+        <button class="size-preset" data-size-mode="wide">宽屏</button>
+        <button class="size-preset" data-size-mode="custom">自定义</button>
+      </div>
+      <div class="custom-size-row" id="custom-size-row">
+        <input class="size-input" id="custom-width" type="number" min="320" max="960" step="10" placeholder="宽度">
+        <input class="size-input" id="custom-height" type="number" min="420" max="900" step="10" placeholder="高度">
+        <button class="size-apply" id="custom-size-apply">应用尺寸</button>
+      </div>
+      <div class="size-hint">调整页面中 DevTailor 聊天面板的宽度和高度</div>
+    </div>
 
-  <hr class="divider">
-  <div id="panel-size-section">
-    <div class="section-title">悬浮卡片尺寸</div>
-    <div class="size-presets" id="size-presets">
-      <button class="size-preset" data-size-mode="compact">紧凑</button>
-      <button class="size-preset" data-size-mode="default">默认</button>
-      <button class="size-preset" data-size-mode="wide">宽屏</button>
-      <button class="size-preset" data-size-mode="custom">自定义</button>
+    <div id="allowed-sites-section" class="section">
+      <div class="section-header">
+        <div class="section-title">允许的站点</div>
+      </div>
+      <ul class="site-list" id="site-list"></ul>
+      <div class="add-site-row">
+        <input type="text" class="add-site-input" id="add-site-input" placeholder="例如: 192.168.1.50:3000">
+        <button class="add-site-btn" id="add-site-btn">添加</button>
+      </div>
+      <div class="add-site-error" id="add-site-error"></div>
     </div>
-    <div class="custom-size-row" id="custom-size-row">
-      <input class="size-input" id="custom-width" type="number" min="320" max="960" step="10" placeholder="宽度">
-      <input class="size-input" id="custom-height" type="number" min="420" max="900" step="10" placeholder="高度">
-      <button class="size-apply" id="custom-size-apply">应用</button>
-    </div>
-    <div class="size-hint" id="size-hint">用于调整页面中的 DevTailor 聊天卡片宽度和高度。</div>
-  </div>
-
-  <hr class="divider">
-  <div id="allowed-sites-section">
-    <div class="section-title">允许的站点</div>
-    <ul class="site-list" id="site-list"></ul>
-    <div class="add-site-row">
-      <input type="text" class="add-site-input" id="add-site-input" placeholder="192.168.1.50:3000">
-      <button class="add-site-btn" id="add-site-btn">添加</button>
-    </div>
-    <div class="add-site-error" id="add-site-error"></div>
   </div>
 
   <div class="toast" id="toast">已复制！</div>

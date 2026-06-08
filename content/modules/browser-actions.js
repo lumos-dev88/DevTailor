@@ -558,7 +558,9 @@
       case 'request_user_assistance':
         return requestUserAssistance(params);
       case 'get_element_targets':
-        return { targets: await window.__domReview.elementTargets?.listCurrentPage?.() || [] };
+        return {
+          targets: await window.__domReview.elementTargets?.listAllTargets?.() || [],
+        };
       case 'save_element_target': {
         const target = await window.__domReview.elementTargets?.savePayload?.(params);
         return { target };
@@ -575,7 +577,7 @@
           return { deleted: targetId };
         }
         // Delete by name: list and find matching
-        const targets = await window.__domReview.elementTargets?.listCurrentPage?.() || [];
+        const targets = await window.__domReview.elementTargets?.listAllTargets?.() || [];
         const match = targets.find(t => String(t.name || '').trim().toLowerCase() === String(targetName).trim().toLowerCase());
         if (!match) {
           throw new Error(`Element target not found by name: ${targetName}`);

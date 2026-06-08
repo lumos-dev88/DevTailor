@@ -339,7 +339,7 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     assert.strictEqual(response.text, '');
   });
 
-  it('saves, lists, and deletes element targets for the current page', async () => {
+  it('saves, lists, and deletes project element targets', async () => {
     const saved = await postJson('/element-targets', {
       name: '登录按钮',
       description: '登录表单提交按钮',
@@ -354,7 +354,7 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     assert.strictEqual(saved.body.ok, true);
     assert.ok(saved.body.target.targetId);
 
-    const listed = await getJson('/element-targets?url=http%3A%2F%2Flocalhost%3A3000%2Flogin%3Fdebug%3D2');
+    const listed = await getJson('/element-targets');
     assert.strictEqual(listed.status, 200);
     assert.ok(listed.body.targets.some((target: any) => target.targetId === saved.body.target.targetId));
 

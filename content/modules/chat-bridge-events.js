@@ -108,10 +108,15 @@
     }
 
     function appendStream(delta) {
-      ensureStreamAtTail();
+      const wasCreated = ensureStreamAtTail();
       if (!activeStreamId) return;
-      markLastPendingToolCompleted();
+
+      // Only mark tool completed if we're continuing an existing stream
+      if (!wasCreated) {
+        markLastPendingToolCompleted();
+      }
       closeActiveThinking();
+
       const msg = messages.find(m => m.id === activeStreamId);
       if (!msg) return;
       msg.content += delta;
@@ -121,27 +126,44 @@
     }
 
     function ensureStreamAtTail() {
+      // No active stream, create new one
       if (!activeStreamId) {
         startStream();
-        return;
+        return true;
       }
+
       const idx = messages.findIndex(m => m.id === activeStreamId);
+
+      // Stream message was removed, create new one
       if (idx === -1) {
         activeStreamId = null;
         startStream();
-        return;
+        return true;
       }
+
+      // Stream is not at tail (other messages inserted after it), end old stream and create new one
       if (idx < messages.length - 1) {
-        activeStreamId = null;
+        endStream();
         startStream();
+        return true;
       }
+
+      // Stream is at tail, continue using it
+      return false;
     }
 
     function markLastPendingToolCompleted() {
       const lastTool = [...messages].reverse().find(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
-      if (lastTool) {
+      if (!lastTool) return false;
+
+      // Only mark as completed if we're actively streaming (which means the tool succeeded)
+      // If there's no active stream, the tool might have failed or been interrupted
+      if (activeStreamId) {
         lastTool.status = 'completed';
+        return true;
       }
+
+      return false;
     }
 
     function endStream() {
@@ -303,6 +325,12 @@
           setRequestInFlight(false);
           if (msg.reason === 'cancelled') {
             showHint('任务已停止');
+          } else {
+            // Mark any remaining pending tools as completed on successful completion
+            const pendingTools = messages.filter(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
+            pendingTools.forEach(tool => {
+              tool.status = 'completed';
+            });
           }
           renderMessages();
           followLatestIfPinned();
@@ -314,7 +342,7 @@
           endStream();
           const errMsg = msg.message || 'Unknown error';
           if (/session|agent|process|exited|killed|not ready|eprconnreset/i.test(errMsg)) {
-            addMessage('assistant', 'text', `⚠️ Claude Code 会话异常：${errMsg}\n\n下一条消息将自动重建会话。`);
+            addMessage('assistant', 'text', `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#f59e0b;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg> Claude Code 会话异常：${errMsg}\n\n下一条消息将自动重建会话。`);
           } else {
             addMessage('assistant', 'text', 'Error: ' + errMsg);
           }
@@ -327,7 +355,7 @@
           break;
         }
         case 'session_reset':
-          addMessage('assistant', 'text', '♻️ Claude Code 会话已重建，可以继续发送消息。');
+          addMessage('assistant', 'text', '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#10b981;"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg> Claude Code 会话已重建，可以继续发送消息。');
           setRequestInFlight(false);
           refreshSendState();
           flushQueue();

@@ -220,14 +220,14 @@ npm run build
 入口：
 
 - 顶部「存元素」按钮打开元素库卡片。
-- 卡片内可以查看、刷新、删除当前页面元素目标。
+- 卡片内可以查看、搜索、刷新、删除项目元素目标。
 - 点击「选择元素」进入一次性元素保存流程。
 
 数据：
 
 - 存储在 Bridge 的 `element_targets` 表。
-- 前端通过 `/element-targets` GET/POST/DELETE 管理。
-- Browser MCP 可通过 `get_element_targets` 获取，通过 `targetId` / `targetName` 使用。
+- 前端通过 `/element-targets` GET/POST/DELETE 管理；元素库卡片展示项目全量。
+- Browser MCP 可通过 `get_element_targets` 获取项目全量，通过 `targetId` / `targetName` 使用。
 
 定位策略：
 

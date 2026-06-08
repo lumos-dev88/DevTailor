@@ -31,6 +31,10 @@
     let sentMarkIds = [];
     let pendingQueue = [];
     let currentSessionId = null;
+    let flushTimer = null;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [100, 500, 2000]; // Progressive backoff
 
     function isRequestInFlight() {
       return requestInFlight;
@@ -61,7 +65,7 @@
       if (!promptBuilder || !wsClient) {
         console.warn('[DevTailor] promptBuilder or wsClient not loaded');
         addMessage('assistant', 'text', 'DevTailor Bridge 客户端未加载，请刷新页面后重试。');
-        return;
+        return { ok: false, error: 'Client not loaded' };
       }
 
       const payload = promptBuilder.buildPayload(marks, text, attachedImages);
@@ -70,11 +74,12 @@
         pendingQueue.unshift({ text, marks, images: attachedImages });
         showHint('发送失败，已重新加入队列');
         refreshSendState();
-        return;
+        return { ok: false, error: result.error };
       }
 
       sentMarkIds = marks.map(mark => mark.id);
       requestInFlight = true;
+      retryCount = 0; // Reset retry count on successful send
       addMessage('user', 'text', text || (attachedImages.length ? `发送 ${attachedImages.length} 张图片` : `发送 ${marks.length} 个标记`), {
         images: attachedImages,
         image: attachedImages[0] || null,
@@ -82,20 +87,70 @@
       startLoading?.();
       refreshSendState();
       schedulePersist();
+      return { ok: true };
     }
 
     function flushQueue() {
-      if (pendingQueue.length === 0) return;
-      if (requestInFlight) return;
-      const wsClient = getWsClient?.();
-      if (!wsClient || wsClient.getStatus() !== 'connected') return;
+      clearTimeout(flushTimer);
 
-      const next = pendingQueue.shift();
-      executeSend(next.text, next.marks, next.images || next.screenshot);
-
-      if (pendingQueue.length > 0) {
-        setTimeout(flushQueue, 300);
+      if (pendingQueue.length === 0) {
+        retryCount = 0;
+        return;
       }
+
+      if (requestInFlight) {
+        // Wait for current request to finish
+        flushTimer = setTimeout(flushQueue, 500);
+        return;
+      }
+
+      const wsClient = getWsClient?.();
+      if (!wsClient || wsClient.getStatus() !== 'connected') {
+        // Not connected, retry with backoff
+        const delay = retryCount < RETRY_DELAYS.length ? RETRY_DELAYS[retryCount] : 2000;
+        retryCount = Math.min(retryCount + 1, MAX_RETRIES);
+        flushTimer = setTimeout(flushQueue, delay);
+        return;
+      }
+
+      // Connection OK, try to send next message
+      const next = pendingQueue[0]; // Peek, don't shift yet
+      const result = executeSend(next.text, next.marks, next.images || next.screenshot);
+
+      if (result.ok) {
+        // Success, remove from queue
+        pendingQueue.shift();
+        retryCount = 0;
+
+        // Process next item if queue not empty
+        if (pendingQueue.length > 0) {
+          flushTimer = setTimeout(flushQueue, 100);
+        }
+      } else {
+        // Failed to send, retry with backoff
+        if (retryCount < MAX_RETRIES) {
+          const delay = RETRY_DELAYS[retryCount] || 2000;
+          retryCount++;
+          flushTimer = setTimeout(flushQueue, delay);
+        } else {
+          // Max retries reached, give up on this message
+          pendingQueue.shift();
+          retryCount = 0;
+          showHint('消息发送失败次数过多，已跳过');
+
+          // Try next message
+          if (pendingQueue.length > 0) {
+            flushTimer = setTimeout(flushQueue, 500);
+          }
+        }
+      }
+    }
+
+    function clearQueue() {
+      clearTimeout(flushTimer);
+      pendingQueue = [];
+      retryCount = 0;
+      refreshSendState();
     }
 
     function handleSend() {
@@ -279,6 +334,7 @@
       clearSentMarks,
       executeSend,
       flushQueue,
+      clearQueue,
       handleSend,
       handleStop,
       updateSendButton,

@@ -139,11 +139,26 @@ async function injectDevTailorIntoTab(tabId) {
   try {
     const existing = await chrome.scripting.executeScript({
       target: { tabId },
-      func: () => Boolean(window.__domReview && window.__domReview.ui)
+      func: () => Boolean(window.__domReview && window.__domReview.ui && window.__domReview.wsClient)
     });
     if (existing && existing[0] && existing[0].result) {
       return { injected: false, alreadyInjected: true };
     }
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        [
+          'dom-review-host',
+          'dom-review-badges',
+          'dom-review-highlights',
+          'dom-review-selector-overlay',
+          'dom-review-selector-hint',
+          'devtailor-host',
+          'devtailor-badges',
+          'devtailor-highlights'
+        ].forEach(id => document.getElementById(id)?.remove());
+      }
+    });
     await chrome.scripting.executeScript({
       target: { tabId },
       files: MAIN_WORLD_START_SCRIPTS,
@@ -177,11 +192,13 @@ registerDynamicScripts();
 
 // --- Keyboard shortcut: toggle sidebar ---
 
-function toggleSidebar(tabId) {
-  chrome.scripting.executeScript({
+async function toggleSidebar(tabId) {
+  await injectDevTailorIntoTab(tabId);
+  return chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
       if (window.__domReview && window.__domReview.ui) {
+        window.__domReview.wsClient?.connect?.();
         window.__domReview.ui.toggleSidebar();
         return window.__domReview.ui.isSidebarVisible();
       }
@@ -395,6 +412,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GET_TAB_ID') {
     sendResponse({ tabId: sender.tab?.id ?? null });
     return false;
+  }
+
+  if (message.type === 'ENSURE_INJECTED') {
+    (async () => {
+      const tabId = message.tabId || sender.tab?.id || null;
+      const result = await injectDevTailorIntoTab(tabId);
+      sendResponse(result);
+    })();
+    return true;
   }
 
   if (message.type === 'CAPTURE_VISIBLE_TAB') {

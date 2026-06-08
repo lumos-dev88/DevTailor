@@ -434,10 +434,10 @@
     .dt-chat-messages {
       flex: 1;
       overflow-y: auto;
-      padding: 10px 12px;
+      padding: 12px 14px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 14px;
     }
 
     .dt-chat-jump {
@@ -503,30 +503,31 @@
 
     .dt-chat-empty {
       margin: auto;
-      max-width: 260px;
-      color: var(--dt-text-muted);
-      font-size: 12px;
-      line-height: 1.55;
+      max-width: 280px;
+      color: #64748b;
+      font-size: 12.5px;
+      line-height: 1.6;
       text-align: center;
+      padding: 20px;
     }
 
     /* === Chat Message === */
     .dt-chat-msg {
-      max-width: 92%;
-      font-size: 12px;
-      line-height: 1.6;
+      max-width: 94%;
+      font-size: 13px;
+      line-height: 1.65;
       word-break: break-word;
       color: var(--dt-text-primary);
     }
     .dt-chat-md p {
-      margin: 0 0 8px;
+      margin: 0 0 10px;
     }
     .dt-chat-md p:last-child {
       margin-bottom: 0;
     }
     .dt-chat-md strong {
-      font-weight: 700;
-      color: #fff;
+      font-weight: 600;
+      color: #e2e8f0;
     }
     .dt-chat-md h1,
     .dt-chat-md h2,
@@ -534,105 +535,137 @@
     .dt-chat-md h4,
     .dt-chat-md h5,
     .dt-chat-md h6 {
-      margin: 10px 0 6px;
-      font-size: 13px;
-      line-height: 1.35;
-      color: #fff;
+      margin: 14px 0 8px;
+      font-size: 14px;
+      line-height: 1.4;
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+    .dt-chat-md h1:first-child,
+    .dt-chat-md h2:first-child,
+    .dt-chat-md h3:first-child,
+    .dt-chat-md h4:first-child,
+    .dt-chat-md h5:first-child,
+    .dt-chat-md h6:first-child {
+      margin-top: 0;
     }
     .dt-chat-md ul {
-      margin: 4px 0 8px;
-      padding-left: 18px;
+      margin: 6px 0 10px;
+      padding-left: 20px;
     }
     .dt-chat-md ol {
-      margin: 4px 0 8px;
-      padding-left: 18px;
+      margin: 6px 0 10px;
+      padding-left: 20px;
     }
     .dt-chat-md li {
-      margin: 2px 0;
+      margin: 3px 0;
+      line-height: 1.6;
     }
     .dt-chat-md blockquote {
-      margin: 8px 0;
-      padding-left: 10px;
-      border-left: 2px solid rgba(59,130,246,0.65);
+      margin: 10px 0;
+      padding: 8px 0 8px 12px;
+      border-left: 3px solid rgba(59,130,246,0.5);
       color: var(--dt-text-secondary);
+      font-style: italic;
     }
     .dt-chat-md code {
       font-family: var(--dt-font-mono);
-      font-size: 11px;
-      padding: 1px 4px;
+      font-size: 11.5px;
+      padding: 2px 6px;
       border-radius: 4px;
-      background: rgba(255,255,255,0.08);
-      color: #e8eefc;
+      background: rgba(100, 116, 139, 0.25);
+      color: #cbd5e1;
+      border: 1px solid rgba(148, 163, 184, 0.15);
     }
     .dt-chat-md pre {
-      margin: 8px 0;
-      padding: 8px;
+      margin: 10px 0;
+      padding: 10px 12px;
       overflow-x: auto;
       border-radius: var(--dt-radius-sm);
-      background: rgba(0,0,0,0.24);
-      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.2);
     }
     .dt-chat-md pre code {
       padding: 0;
       background: transparent;
+      border: none;
       white-space: pre;
+      color: #e2e8f0;
     }
     .dt-chat-md a {
-      color: #93c5fd;
+      color: #60a5fa;
       text-decoration: none;
+      border-bottom: 1px solid rgba(96, 165, 250, 0.3);
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .dt-chat-md a:hover {
+      color: #93c5fd;
+      border-bottom-color: rgba(147, 197, 253, 0.6);
     }
     .dt-chat-md table {
       width: 100%;
-      margin: 8px 0;
+      margin: 10px 0;
       border-collapse: collapse;
-      font-size: 11px;
+      font-size: 12px;
     }
     .dt-chat-md th,
     .dt-chat-md td {
-      padding: 5px 6px;
-      border: 1px solid rgba(255,255,255,0.1);
+      padding: 6px 8px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
       text-align: left;
+    }
+    .dt-chat-md th {
+      background: rgba(51, 65, 85, 0.4);
+      font-weight: 600;
+      color: var(--dt-text-primary);
     }
     .dt-chat-md img {
       max-width: 100%;
       border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(255,255,255,0.12);
+      border: 1px solid rgba(148, 163, 184, 0.25);
     }
     .dt-chat-msg--user {
       align-self: flex-end;
       width: fit-content;
-      max-width: min(72%, 300px);
-      padding: 7px 9px;
-      border-radius: var(--dt-radius-sm);
-      background: var(--dt-accent);
+      max-width: min(75%, 320px);
+      padding: 9px 12px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
       color: white;
-      border-bottom-right-radius: 2px;
+      border-bottom-right-radius: 3px;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
     }
     .dt-chat-msg--user > div {
-      max-width: 240px;
+      max-width: 280px;
+      line-height: 1.5;
     }
     .dt-chat-attachment {
       display: block;
-      width: 160px;
+      width: 180px;
       max-width: 100%;
-      max-height: 112px;
+      max-height: 120px;
       object-fit: contain;
-      margin-top: 7px;
+      margin-top: 8px;
       border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(255,255,255,0.3);
-      background: rgba(255,255,255,0.9);
+      border: 1px solid rgba(255,255,255,0.4);
+      background: rgba(255,255,255,0.95);
       cursor: zoom-in;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .dt-chat-attachment:hover {
+      transform: scale(1.02);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
     .dt-chat-attachments {
       display: flex;
       flex-wrap: wrap;
-      gap: 7px;
-      margin-top: 7px;
+      gap: 8px;
+      margin-top: 8px;
     }
     .dt-chat-attachments .dt-chat-attachment {
       margin-top: 0;
-      width: 132px;
-      max-height: 96px;
+      width: 140px;
+      max-height: 100px;
     }
 
     /* === Legacy tool msg (kept for backward compat) === */
@@ -662,6 +695,11 @@
       font-size: 12px;
       flex: 0 0 auto;
     }
+    .dt-tool-icon svg {
+      width: 11px;
+      height: 11px;
+      display: block;
+    }
     .dt-tool-title {
       color: var(--dt-text-primary);
       font-weight: 600;
@@ -686,35 +724,48 @@
     /* === Thinking Block === */
     .dt-thinking-block {
       align-self: flex-start;
-      max-width: 92%;
+      max-width: 94%;
       border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(148,163,184,0.12);
-      background: rgba(15,23,42,0.6);
+      border: 1px solid rgba(148,163,184,0.18);
+      background: linear-gradient(135deg, rgba(15,23,42,0.5), rgba(30,41,59,0.4));
+      backdrop-filter: blur(8px);
+      transition: background 0.2s, border-color 0.2s;
     }
     .dt-thinking-block.open {
-      background: rgba(15,23,42,0.8);
+      background: linear-gradient(135deg, rgba(15,23,42,0.75), rgba(30,41,59,0.6));
+      border-color: rgba(148,163,184,0.25);
     }
     .dt-thinking-toggle {
       width: 100%;
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 6px 9px;
+      gap: 7px;
+      padding: 7px 10px;
       background: transparent;
       border: none;
       color: var(--dt-text-secondary);
       font-size: 11px;
       cursor: pointer;
       text-align: left;
+      transition: color 0.15s;
+    }
+    .dt-thinking-toggle:hover {
+      color: var(--dt-text-primary);
     }
     .dt-thinking-icon {
-      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       flex: 0 0 auto;
+    }
+    .dt-thinking-icon svg {
+      display: block;
     }
     .dt-thinking-label {
       font-weight: 600;
       color: var(--dt-text-primary);
       flex: 0 0 auto;
+      font-size: 11.5px;
     }
     .dt-thinking-preview {
       flex: 1 1 auto;
@@ -723,22 +774,31 @@
       white-space: nowrap;
       color: var(--dt-text-muted);
       margin-left: 2px;
+      font-size: 11px;
     }
     .dt-thinking-chev {
       flex: 0 0 auto;
-      font-size: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       color: var(--dt-text-muted);
+      line-height: 1;
+    }
+    .dt-thinking-chev svg {
+      display: block;
+      margin: 0;
     }
     .dt-thinking-body {
-      padding: 8px 10px 10px;
+      padding: 9px 11px 11px;
       margin: 0;
       font-family: var(--dt-font-mono);
       font-size: 11px;
-      line-height: 1.5;
-      color: var(--dt-text-secondary);
+      line-height: 1.55;
+      color: #94a3b8;
       white-space: pre-wrap;
       overflow-x: auto;
-      border-top: 1px solid rgba(148,163,184,0.08);
+      border-top: 1px solid rgba(148,163,184,0.12);
+      background: rgba(0,0,0,0.15);
     }
 
     /* === Tool Card === */
@@ -746,28 +806,37 @@
       align-self: flex-start;
       max-width: 96%;
       border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(148,163,184,0.12);
-      background: rgba(15,23,42,0.55);
+      border: 1px solid rgba(148,163,184,0.18);
+      background: linear-gradient(135deg, rgba(15,23,42,0.45), rgba(30,41,59,0.35));
       font-size: 11px;
-      line-height: 1.35;
+      line-height: 1.4;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .dt-tool-card:hover {
+      border-color: rgba(148,163,184,0.28);
     }
     .dt-tool-card-head {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 5px 8px;
+      gap: 7px;
+      padding: 6px 9px;
     }
     .dt-tool-card-icon {
-      width: 16px;
-      height: 16px;
+      width: 17px;
+      height: 17px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       border-radius: 4px;
-      background: rgba(59,130,246,0.14);
+      background: rgba(59,130,246,0.18);
       color: #93c5fd;
       font-size: 11px;
       flex: 0 0 auto;
+    }
+    .dt-tool-card-icon svg {
+      width: 12px;
+      height: 12px;
+      display: block;
     }
     .dt-tool-card-title {
       font-weight: 600;
@@ -775,54 +844,57 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      font-size: 11.5px;
     }
     .dt-tool-card-path {
       font-family: var(--dt-font-mono);
       font-size: 10px;
-      color: var(--dt-text-muted);
-      background: rgba(255,255,255,0.05);
-      padding: 1px 4px;
+      color: #64748b;
+      background: rgba(100, 116, 139, 0.2);
+      padding: 2px 5px;
       border-radius: 3px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 140px;
+      max-width: 150px;
+      border: 1px solid rgba(148, 163, 184, 0.15);
     }
     .dt-tool-card-meta {
       color: var(--dt-text-muted);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 120px;
+      max-width: 130px;
+      font-size: 10.5px;
     }
     .dt-tool-card-status {
       margin-left: auto;
       font-size: 10px;
       font-weight: 600;
-      padding: 1px 5px;
-      border-radius: 3px;
+      padding: 2px 6px;
+      border-radius: 4px;
       white-space: nowrap;
     }
     .dt-tool-card-status.dt-tool-status-ok {
-      background: rgba(34,197,94,0.14);
+      background: rgba(34,197,94,0.18);
       color: #86efac;
     }
     .dt-tool-card-status.dt-tool-status-error {
-      background: rgba(239,68,68,0.14);
+      background: rgba(239,68,68,0.18);
       color: #fca5a5;
     }
     .dt-tool-card-status.dt-tool-status-running {
-      background: rgba(59,130,246,0.14);
+      background: rgba(59,130,246,0.18);
       color: #93c5fd;
     }
     .dt-tool-card-status.dt-tool-status-pending {
-      background: rgba(148,163,184,0.1);
+      background: rgba(148,163,184,0.12);
       color: var(--dt-text-muted);
     }
     .dt-tool-card-toggle {
-      margin-left: 4px;
-      width: 20px;
-      height: 20px;
+      margin-left: 5px;
+      width: 22px;
+      height: 22px;
       padding: 0;
       display: inline-flex;
       align-items: center;
@@ -831,37 +903,43 @@
       font-size: 11px;
       line-height: 1;
       color: var(--dt-text-secondary);
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
       border-radius: 5px;
       cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
     }
     .dt-tool-card-toggle:hover {
-      background: rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.12);
+      border-color: rgba(255,255,255,0.15);
     }
     .dt-tool-card--browser {
-      border-color: rgba(45,212,191,0.18);
-      background: rgba(8,47,73,0.32);
+      border-color: rgba(45,212,191,0.22);
+      background: linear-gradient(135deg, rgba(8,47,73,0.35), rgba(15,58,80,0.25));
     }
     .dt-tool-card--browser .dt-tool-card-icon {
-      background: rgba(45,212,191,0.14);
+      background: rgba(45,212,191,0.2);
       color: #5eead4;
+    }
+    .dt-tool-card--browser .dt-tool-card-icon svg {
+      stroke: #5eead4;
     }
     .dt-tool-card--browser .dt-tool-card-title {
       color: #ccfbf1;
     }
     .dt-tool-output {
-      padding: 6px 8px 8px;
+      padding: 7px 9px 9px;
       margin: 0;
       font-family: var(--dt-font-mono);
-      font-size: 10px;
-      line-height: 1.45;
-      color: var(--dt-text-secondary);
+      font-size: 10.5px;
+      line-height: 1.5;
+      color: #94a3b8;
       white-space: pre-wrap;
       overflow-x: auto;
-      border-top: 1px solid rgba(148,163,184,0.08);
+      border-top: 1px solid rgba(148,163,184,0.12);
       max-height: 240px;
       overflow-y: auto;
+      background: rgba(0,0,0,0.15);
     }
 
     /* === Tool Group === */
@@ -869,41 +947,55 @@
       align-self: flex-start;
       max-width: 96%;
       border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(148,163,184,0.12);
-      background: rgba(15,23,42,0.55);
+      border: 1px solid rgba(148,163,184,0.18);
+      background: linear-gradient(135deg, rgba(15,23,42,0.45), rgba(30,41,59,0.35));
       font-size: 11px;
+      transition: border-color 0.2s;
+    }
+    .dt-tool-group:hover {
+      border-color: rgba(148,163,184,0.28);
     }
     .dt-tool-group-toggle {
       width: 100%;
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 5px 8px;
+      gap: 7px;
+      padding: 6px 9px;
       background: transparent;
       border: none;
       color: var(--dt-text-secondary);
       font-size: 11px;
       cursor: pointer;
       text-align: left;
+      transition: color 0.15s;
+    }
+    .dt-tool-group-toggle:hover {
+      color: var(--dt-text-primary);
     }
     .dt-tool-group-toggle.running .dt-tool-group-summary strong {
       color: #93c5fd;
     }
     .dt-tool-group-icon {
-      width: 16px;
-      height: 16px;
+      width: 17px;
+      height: 17px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       border-radius: 4px;
-      background: rgba(59,130,246,0.14);
+      background: rgba(59,130,246,0.18);
       color: #93c5fd;
       font-size: 11px;
       flex: 0 0 auto;
     }
+    .dt-tool-group-icon svg {
+      width: 12px;
+      height: 12px;
+      display: block;
+    }
     .dt-tool-group-summary {
       flex: 1;
       color: var(--dt-text-secondary);
+      font-size: 11.5px;
     }
     .dt-tool-group-summary strong {
       color: var(--dt-text-primary);
@@ -911,19 +1003,26 @@
     }
     .dt-tool-group-chev {
       flex: 0 0 auto;
-      font-size: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       color: var(--dt-text-muted);
+      line-height: 1;
+    }
+    .dt-tool-group-chev svg {
+      display: block;
+      margin: 0;
     }
     .dt-tool-group-body {
-      padding: 0 8px 8px;
+      padding: 0 9px 9px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 7px;
     }
     .dt-tool-group:has(.dt-tool-card--browser),
     .dt-tool-group[data-tool-family="browser"] {
-      border-color: rgba(45,212,191,0.16);
-      background: rgba(8,47,73,0.24);
+      border-color: rgba(45,212,191,0.22);
+      background: linear-gradient(135deg, rgba(8,47,73,0.3), rgba(15,58,80,0.2));
     }
 
     /* === Waiting Pill === */
@@ -931,21 +1030,23 @@
       align-self: flex-start;
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
+      gap: 9px;
+      padding: 7px 11px;
       border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(148,163,184,0.12);
-      background: rgba(15,23,42,0.55);
+      border: 1px solid rgba(148,163,184,0.18);
+      background: linear-gradient(135deg, rgba(15,23,42,0.5), rgba(30,41,59,0.4));
       color: var(--dt-text-secondary);
       font-size: 12px;
+      backdrop-filter: blur(4px);
     }
     .dt-waiting-dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: var(--dt-accent);
+      background: linear-gradient(135deg, #60a5fa, #3b82f6);
       animation: dt-pulse 1.4s ease-in-out infinite;
       flex-shrink: 0;
+      box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
     }
     @keyframes dt-pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
@@ -957,10 +1058,10 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      margin-top: 8px;
-      padding-top: 6px;
-      border-top: 1px solid rgba(148,163,184,0.08);
-      font-size: 11px;
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(148,163,184,0.12);
+      font-size: 10.5px;
       color: var(--dt-text-muted);
     }
     .dt-assistant-footer-dot {
@@ -969,10 +1070,12 @@
       border-radius: 50%;
       background: var(--dt-success);
       flex-shrink: 0;
+      box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
     }
     .dt-assistant-footer-dot[data-active="true"] {
       background: var(--dt-accent);
       animation: dt-pulse 1.4s ease-in-out infinite;
+      box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
     }
     .dt-assistant-footer-label {
       font-weight: 500;
@@ -1002,43 +1105,45 @@
 
     /* === Prompt Card === */
     .dt-prompt-card {
-      background: var(--dt-bg-secondary);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: var(--dt-radius-sm);
+      background: linear-gradient(135deg, rgba(51, 65, 85, 0.5), rgba(30, 41, 59, 0.4));
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: var(--dt-radius);
       overflow: hidden;
+      backdrop-filter: blur(4px);
     }
     .dt-prompt-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 10px;
-      background: rgba(255,255,255,0.03);
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      padding: 7px 11px;
+      background: rgba(15, 23, 42, 0.4);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.15);
     }
     .dt-prompt-label {
       font-size: 10px;
       font-weight: 600;
-      color: var(--dt-text-secondary);
+      color: #94a3b8;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.6px;
     }
     .dt-prompt-body {
-      padding: 10px;
+      padding: 11px;
       font-family: var(--dt-font-mono);
-      font-size: 11px;
-      line-height: 1.5;
-      color: var(--dt-text-secondary);
+      font-size: 11.5px;
+      line-height: 1.55;
+      color: #cbd5e1;
       white-space: pre-wrap;
       max-height: min(360px, 48vh);
       overflow-y: auto;
     }
     .dt-prompt-footer {
-      padding: 6px 10px;
-      border-top: 1px solid rgba(255,255,255,0.06);
+      padding: 7px 11px;
+      border-top: 1px solid rgba(148, 163, 184, 0.15);
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 8px;
+      background: rgba(15, 23, 42, 0.3);
     }
     .dt-prompt-hint {
       font-size: 10px;
@@ -1258,15 +1363,13 @@
     /* === Floating Action Ball === */
     .dt-fab {
       display: none;
-      width: 48px;
-      height: 48px;
+      width: 36px;
+      height: 36px;
       border-radius: 50%;
       background: var(--dt-accent);
       color: #fff;
       align-items: center;
       justify-content: center;
-      font-size: 20px;
-      font-weight: 700;
       cursor: pointer;
       box-shadow: 0 4px 12px rgba(0,0,0,0.35);
       border: 2px solid rgba(255,255,255,0.15);
@@ -1283,6 +1386,11 @@
     }
     .dt-fab.is-dragging {
       cursor: grabbing;
+    }
+    .dt-fab svg {
+      display: block;
+      width: 18px;
+      height: 18px;
     }
 
     /* === Hidden === */
@@ -1342,7 +1450,6 @@
         <span class="dt-batch-label">当前批次</span>
         <button class="dt-btn dt-btn--small dt-batch-action" id="dt-btn-undo-mark" title="撤销最近一次标记">撤销</button>
         <button class="dt-btn dt-btn--small dt-batch-action" id="dt-btn-discard-batch" title="放弃当前批次">放弃</button>
-        <button class="dt-btn dt-btn--primary dt-btn--small dt-batch-action" id="dt-btn-focus-ai" title="发送到 AI 工作区">AI</button>
       </div>
 
       <!-- Chat Panel -->
@@ -1380,7 +1487,14 @@
         <canvas class="dt-image-preview__canvas" id="dt-image-preview-canvas"></canvas>
       </div>
     </div>
-    <div class="dt-fab" id="dt-fab" title="展开侧边栏">⌘</div>
+    <div class="dt-fab" id="dt-fab" title="展开侧边栏">
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="7" height="7" x="3" y="3" rx="1"/>
+        <rect width="7" height="7" x="14" y="3" rx="1"/>
+        <rect width="7" height="7" x="14" y="14" rx="1"/>
+        <rect width="7" height="7" x="3" y="14" rx="1"/>
+      </svg>
+    </div>
   `;
   shadow.appendChild(root);
 
@@ -1856,10 +1970,6 @@
 
     onDiscardBatchClick(callback) {
       shadow.getElementById('dt-btn-discard-batch').addEventListener('click', callback);
-    },
-
-    onFocusAiClick(callback) {
-      shadow.getElementById('dt-btn-focus-ai').addEventListener('click', callback);
     },
 
     onSendClick(callback) {

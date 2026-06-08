@@ -167,18 +167,11 @@
       }
     });
 
-    ui.onFocusAiClick(() => {
-      if (selector.isActive()) {
-        exitMarkMode();
-        syncMarkModeUi();
-      }
-      sidebar.focusAiWorkspace();
-    });
-
     // 10. Wire element selection -> add mark to store
-    selector.onSelect((element) => {
+    selector.onSelect((element, options = {}) => {
       const selectorData = selectorGen.generate(element);
       const context = contextCapture.capture(element);
+      const quick = Boolean(options.quick);
 
       // Check for duplicates (same selector + similar bounding box)
       const existing = store.getAll().find(r => {
@@ -205,6 +198,12 @@
         context,
         created: new Date().toISOString(),
       });
+
+      if (quick) {
+        badges.flashReview(reviewId);
+        syncMarkModeUi();
+        return;
+      }
 
       badges.selectReview(reviewId, { focusEditor: true });
       selector.pause();

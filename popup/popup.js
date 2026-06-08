@@ -16,8 +16,6 @@
   function main() {
 
   const countEl = document.getElementById('count');
-  const statusEl = document.getElementById('status');
-  const mainContent = document.getElementById('main-content');
   const noPage = document.getElementById('no-page');
   const toggleBtn = document.getElementById('toggle-btn');
 
@@ -31,7 +29,7 @@
   const customHeightInput = document.getElementById('custom-height');
   const customSizeApply = document.getElementById('custom-size-apply');
 
-  if (!countEl || !statusEl || !mainContent || !noPage || !toggleBtn || !siteList || !addSiteInput || !addSiteBtn || !addSiteError || !sizePresetsEl || !customSizeRow || !customWidthInput || !customHeightInput || !customSizeApply) {
+  if (!countEl || !noPage || !toggleBtn || !siteList || !addSiteInput || !addSiteBtn || !addSiteError || !sizePresetsEl || !customSizeRow || !customWidthInput || !customHeightInput || !customSizeApply) {
     console.warn('[DevTailor] Popup DOM is incomplete.');
     return;
   }
@@ -146,6 +144,15 @@
     return new Promise(resolve => {
       chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => resolve(tab || null));
     });
+  }
+
+  async function ensureInjected(tabId) {
+    if (!tabId) return { injected: false, error: 'Missing tabId' };
+    try {
+      return await chrome.runtime.sendMessage({ type: 'ENSURE_INJECTED', tabId });
+    } catch (err) {
+      return { injected: false, error: err?.message || 'Failed to inject DevTailor' };
+    }
   }
 
   async function getReviewCount(tabId) {
@@ -353,20 +360,20 @@
           return;
         }
 
-        getReviewCount(tab.id).then(total => {
+        getReviewCount(tab.id).then(async total => {
           if (total == null) {
-            statusEl.textContent = '无法连接到页面。';
-            return;
+            await ensureInjected(tab.id);
+            total = await getReviewCount(tab.id);
           }
-          showReady(total);
+          if (total != null) {
+            showReady(total);
+          }
         });
       });
     });
   }
 
   function showNoPage() {
-    statusEl.style.display = 'none';
-    mainContent.style.display = 'none';
     noPage.style.display = '';
     countEl.textContent = '-';
     countEl.classList.add('badge--zero');
@@ -374,14 +381,11 @@
 
   function showReady(total) {
     noPage.style.display = 'none';
-    mainContent.style.display = '';
 
     if (total === 0) {
-      statusEl.innerHTML = '此页面还没有标记。<br>点击侧边栏中的<strong>标记</strong>开始。';
       countEl.textContent = '0';
       countEl.classList.add('badge--zero');
     } else {
-      statusEl.innerHTML = `此页面有 <strong>${total}</strong> 个标记`;
       countEl.textContent = total;
       countEl.classList.remove('badge--zero');
     }
@@ -394,21 +398,6 @@
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 1500);
   }
-
-  // --- Sidebar toggle from popup ---
-  document.getElementById('btn-toggle-sidebar').addEventListener('click', () => {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (!tab) return;
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => {
-          if (window.__domReview && window.__domReview.ui) {
-            window.__domReview.ui.toggleSidebar();
-          }
-        }
-      }).catch(() => {});
-    });
-  });
 
   // --- Event handlers ---
 

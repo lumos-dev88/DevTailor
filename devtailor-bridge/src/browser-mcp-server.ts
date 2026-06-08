@@ -47,7 +47,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: 'get_element_targets',
-    description: 'List reusable element targets saved for the current page. Use these targetId values to avoid rediscovering important controls.',
+    description: 'List all reusable element targets saved for this project. Use these targetId values to avoid rediscovering important controls.',
     inputSchema: {
       type: 'object',
       properties: {},

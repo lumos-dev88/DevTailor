@@ -177,9 +177,8 @@
     return body.target;
   }
 
-  async function listCurrentPage() {
-    const url = `${BRIDGE_URL}/element-targets?url=${encodeURIComponent(location.href)}`;
-    const response = await fetch(url);
+  async function listAllTargets() {
+    const response = await fetch(`${BRIDGE_URL}/element-targets`);
     const body = await response.json().catch(() => ({}));
     if (!response.ok || body.ok === false) {
       throw new Error(body.error || `HTTP ${response.status}`);
@@ -237,7 +236,7 @@
 
   async function resolveParams(params = {}) {
     if (!params.targetId && !params.targetName) return params;
-    const targets = await listCurrentPage();
+    const targets = await listAllTargets();
     const target = targets.find(item => targetMatches(item, params));
     if (!target) {
       throw new Error(`Element target not found: ${params.targetId || params.targetName}`);
@@ -260,7 +259,7 @@
   window.__domReview.elementTargets = {
     saveFromReview,
     savePayload,
-    listCurrentPage,
+    listAllTargets,
     deleteTarget,
     buildTargetPayload,
     resolveParams,
