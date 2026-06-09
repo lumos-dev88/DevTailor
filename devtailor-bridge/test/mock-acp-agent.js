@@ -47,11 +47,26 @@ function handleLine(line) {
     }
 
     if (method === 'session/new') {
+      const sessionId = 'test-session-' + Date.now();
+      if (process.env.MOCK_STARTUP_TITLE) {
+        write({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              title: process.env.MOCK_STARTUP_TITLE,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        });
+      }
       write({
         jsonrpc: '2.0',
         id,
         result: {
-          sessionId: 'test-session-' + Date.now(),
+          sessionId,
           configOptions: [],
         },
       });
@@ -66,6 +81,21 @@ function handleLine(line) {
       const wordCount = totalText.split(/\s+/).filter(Boolean).length;
 
       const sessionId = req.params?.sessionId || 'test-session';
+
+      if (totalText.includes('trigger-session-title-update')) {
+        write({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              title: 'Agent Generated Title',
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        });
+      }
 
       // Stream response word by word
       const words = [

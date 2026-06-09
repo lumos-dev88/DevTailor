@@ -16,6 +16,10 @@ export interface SessionCallbacks {
   onThinking: (delta: string) => void;
   onDone: (summary?: string) => void;
   onError: (message: string) => void;
+  onSessionInfoUpdate?: (info: {
+    title?: string | null;
+    updatedAt?: string | null;
+  }) => void;
   onToolCall?: (tool: {
     toolCallId: string;
     title: string;
@@ -130,6 +134,13 @@ class DevTailorClient implements acp.Client {
         if (update.content.type === 'text') {
           this.callbacks?.onThinking(update.content.text);
         }
+        break;
+      }
+      case 'session_info_update': {
+        this.callbacks?.onSessionInfoUpdate?.({
+          title: update.title,
+          updatedAt: update.updatedAt,
+        });
         break;
       }
     }

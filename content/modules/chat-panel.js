@@ -345,6 +345,7 @@
       const msg = msgs[i];
       const requestInFlight = getSendManager().isRequestInFlight();
       if (msg.type === 'loading') {
+        out.push(renderLoadingDots());
         i++;
         continue;
       }
@@ -407,6 +408,14 @@
 
     const md = chatMarkdown.render(msg.content);
     return `<div class="dt-chat-msg dt-chat-md">${md}</div>`;
+  }
+
+  function renderLoadingDots() {
+    return `
+      <div class="dt-loading-dots" aria-label="加载中">
+        <span></span><span></span><span></span>
+      </div>
+    `;
   }
 
   // --- Thinking block (open-design style) ---

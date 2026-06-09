@@ -106,6 +106,116 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     stream.close();
   });
 
+  it('updates display session title from ACP session_info_update', async () => {
+    const stream = await openSse('tab-session-title-update');
+    await stream.next();
+    await activate('tab-session-title-update');
+    const created = await postJson('/new-session', {
+      clientId: 'tab-session-title-update',
+      tabId: 'tab-session-title-update',
+    });
+    assert.strictEqual(created.status, 200);
+    const sessionId = created.body.sessionId;
+    const messages: Record<string, unknown>[] = [];
+    const done = collectUntilDone(stream, messages);
+
+    const response = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-session-title-update',
+      tabId: 'tab-session-title-update',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'trigger-session-title-update',
+        items: [],
+        screenshot: null,
+      },
+    });
+
+    assert.strictEqual(response.status, 202);
+    await done;
+
+    assert.ok(messages.some(message =>
+      message.type === 'session_info'
+      && message.sessionId === sessionId
+      && message.sessionTitle === 'Agent Generated Title'
+    ));
+
+    const health = await getJson('/health');
+    assert.strictEqual(health.status, 200);
+    assert.strictEqual(health.body.activeSessionTitle, 'Agent Generated Title');
+
+    const list = await getJson('/sessions?clientId=tab-session-title-update');
+    assert.strictEqual(list.status, 200);
+    assert.ok(list.body.sessions.some((session: any) =>
+      session.sessionId === sessionId && session.title === 'Agent Generated Title'
+    ));
+    stream.close();
+  });
+
+  it('keeps ACP title updates emitted during session startup', async () => {
+    const startupPort = 17778;
+    const startupBaseUrl = `http://localhost:${startupPort}`;
+    const startupServer = new WSServer(
+      startupPort,
+      'node',
+      process.cwd(),
+      [mockAgent],
+      undefined,
+      { MOCK_STARTUP_TITLE: 'Agent Startup Title' },
+    );
+    startupServer.start();
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    let stream: Awaited<ReturnType<typeof openSse>> | null = null;
+    try {
+      stream = await openSse('tab-session-startup-title', startupBaseUrl);
+      await stream.next();
+      const activation = await postJson('/activate', {
+        clientId: 'tab-session-startup-title',
+        tabId: 'tab-session-startup-title',
+      }, startupBaseUrl);
+      assert.strictEqual(activation.status, 200);
+      const created = await postJson('/new-session', {
+        clientId: 'tab-session-startup-title',
+        tabId: 'tab-session-startup-title',
+      }, startupBaseUrl);
+      assert.strictEqual(created.status, 200);
+      const sessionId = created.body.sessionId;
+      const messages: Record<string, unknown>[] = [];
+      const done = collectUntilDone(stream, messages);
+
+      const response = await postJson('/review', {
+        type: 'review',
+        clientId: 'tab-session-startup-title',
+        tabId: 'tab-session-startup-title',
+        payload: {
+          pageUrl: 'http://localhost:3000',
+          userIntent: 'fallback title should not win',
+          items: [],
+          screenshot: null,
+        },
+      }, startupBaseUrl);
+
+      assert.strictEqual(response.status, 202);
+      await done;
+
+      assert.ok(messages.some(message =>
+        message.type === 'session_info'
+        && message.sessionId === sessionId
+        && message.sessionTitle === 'Agent Startup Title'
+      ));
+
+      const list = await getJson('/sessions?clientId=tab-session-startup-title', startupBaseUrl);
+      assert.strictEqual(list.status, 200);
+      assert.ok(list.body.sessions.some((session: any) =>
+        session.sessionId === sessionId && session.title === 'Agent Startup Title'
+      ));
+    } finally {
+      stream?.close();
+      startupServer.stop();
+    }
+  });
+
   it('handles missing payload gracefully', async () => {
     const stream = await openSse('tab-test-2');
     await stream.next();
@@ -363,8 +473,8 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     assert.strictEqual(deleted.body.deleted, saved.body.target.targetId);
   });
 
-  async function postJson(path: string, body: unknown): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${baseUrl}${path}`, {
+  async function postJson(path: string, body: unknown, base = baseUrl): Promise<{ status: number; body: any }> {
+    const response = await fetch(`${base}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -375,8 +485,8 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     };
   }
 
-  async function postRaw(path: string, body: unknown): Promise<{ status: number; text: string }> {
-    const response = await fetch(`${baseUrl}${path}`, {
+  async function postRaw(path: string, body: unknown, base = baseUrl): Promise<{ status: number; text: string }> {
+    const response = await fetch(`${base}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -387,16 +497,16 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     };
   }
 
-  async function getJson(path: string): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${baseUrl}${path}`);
+  async function getJson(path: string, base = baseUrl): Promise<{ status: number; body: any }> {
+    const response = await fetch(`${base}${path}`);
     return {
       status: response.status,
       body: await response.json(),
     };
   }
 
-  async function deleteJson(path: string): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${baseUrl}${path}`, { method: 'DELETE' });
+  async function deleteJson(path: string, base = baseUrl): Promise<{ status: number; body: any }> {
+    const response = await fetch(`${base}${path}`, { method: 'DELETE' });
     return {
       status: response.status,
       body: await response.json(),
@@ -423,7 +533,7 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     });
   }
 
-  function openSse(clientId: string): Promise<{
+  function openSse(clientId: string, base = baseUrl): Promise<{
     next: () => Promise<Record<string, unknown>>;
     onMessage: (callback: (message: Record<string, unknown>) => void) => void;
     close: () => void;
@@ -434,7 +544,7 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
       const waiters: Array<(message: Record<string, unknown>) => void> = [];
       let buffer = '';
 
-      const req = http.get(`${baseUrl}/events?clientId=${encodeURIComponent(clientId)}`, (res) => {
+      const req = http.get(`${base}/events?clientId=${encodeURIComponent(clientId)}`, (res) => {
         res.setEncoding('utf8');
         res.on('data', (chunk) => {
           buffer += chunk;

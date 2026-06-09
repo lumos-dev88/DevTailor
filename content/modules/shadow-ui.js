@@ -14,7 +14,7 @@
   const DEFAULT_PANEL_HEIGHT = 640;
   const POSITION_KEY = 'dom-review-panel-position';
   const SIZE_KEY = 'dr_panel_size';
-  const DEFAULT_POSITION = { x: 24, y: 88 };
+  const DEFAULT_POSITION = { x: 24, y: 0 };
 
   // --- Shadow DOM 宿主（悬浮覆盖层，不影响页面布局）---
   const host = document.createElement('div');
@@ -1084,6 +1084,29 @@
       font-weight: 500;
     }
 
+    /* === Loading dots === */
+    .dt-loading-dots {
+      align-self: flex-start;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 12px 0;
+    }
+    .dt-loading-dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--dt-text-muted);
+      animation: dt-bounce 1.4s ease-in-out infinite both;
+    }
+    .dt-loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+    .dt-loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+    .dt-loading-dots span:nth-child(3) { animation-delay: 0s; }
+    @keyframes dt-bounce {
+      0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+
     /* === Legacy loading spinner (kept for fallback) === */
     .dt-chat-loading {
       align-self: flex-start;
@@ -1565,6 +1588,15 @@
     }
   }
 
+  function readHostPosition() {
+    const left = parseFloat(host.style.left);
+    const top = parseFloat(host.style.top);
+    return {
+      left: Number.isFinite(left) ? left : DEFAULT_POSITION.x,
+      top: Number.isFinite(top) ? top : DEFAULT_POSITION.y,
+    };
+  }
+
   function restorePanelPosition() {
     try {
       const raw = localStorage.getItem(POSITION_KEY);
@@ -1582,9 +1614,8 @@
   }
 
   function clampToViewport() {
-    const x = parseFloat(host.style.left) || DEFAULT_POSITION.x;
-    const y = parseFloat(host.style.top) || DEFAULT_POSITION.y;
-    setPanelPosition(x, y, true);
+    const pos = readHostPosition();
+    setPanelPosition(pos.left, pos.top, true);
   }
 
   function normalizePanelSize(size) {
@@ -1657,8 +1688,9 @@
       moved = false;
       startX = e.clientX;
       startY = e.clientY;
-      originX = parseFloat(host.style.left) || DEFAULT_POSITION.x;
-      originY = parseFloat(host.style.top) || DEFAULT_POSITION.y;
+      const pos = readHostPosition();
+      originX = pos.left;
+      originY = pos.top;
       el.classList.add('is-dragging');
       el.setPointerCapture?.(e.pointerId);
       e.preventDefault();
@@ -1680,10 +1712,7 @@
       if (moved) {
         el.dataset.dragged = '1';
         requestAnimationFrame(() => delete el.dataset.dragged);
-        const pos = {
-          left: parseFloat(host.style.left) || DEFAULT_POSITION.x,
-          top: parseFloat(host.style.top) || DEFAULT_POSITION.y,
-        };
+        const pos = readHostPosition();
         if (el.id === 'dt-fab') {
           const clamped = clampPosition(pos.left, pos.top);
           savedFabPos = { left: clamped.x, top: clamped.y };
@@ -1726,8 +1755,7 @@
 
       // Sidebar opens from where the FAB is (FAB is the anchor)
       const anchor = savedFabPos || {
-        left: parseFloat(host.style.left) || DEFAULT_POSITION.x,
-        top: parseFloat(host.style.top) || DEFAULT_POSITION.y,
+        ...readHostPosition(),
       };
 
       applyPanelSize(panelSize);
@@ -1747,8 +1775,7 @@
 
       // Save current sidebar position so FAB can snap to its edge next time if needed
       const sidebarPos = {
-        left: parseFloat(host.style.left) || DEFAULT_POSITION.x,
-        top: parseFloat(host.style.top) || DEFAULT_POSITION.y,
+        ...readHostPosition(),
       };
 
       if (sidebar) sidebar.style.display = 'none';

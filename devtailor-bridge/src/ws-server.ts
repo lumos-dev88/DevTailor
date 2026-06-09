@@ -359,6 +359,7 @@ export class WSServer {
     const session = this.getOrCreateSession(display.id, display.acpSessionId, isNewSessionMarker);
     const isFreshSession = isNewSessionMarker.value;
     this.appendUserMessage(display, payload);
+    this.attachSessionCallbacks(clientId, display, session);
 
     // Ensure session is started and notify frontend of session ID
     try {
@@ -377,8 +378,6 @@ export class WSServer {
       this.sessions.delete(display.id);
       return;
     }
-
-    this.attachSessionCallbacks(clientId, display, session);
 
     try {
       // If this is a freshly-created ACPSession, inject prior display messages
@@ -445,6 +444,9 @@ export class WSServer {
       onError: (message) => {
         this.closeActiveThinking(display);
         this.send(clientId, { type: 'error', tabId: clientId, message });
+      },
+      onSessionInfoUpdate: (info) => {
+        this.updateDisplaySessionInfo(clientId, display, info);
       },
       onToolCall: (tool) => {
         this.addToolDisplayMessage(display, tool);
@@ -576,6 +578,26 @@ export class WSServer {
     msg.timestamp = Date.now();
     this.store?.updateMessage(display.id, msg);
     this.trimDisplayMessages(display);
+  }
+
+  private updateDisplaySessionInfo(
+    clientId: string,
+    display: DisplaySession,
+    info: { title?: string | null; updatedAt?: string | null },
+  ): void {
+    const title = typeof info.title === 'string' ? info.title.trim() : '';
+    if (!title || display.title === title) return;
+
+    display.title = title.slice(0, 80);
+    display.updatedAt = Date.now();
+    this.store?.updateSession(display);
+    this.send(clientId, {
+      type: 'session_info',
+      tabId: clientId,
+      sessionId: display.id,
+      acpSessionId: display.acpSessionId,
+      sessionTitle: display.title,
+    } as any);
   }
 
   private appendThinkingDelta(display: DisplaySession, delta: string): void {

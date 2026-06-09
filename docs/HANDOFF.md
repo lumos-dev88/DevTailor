@@ -66,6 +66,8 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
   - DevTailor 卡片内事件必须 `stopPropagation`，不能触发宿主页面的外部点击、快捷键或焦点逻辑。
   - DevTailor 的透明区域、空白区域和定位容器必须让页面点击穿透。
   - Browser MCP 的坐标/网格点击和截图默认必须跳过或隐藏 DevTailor UI，不能把调试面板当成页面目标。
+  - Shadow UI 面板和 FAB 必须允许四边贴边，clamp 边距为 `0`，不要为顶部预留默认安全距离。
+  - 面板坐标里的 `0` 是有效值；读取 `left/top` 时不要使用 `parseFloat(...) || DEFAULT_POSITION.*`，避免把 `0px` 错当缺省值弹回默认位置。
   - Shadow DOM 不能阻止宿主页面更早注册的 document 捕获阶段监听器看到部分 composed 事件；如果要做到完全事件/焦点沙箱，chat UI 应迁移到 iframe 隔离层，而不是继续扩大页面级拦截。
 
 当前 chat 拆分：
@@ -142,6 +144,7 @@ Bridge 拥有展示会话：
 - 展示会话按 project + agentKey 隔离。
 - 切换 display session 等于切换后续 prompt 进入哪个 ACP session。
 - 删除 display session 应删除对应展示消息，并停止/移除对应 ACP session。
+- 会话标题优先采用 ACP `session_info_update.title`，Bridge 持久化后通过 SSE `session_info` 同步给前端；首条用户消息截断标题只是 fallback。
 
 前端 `chrome.storage.local` 只适合缓存草稿、待发送图片、控件状态等轻量 UI 状态。不要让它成为聊天记录的权威来源，也不要把它当作 Agent 上下文。
 

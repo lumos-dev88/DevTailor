@@ -1,77 +1,82 @@
-# DevTailor
+# DevTailor — 让 AI 直接在浏览器里帮你调试
 
-DevTailor 是 **浏览器页面 ↔ ACP Agent 前端开发桥接工具**，由「Chrome 浏览器扩展 + 本地 Bridge 服务」双组件构成。它打通真实运行页面与编码 Agent 的数据和指令链路，让 Agent 能直接获取页面 DOM、截图、元素、控制台信息，并在修改代码后回到浏览器执行点击、填写、断言和截图验证。
+> **一句话**：在浏览器页面里标记问题，让 AI 自动查看页面、修改代码，并在浏览器里验证修改效果。
 
-## 一、产品定位
+## 这东西是干嘛的？
 
-DevTailor 面向本地前端开发调试：用户在浏览器页面里标记问题，Agent 通过 Bridge 获取结构化页面上下文，修改项目源码，再通过 Browser MCP 工具回到当前页面完成自动校验。
+你写前端代码时，会不会遇到这种场景：
 
-### 组件分工
+- 页面上有个按钮样式不对，你想告诉 AI，但又懒得截图 + 描述 DOM 结构 + 贴控制台上的报错；
+- AI 帮你改完代码，你还要手动切回浏览器刷新、点击按钮看效果，来回折腾；
+- 想让 AI 做一些临时验证，但又不想写完整的 E2E 测试用例。
 
-1. **Chrome 扩展（前端层）**  
-   页面内嵌悬浮 Chat 面板，提供元素标记、截图、元素库管理、Browser MCP 工具调用和消息流式展示。
+**DevTailor 就是为了解决这些麻烦而存在的。它把你的浏览器和本地 AI 编码助手（Claude、Copilot、Gemini 等）连接起来，让 AI 能：
 
-2. **Local Bridge（中转层）**  
-   通过 SSE/HTTP 对接浏览器扩展，收拢页面上下文，并基于 ACP 协议通过 stdio 转发给兼容 Agent；同时接收 Agent 指令，路由到已接管的浏览器 tab 执行。
+1. **看到你看到的** — 页面 DOM 结构、控制台报错、当前截图、你圈出来的元素；
+2. **操作你正在操作的页面** — 点击按钮、填写表单、运行 JS、截图验证；
+3. **改你项目里的代码** — 基于真实页面上下文定位问题并修复。
 
-## 二、核心功能
+整个过程你只需要在浏览器里标记问题、说一句话，剩下的交给 AI。
 
-### 1. 交互能力
+---
 
-- 页面悬浮 Chat 面板，原地和本地 ACP Agent 实时对话。
-- 元素打点标注：点击 DOM 元素、填写备注，一键打包上下文发给 Agent。
-- 截图能力：可见区域截图、网格辅助定位截图、图片粘贴入对话。
-- 元素库：保存常用业务控件，通过 `targetId` / `targetName` 后续快速复用。
+## 它怎么工作？
 
-### 2. Browser MCP 内置工具集
+DevTailor 由两部分组成，安装后它们会自动配合，不需要你手动管理：
 
-轻量化 E2E 能力，无需编写测试用例文件，适合临时调试和验证改动。
+1. **Chrome 扩展** — 在网页里加一个悬浮聊天窗口，你可以在这里圈元素、截截图、和 AI 对话。
+2. **本地 Bridge 服务** — 把浏览器页面的信息转发给 AI，再把 AI 的操作指令送回浏览器执行。
 
-```text
-页面信息：get_page_snapshot、take_visible_screenshot、get_console_logs、get_console_message、get_element_targets
-元素管理：save_element_target
-页面控制：reload_page、wait_for_selector、wait_for_text
-交互操作：click_page、type_text、fill_text、press_key、clear_state
-代码执行：run_js
-批量流程：run_actions
-辅助能力：request_user_assistance
-```
-
-`run_actions` 可以组合多步操作和断言，临时执行，不落地为测试文件。
-
-### 3. 项目与会话管理
-
-- 项目级持久化：会话展示数据、截图引用、保存元素目标存储在项目根目录 `.devtailor/`。
-- 会话隔离：前端聊天记录仅用于 UI 展示，不参与 Agent 上下文；多轮上下文由底层 ACP Session 维护。
-- Tab 接管机制：刷新页面保留项目会话；新开标签页需要手动点击「接管」才会替换当前生效调试页面；Browser actions 仅作用于已接管 tab。
-
-### 4. 多 Agent 兼容
-
-内置 Agent 预设：
+整个流程大概是这样：
 
 ```text
-claude、copilot、gemini、qwen、codex、opencode、kiro、kimi
+你在浏览器里标记问题 → Bridge 把页面上下文打包发给 AI
+    AI 读取/修改项目代码 → AI 让浏览器做操作
+        浏览器执行点击/填写/截图 → 结果返回给 AI 继续分析
 ```
 
-同时支持自定义原生 ACP 命令接入任意符合 ACP 规范的 Agent 客户端。
+## 你能用它做什么？
 
-## 三、适用场景
+### 标记问题，圈出来就能说清楚
 
-1. 本地调试前端 UI 异常，省去大段文字描述元素位置，直接圈选页面控件并提交问题。
-2. 需要 Agent 获取真实页面 DOM、运行时控制台报错、页面截图来定位代码缺陷。
-3. Agent 修改源码后，自动在浏览器执行点击、输入、断言，即时验证修改效果。
-4. 需要一个介于手动测试和重型 E2E 测试框架之间的轻量化调试自动化方案。
+- 页面上点一下那个出问题的按钮、输入框或任何元素，AI 就知道你说的是哪个；
+- 一键截取当前页面截图，连同控制台报错信息自动打包发给 AI；
+- 常用的业务组件可以存进「元素库」，以后直接点名就能复用。
 
-## 四、环境依赖
+### 让 AI 在浏览器里干活
 
-- 浏览器：Chrome / Chromium 系列。
-- 运行环境：Node.js 20+。
-- Agent：任意 ACP 协议兼容 Agent，例如 Claude Code、Codex CLI、Gemini CLI 等。
-- 调试载体：本地前端项目，通常是 `localhost` 或 `127.0.0.1` 开发环境。
+AI 可以在你正在调试的页面上做这些事（不需要你写测试代码）：
 
-## 五、快速启动
+- 获取页面信息：页面结构、截图、控制台日志、你标记的元素
+- 页面操作：点击、输入文字、按键、刷新页面、等待某个元素出现
+- 执行自定义 JS 代码
+- 组合多步操作（比如：点击登录 → 等待跳转 → 断言页面标题）
 
-### 1. 启动 Bridge 服务
+### 多项目多 AI 都支持
+
+- 支持 Claude、Copilot、Gemini、Qwen、Codex、Kimi 等主流 AI 编码助手；
+- 每个项目的聊天记录、截图、元素库独立保存，互不干扰；
+- 刷新页面不会丢失当前调试会话，新开标签页只需点一下「接管」即可切换调试目标。
+
+## 一个完整的例子
+
+1. 你看到页面上有个按钮样式不对
+2. 打开悬浮面板 → 圈出按钮 → 输入"这个按钮样式不对，帮我看看"
+3. AI 查看页面 DOM 和控制台报错 → 找到代码里的问题 → 修改源码
+4. AI 自动在浏览器里点击按钮、截图验证
+5. 你在聊天面板里看到验证结果，确认问题已解决
+
+**什么时候适合用它：**
+
+- 本地调试前端页面的各种 UI 问题、样式问题、交互问题
+- 让 AI 基于真实页面上下文定位代码缺陷
+- 轻量级自动化验证（介于手动测试和重型 E2E 框架之间）
+
+---
+
+## 快速开始
+
+### 1. 启动本地 Bridge 服务
 
 在 `devtailor-bridge/` 目录执行：
 
@@ -79,39 +84,51 @@ claude、copilot、gemini、qwen、codex、opencode、kiro、kimi
 npm run dev -- --dir ../../todo --agent claude
 ```
 
-常用启动方式：
+更多启动方式：
 
 ```bash
+# 指定项目目录
 npm run dev -- --dir /absolute/path/to/project
+
+# 使用不同的 AI
 npm run dev -- --dir . --agent gemini
 npm run dev -- --dir . --agent codex
+
+# 查看可用的 AI 列表
 npm run dev -- agents
 ```
 
-### 2. 浏览器侧配置
+### 2. 在浏览器里加载扩展
 
-1. Chrome 开发者模式加载当前仓库扩展源码。
-2. 打开本地 `localhost` 或 `127.0.0.1` 前端页面。
-3. 打开 DevTailor 悬浮面板，点击「接管」当前标签页。
-4. 标记元素、截图或输入问题，开始和 Agent 联动调试。
+1. 在 Chrome 中开启开发者模式，加载当前仓库的扩展源码。
+2. 打开你的本地开发页面（通常是 `localhost` 或 `127.0.0.1`）。
+3. 点击 DevTailor 悬浮面板里的「接管」，把当前标签页标记为调试目标。
+4. 然后就可以圈元素、截截图、输入问题，开始和 AI 联动调试了。
 
-## 六、整体数据流
+## 环境要求
+
+- **浏览器**：Chrome / Chromium 系列。
+- **运行环境**：Node.js 20+。
+- **AI 编码助手**：Claude Code、Copilot、Gemini、Qwen、Codex、Kimi 等（支持任意符合 ACP 协议的 AI）。
+- **调试目标**：你的本地前端项目（通常跑在 `localhost` 或 `127.0.0.1` 上）。
+
+## 整体数据流
 
 ```text
-Chrome 页面（DevTailor 扩展）
-        ↓ SSE / HTTP
-devtailor-bridge（会话管理 + Tab 路由 + ACP 协议封装）
-        ↓ ACP stdio
-ACP Agent（读取 / 修改项目源码 → 下发 Browser MCP 指令）
-        ↓ 指令回传 Bridge → 转发扩展
-浏览器执行点击 / 填写 / 运行 JS / 截图 / 断言，结果回传给 Agent
+你在浏览器里标记问题、截图、发送消息
+              ↓ 浏览器扩展收集页面信息
+本地 Bridge 服务（打包上下文、管理会话、分发指令）
+              ↓ 转给 AI
+AI 编码助手（读代码 → 改代码 → 让浏览器做操作）
+              ↓ 操作结果回传
+你在聊天面板里看到验证结果
 ```
 
-## 七、本地开发规范
+## 开发者须知
 
-修改聊天 UI、Bridge 通信、ACP 会话、持久化存储、SSE、图片或 Markdown 渲染逻辑前，优先查阅 [docs/HANDOFF.md](docs/HANDOFF.md)。
+如果你要修改本项目源码（尤其是聊天面板、Bridge 通信、会话管理、页面截图等关键逻辑），请先阅读 [docs/HANDOFF.md](docs/HANDOFF.md) 中的防回归规则。
 
-Bridge 构建和测试：
+Bridge 模块的构建和测试：
 
 ```bash
 cd devtailor-bridge
@@ -119,14 +136,14 @@ npm run build
 npm test
 ```
 
-## 八、开源参考与授权
+## 开源与致谢
 
-### 参考开源项目
+### 参考项目
 
 - DOM Review — `https://github.com/AAnkacHH/web-review-extention` — MIT
 - VisBug — `https://github.com/GoogleChromeLabs/ProjectVisBug` — Apache-2.0
 - wechat-acp — `https://github.com/formulahendry/wechat-acp` — MIT
 
-### 项目开源协议
+### 开源协议
 
-MIT
+Apache-2.0

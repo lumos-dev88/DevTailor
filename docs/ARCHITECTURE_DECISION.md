@@ -31,6 +31,8 @@ DevTailor content UI 采用分层隔离策略：
 - 宿主容器和辅助层默认尽量不拦截页面点击。
 - 只有真实可见、可操作的 DevTailor 卡片/按钮恢复 `pointer-events: auto`。
 - 面板内部事件要 `stopPropagation`，避免触发页面外部点击逻辑。
+- 面板和 FAB 的视口边界 clamp 必须允许四边贴边，边距为 `0`；不要为顶部预留默认安全距离。
+- 面板坐标中的 `0` 是合法值，读取 `left/top` 时只能在解析结果不是数字时使用初始默认值，不能用 `parseFloat(...) || DEFAULT_POSITION.*` 这类会把 `0` 当作缺省值的写法。
 
 ### 普通 DOM overlay
 
