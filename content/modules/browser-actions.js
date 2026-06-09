@@ -202,14 +202,15 @@
     };
   }
 
-  function hasElementTarget(step = {}) {
+  function hasElementTarget(step = {}, options = {}) {
+    const allowTextLocator = options.allowTextLocator !== false;
     return Boolean(
       step.targetId ||
       step.targetName ||
       step.selector ||
       step.elementId ||
       step.markId ||
-      step.text ||
+      (allowTextLocator && step.text) ||
       step.role ||
       step.label ||
       step.testId ||
@@ -219,9 +220,12 @@
     );
   }
 
-  function requireElementTarget(step, purpose) {
-    if (hasElementTarget(step)) return;
-    const err = new Error(`${purpose} step requires an explicit locator: targetId, targetName, selector, elementId, markId, text, role, label, testId, nearText, or point`);
+  function requireElementTarget(step, purpose, options = {}) {
+    if (hasElementTarget(step, options)) return;
+    const locators = options.allowTextLocator === false
+      ? 'targetId, targetName, selector, elementId, markId, role, label, testId, nearText, or point'
+      : 'targetId, targetName, selector, elementId, markId, text, role, label, testId, nearText, or point';
+    const err = new Error(`${purpose} step requires an explicit locator: ${locators}`);
     err.code = 'MISSING_LOCATOR';
     err.detail = {
       expected: 'explicit element locator',
@@ -263,14 +267,14 @@
         return { ok: true, type, result };
       }
       case 'type': {
-        requireElementTarget(step, 'type');
+        requireElementTarget(step, 'type', { allowTextLocator: false });
         const resolvedStep = await resolveElementTargetParams(step);
         const result = dom.typeText(resolvedStep);
         await sleep(step.waitAfterMs);
         return { ok: true, type, result };
       }
       case 'fill': {
-        requireElementTarget(step, 'fill');
+        requireElementTarget(step, 'fill', { allowTextLocator: false });
         const resolvedStep = await resolveElementTargetParams(step);
         const result = dom.fillText({ blurAfter: false, ...resolvedStep });
         await sleep(step.waitAfterMs);

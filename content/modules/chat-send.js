@@ -84,7 +84,6 @@
         images: attachedImages,
         image: attachedImages[0] || null,
       });
-      startLoading?.();
       refreshSendState();
       schedulePersist();
       return { ok: true };

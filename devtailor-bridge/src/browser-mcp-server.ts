@@ -230,7 +230,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: 'type_text',
-    description: 'Set or append text in the current DevTailor browser tab while preserving keyboard-oriented behavior such as submitKey. Defaults to replacing the field value. Use fill_text for stable form filling.',
+    description: 'Set or append text in the current DevTailor browser tab while preserving keyboard-oriented behavior such as submitKey. Defaults to replacing the field value. The text field is the value to write, not a locator; identify the target with label, role, testId, nearText, selector, elementId, targetId, or targetName. Use fill_text for stable form filling.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -254,7 +254,7 @@ const TOOL_SCHEMAS = [
         },
         grid: { type: 'string', description: 'Grid coordinate from a grid screenshot, for example C5.' },
         gridSize: { type: 'number', description: 'Grid cell size used by the grid screenshot. Defaults to 80.' },
-        text: { type: 'string', description: 'The text to type into the input field.' },
+        text: { type: 'string', description: 'The text value to type into the input field. This is not used as a locator.' },
         mode: { type: 'string', enum: ['replace', 'append'], description: 'replace sets the field value. append adds text after the existing value. Defaults to replace.' },
         submitKey: { type: 'string', enum: ['Enter', 'Tab'], description: 'Key to dispatch after typing, e.g. Enter to submit a form.' },
         blurAfter: { type: 'boolean', description: 'Blur the edited element after input. Useful for triggering validation. Defaults to false.' },
@@ -266,7 +266,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: 'fill_text',
-    description: 'Stably fill or replace text in an input, textarea, contenteditable, or role=textbox element. Prefer this for form setup; use type_text only when testing keyboard behavior.',
+    description: 'Stably fill or replace text in an input, textarea, contenteditable, or role=textbox element. The text field is the value to write, not a locator; identify the target with label, role, testId, nearText, selector, elementId, targetId, or targetName. Prefer this for form setup; use type_text only when testing keyboard behavior.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -275,7 +275,7 @@ const TOOL_SCHEMAS = [
         targetName: { type: 'string', description: 'Saved element target name from get_element_targets.' },
         selector: { type: 'string', description: 'CSS selector to locate the input element.' },
         markId: { type: 'string', description: 'DevTailor mark id from a user-created element mark.' },
-        text: { type: 'string', description: 'The text to fill into the input field.' },
+        text: { type: 'string', description: 'The text value to fill into the input field. This is not used as a locator.' },
         role: { type: 'string', description: 'Optional ARIA role such as textbox, combobox, searchbox.' },
         label: { type: 'string', description: 'Accessible label, placeholder, title, name, or associated label text.' },
         testId: { type: 'string', description: 'data-testid/data-test/data-cy value.' },
@@ -401,7 +401,7 @@ const TOOL_SCHEMAS = [
                     targetId: { type: 'string', description: 'Saved element target id from get_element_targets.' },
                     targetName: { type: 'string', description: 'Saved element target name from get_element_targets.' },
                     selector: { type: 'string', description: 'CSS selector to locate the element.' },
-                    text: { type: 'string', description: 'For click/type/fill/assert_element: visible text to match. For assert_text: expected text. For type/fill: input text content.' },
+                    text: { type: 'string', description: 'For click/assert_element: visible text locator. For type/fill: text value to write, not a locator. For assert_text/wait_for_text: expected text.' },
                     role: { type: 'string', description: 'Optional ARIA role to narrow the target element.' },
                     label: { type: 'string', description: 'Accessible label to narrow the target element.' },
                     testId: { type: 'string', description: 'data-testid/data-test/data-cy value.' },

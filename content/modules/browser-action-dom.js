@@ -92,6 +92,88 @@
     return String(value).replace(/\s+/g, ' ').trim();
   }
 
+  /**
+   * 文本规范化器（可配置）
+   */
+  const TEXT_NORMALIZERS = {
+    // 默认规范化：空格 + 大小写
+    default: (text) => {
+      return text.replace(/\s+/g, ' ').trim().toLowerCase();
+    },
+
+    // 中文增强：统一标点 + 空格 + 大小写
+    chinese: (text) => {
+      return text
+        .replace(/[""]/g, '"')
+        .replace(/['']/g, "'")
+        .replace(/[（）]/g, m => m === '（' ? '(' : ')')
+        .replace(/[【】]/g, m => m === '【' ? '[' : ']')
+        .replace(/[《》]/g, m => m === '《' ? '<' : '>')
+        .replace(/，/g, ',')
+        .replace(/。/g, '.')
+        .replace(/：/g, ':')
+        .replace(/；/g, ';')
+        .replace(/！/g, '!')
+        .replace(/？/g, '?')
+        .replace(/　/g, ' ')  // 全角空格
+        .replace(/[​-‍﻿]/g, '')  // 零宽字符
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    },
+
+    // 纯字母数字：移除所有标点
+    alphanumeric: (text) => {
+      return text
+        .replace(/[^\w\s一-龥]/g, '')  // 保留字母、数字、中文
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    },
+
+    // 无规范化：原样匹配
+    none: (text) => text,
+  };
+
+  /**
+   * 文本匹配器（支持多种策略）
+   */
+  function matchText(actual, expected, options = {}) {
+    const {
+      exact = false,
+      normalizer = 'chinese',
+      matcher = 'substring',
+    } = options;
+
+    // 获取规范化器
+    const normalize = typeof normalizer === 'function'
+      ? normalizer
+      : TEXT_NORMALIZERS[normalizer] || TEXT_NORMALIZERS.default;
+
+    // 规范化文本
+    const normalizedActual = normalize(String(actual || ''));
+    const normalizedExpected = normalize(String(expected || ''));
+
+    // 应用匹配器
+    if (exact) {
+      return normalizedActual === normalizedExpected;
+    }
+
+    if (matcher === 'substring') {
+      return normalizedActual.includes(normalizedExpected);
+    }
+
+    if (matcher === 'regex' && expected instanceof RegExp) {
+      return expected.test(normalizedActual);
+    }
+
+    if (typeof matcher === 'function') {
+      return matcher(normalizedActual, normalizedExpected);
+    }
+
+    return false;
+  }
+
   function normalizedText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
   }
@@ -121,7 +203,7 @@
       el.getAttribute('title'),
       el.getAttribute('name'),
       el.getAttribute('id'),
-    ].filter(Boolean).join(' ');
+    ];
     const labelledBy = el.getAttribute('aria-labelledby');
     let referenced = '';
     if (labelledBy) {
@@ -133,7 +215,7 @@
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
       labels = Array.from(el.labels || []).map(label => label.textContent || '').join(' ');
     }
-    return [direct, referenced, labels].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    return [...direct, referenced, labels].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
   }
 
   function testIdOf(el) {
@@ -478,30 +560,58 @@
   }
 
   function hasLocatorFields(params = {}) {
-    return Boolean(params.role || params.label || params.nearText || params.testId || params.index != null || params.exact);
+    return Boolean(params.role || params.label || params.nearText || params.testId || params.index != null || params.text);
   }
 
   function matchesLocator(el, params = {}) {
     if (!el || !isVisible(el)) return false;
+
+    // Role 匹配
     if (params.role && elementRole(el).toLowerCase() !== String(params.role).toLowerCase()) return false;
+
+    // TestId 匹配
     if (params.testId) {
       const testId = testIdOf(el);
-      if (!testId || normalizedText(testId.value) !== normalizedText(params.testId)) return false;
+      if (!testId) return false;
+      if (normalizedText(testId.value) !== normalizedText(params.testId)) return false;
     }
+
+    // Text 匹配
     if (params.text) {
-      const haystack = normalizedText(`${elementText(el)} ${accessibleLabel(el)}`);
-      const needle = normalizedText(params.text);
-      if (params.exact ? haystack !== needle : !haystack.includes(needle)) return false;
+      const haystack = `${elementText(el)} ${accessibleLabel(el)}`;
+      if (!matchText(haystack, params.text, {
+        exact: params.exact,
+        normalizer: params.normalizer || 'chinese'
+      })) return false;
     }
+
+    // Label 匹配（核心优化：支持降级策略）
     if (params.label) {
-      const label = normalizedText(accessibleLabel(el));
-      const needle = normalizedText(params.label);
-      if (params.exact ? label !== needle : !label.includes(needle)) return false;
+      const label = accessibleLabel(el);
+
+      // 策略 1: 标准匹配（中文增强规范化）
+      const standardMatch = matchText(label, params.label, {
+        exact: params.exact,
+        normalizer: params.normalizer || 'chinese'
+      });
+
+      // 策略 2: 降级到纯字母数字匹配（移除所有标点）
+      const fallbackMatch = !params.exact && matchText(label, params.label, {
+        normalizer: 'alphanumeric'
+      });
+
+      // 如果两种策略都失败，返回 false（保持 AND 逻辑）
+      if (!standardMatch && !fallbackMatch) return false;
     }
+
+    // NearText 匹配
     if (params.nearText) {
-      const containerText = normalizedText(el.closest('article,li,tr,form,section,div')?.textContent || '');
-      if (!containerText.includes(normalizedText(params.nearText))) return false;
+      const containerText = el.closest('article,li,tr,form,section,div')?.textContent || '';
+      if (!matchText(containerText, params.nearText, {
+        normalizer: params.normalizer || 'chinese'
+      })) return false;
     }
+
     return true;
   }
 
@@ -917,8 +1027,21 @@
     throw new Error('Element is not text-editable');
   }
 
+  function locatorParamsForTextAction(params = {}) {
+    const {
+      text,
+      submitKey,
+      mode,
+      blurAfter,
+      waitAfterMs,
+      force,
+      ...locatorParams
+    } = params;
+    return locatorParams;
+  }
+
   function typeText(params = {}) {
-    const el = findElement(params);
+    const el = findElement(locatorParamsForTextAction(params));
     if (!el || !isVisible(el)) {
       throw new Error('Element not found or not visible');
     }
@@ -948,7 +1071,7 @@
   }
 
   function fillText(params = {}) {
-    const el = findElement(params);
+    const el = findElement(locatorParamsForTextAction(params));
     if (!el || !isVisible(el)) {
       throw new Error('Element not found or not visible');
     }

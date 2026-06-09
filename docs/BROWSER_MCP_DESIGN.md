@@ -388,8 +388,9 @@ Browser tools 对 AI 暴露时，需要明确：
 - 你正在操作当前 DevTailor 页面，不需要传 tab、URL、clientId。
 - 需要点击或输入且页面结构不明确时，用 `get_page_snapshot` 获取页面结构；如果已有稳定 selector、testId、role/label 或明确 mark，就不必为了例行流程先 snapshot。动态列表重排后重新 snapshot，或者使用 testId、role/label、nearText、fresh elementId 这类稳定 locator。
 - `elementId` 是 snapshot 产生的稳定 locator handle，不是永久 DOM id；reload 或大规模 DOM 变化后应重新 snapshot。
+- **Label 匹配增强**：`label` 参数会统一常见中文/英文标点、全角/半角空格和零宽字符，并在非精确匹配时移除标点降级重试。`fill_text` / `type_text` 的 `text` 是写入内容，不参与 locator 匹配；如需按现有文本定位，应使用 `label`、`role`、`testId`、`nearText` 或 selector 等 locator 字段。
 - 当需要在当前页面执行多个操作（恢复状态、验证表单、批量验证）时，可以使用 `run_actions` 一次性执行；简单单步操作或即时检查不要硬凑批量流程。
-- `run_actions` 中 `click`、`type`、`fill`、`assert_element` step 必须显式传 locator（selector、elementId、markId、text、role、label、testId、nearText 或 point）；某个 step 失败会停止当前 action，但后续 action 继续。
+- `run_actions` 中 `click`、`type`、`fill`、`assert_element` step 必须显式传 locator。`click` / `assert_element` 可用 selector、elementId、markId、text、role、label、testId、nearText 或 point；`type` / `fill` 的 `text` 是写入内容，不是 locator，需另传 label、role、testId、nearText、selector、elementId、targetId 或 targetName。
 - 动态弹窗、延迟渲染、异步校验出现前，优先使用 `wait_for_selector` 或 `wait_for_text`，避免盲点坐标或复用过期 elementId。
 - Radix UI / Portal / Popover 内容可能挂到 `document.body` 下，初始 snapshot 可能看不到；打开弹层后先 `wait_for_text` / `wait_for_selector`，必要时用 `run_js` 查询 `document.body`。
 - 文本点击是便利 fallback，复杂列表或重复文案优先使用 testId、role/label、nearText、fresh elementId 或稳定 selector；不要假设 text 一定命中文本叶子节点。

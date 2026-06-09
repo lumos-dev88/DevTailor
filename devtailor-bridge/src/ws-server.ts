@@ -439,9 +439,11 @@ export class WSServer {
         this.send(clientId, { type: 'thinking', tabId: clientId, delta });
       },
       onDone: (summary) => {
+        this.closeActiveThinking(display);
         this.send(clientId, { type: 'done', tabId: clientId, summary });
       },
       onError: (message) => {
+        this.closeActiveThinking(display);
         this.send(clientId, { type: 'error', tabId: clientId, message });
       },
       onToolCall: (tool) => {
@@ -557,6 +559,7 @@ export class WSServer {
   }
 
   private appendAssistantDelta(display: DisplaySession, delta: string): void {
+    this.closeActiveThinking(display);
     let msg = [...display.messages].reverse().find(item => item.role === 'assistant' && item.type === 'stream') as DisplayMessage | undefined;
     if (!msg || display.messages[display.messages.length - 1] !== msg) {
       msg = {
@@ -595,7 +598,17 @@ export class WSServer {
     this.trimDisplayMessages(display);
   }
 
+  private closeActiveThinking(display: DisplaySession): boolean {
+    const msg = [...display.messages].reverse().find(item => item.role === 'assistant' && item.type === 'thinking' && !item.closed) as DisplayMessage | undefined;
+    if (!msg) return false;
+    msg.closed = true;
+    msg.timestamp = Date.now();
+    this.store?.updateMessage(display.id, msg);
+    return true;
+  }
+
   private addToolDisplayMessage(display: DisplaySession, tool: any): void {
+    this.closeActiveThinking(display);
     const msg: DisplayMessage = {
       id: `msg_${Date.now()}_${randomUUID()}`,
       role: 'assistant',

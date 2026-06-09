@@ -164,6 +164,10 @@
     );
     window.__domReview.ui.setActivationBannerVisible?.(connected && !active);
     getSendManager().refreshSendState();
+    // Refresh empty state when connection status changes
+    if (messages.length === 0) {
+      renderMessages();
+    }
   }
 
   async function activateCurrentTab() {
@@ -310,11 +314,28 @@
     if (!container) return;
 
     if (messages.length === 0) {
-      container.innerHTML = '<div class="dt-chat-empty">标记会作为 AI 上下文附加到下一条消息。这里保留你的请求和生成的 Codex 提示词。</div>';
+      container.innerHTML = `<div class="dt-chat-empty">${getEmptyStateText()}</div>`;
       return;
     }
 
     container.innerHTML = renderMessageBlocks(messages);
+  }
+
+  function getEmptyStateText() {
+    const wsClient = window.__domReview.wsClient;
+    const status = wsClient?.getStatus?.() || 'disconnected';
+    const projectInfo = wsClient?.getProjectInfo?.() || {};
+    const agentName = projectInfo.agentLabel || projectInfo.agentKey || null;
+
+    if (status === 'disconnected') {
+      return agentName
+        ? `等待连接到 ${agentName}…<br><br>请确保 DevTailor Bridge 已启动`
+        : `等待连接到 Bridge…<br><br>请确保 DevTailor Bridge 已启动`;
+    }
+    if (status === 'connecting') {
+      return `连接中…`;
+    }
+    return `标记会作为 AI 上下文附加到下一条消息<br><br>试试点击「标记」按钮标注页面元素，或直接输入你的需求`;
   }
 
   function renderMessageBlocks(msgs) {
@@ -324,7 +345,6 @@
       const msg = msgs[i];
       const requestInFlight = getSendManager().isRequestInFlight();
       if (msg.type === 'loading') {
-        out.push(renderLoading(msg));
         i++;
         continue;
       }
@@ -372,19 +392,21 @@
   function renderTextBubble(msg, withFooter) {
     const images = normalizeImages(msg.images || msg.image);
     const imageHtml = images.length
-      ? `<div class="dt-chat-attachments">${images.map((src, idx) =>
+      ? `<div class="dt-chat-attachments dt-chat-attachments--user">${images.map((src, idx) =>
         `<img class="dt-chat-attachment" src="${escapeHtml(src)}" alt="发送的截图 ${idx + 1}" data-preview-image="${escapeHtml(src)}">`
       ).join('')}</div>`
       : '';
 
     if (msg.role === 'user') {
-      const text = msg.content ? `<div>${escapeHtml(msg.content)}</div>` : '';
-      return `<div class="dt-chat-msg dt-chat-msg--user">${text}${imageHtml}</div>`;
+      const syntheticImageText = images.length && /^发送\s+\d+\s+张图片$/.test(String(msg.content || '').trim());
+      const text = msg.content && !syntheticImageText
+        ? `<div class="dt-chat-msg dt-chat-msg--user">${escapeHtml(msg.content)}</div>`
+        : '';
+      return `<div class="dt-chat-user-stack">${text}${imageHtml}</div>`;
     }
 
     const md = chatMarkdown.render(msg.content);
-    const footer = withFooter ? renderAssistantFooter(msg) : '';
-    return `<div class="dt-chat-msg dt-chat-md">${md}${footer}</div>`;
+    return `<div class="dt-chat-msg dt-chat-md">${md}</div>`;
   }
 
   // --- Thinking block (open-design style) ---
@@ -498,36 +520,17 @@
     return `toolgroup:${family}:${anchor}`;
   }
 
-  function renderLoading(msg) {
-    const statusText = msg.statusText || 'Claude Code 思考中…';
-    return `
-      <div class="dt-waiting-pill">
-        <span class="dt-waiting-dot" aria-hidden></span>
-        <span class="dt-waiting-label">${escapeHtml(statusText)}</span>
-      </div>
-    `;
-  }
-
-  function renderAssistantFooter(msg) {
-    const isStreaming = msg.type === 'stream' || getBridgeEvents().isStreamingMessage(msg);
-    const label = isStreaming ? 'Working…' : 'Done';
-    return `
-      <div class="dt-assistant-footer">
-        <span class="dt-assistant-footer-dot" data-active="${isStreaming ? 'true' : 'false'}"></span>
-        <span class="dt-assistant-footer-label">${label}</span>
-      </div>
-    `;
-  }
-
   function renderPromptCard(msg) {
+    const projectInfo = window.__domReview.wsClient?.getProjectInfo?.() || {};
+    const agentName = projectInfo.agentLabel || projectInfo.agentKey || 'Agent';
     return `
       <div class="dt-prompt-card" data-msg-id="${escapeHtml(msg.id)}">
         <div class="dt-prompt-header">
-          <span class="dt-prompt-label">Claude Code 提示词</span>
+          <span class="dt-prompt-label">${agentName} 提示词</span>
         </div>
         <div class="dt-prompt-body">${escapeHtml(msg.content)}</div>
         <div class="dt-prompt-footer">
-          <span class="dt-prompt-hint">复制并粘贴到 Claude Code</span>
+          <span class="dt-prompt-hint">复制并粘贴到 ${agentName}</span>
           <button class="dt-btn dt-btn--small" data-action="copy-prompt" data-msg-id="${escapeHtml(msg.id)}">复制</button>
         </div>
       </div>
@@ -558,6 +561,18 @@
 
   function isPinnedToBottom() {
     return getScrollManager().isPinned();
+  }
+
+  function keepMessageInView(msgId) {
+    const container = getMessagesEl();
+    if (!container || !msgId) return;
+    const block = container.querySelector(`.dt-thinking-block[data-msg-id="${CSS.escape(msgId)}"]`);
+    if (!block) return;
+    const blockRect = block.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    if (blockRect.top < containerRect.top || blockRect.bottom > containerRect.bottom) {
+      block.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   function getImageManager() {
@@ -775,13 +790,15 @@
 
         const thinkingBtn = e.target.closest('[data-action="toggle-thinking"]');
         if (thinkingBtn) {
+          e.preventDefault();
+          e.stopPropagation();
           const msgId = thinkingBtn.dataset.msgId;
           const msg = messages.find(m => m.id === msgId);
           if (msg) {
-            const shouldFollow = isPinnedToBottom();
-            msg.open = !msg.open;
+            const willOpen = !msg.open;
+            msg.open = willOpen;
             renderMessages();
-            if (shouldFollow) followLatestIfPinned();
+            if (willOpen) keepMessageInView(msgId);
           }
           return;
         }
@@ -885,7 +902,7 @@
       refreshConnectionStatus();
     }
 
-    window.__domReview.ui.onStatusClick?.(activateCurrentTab);
+    // Only bind activate button, not status indicator
     window.__domReview.ui.onActivateTabClick?.(activateCurrentTab);
 
     const sessionButton = window.__domReview.ui.getSessionButton?.();

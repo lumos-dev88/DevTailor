@@ -24,8 +24,8 @@
     z-index: 2147483647;
     top: ${DEFAULT_POSITION.y}px;
     left: ${DEFAULT_POSITION.x}px;
-    width: min(${DEFAULT_PANEL_WIDTH}px, calc(100vw - 24px));
-    height: min(${DEFAULT_PANEL_HEIGHT}px, calc(100vh - 32px));
+    width: auto;
+    height: auto;
     pointer-events: none;
     display: block;
   `;
@@ -149,8 +149,8 @@
 
     /* === Sidebar Root === */
     .dt-sidebar {
-      width: 100%;
-      height: 100%;
+      width: min(${DEFAULT_PANEL_WIDTH}px, calc(100vw - 24px));
+      height: min(${DEFAULT_PANEL_HEIGHT}px, calc(100vh - 32px));
       background: var(--dt-bg-primary);
       color: var(--dt-text-primary);
       font-family: var(--dt-font);
@@ -624,6 +624,14 @@
       border-radius: var(--dt-radius-sm);
       border: 1px solid rgba(148, 163, 184, 0.25);
     }
+    .dt-chat-user-stack {
+      align-self: flex-end;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      max-width: min(75%, 320px);
+    }
     .dt-chat-msg--user {
       align-self: flex-end;
       width: fit-content;
@@ -639,11 +647,14 @@
       max-width: 280px;
       line-height: 1.5;
     }
+    .dt-chat-user-stack .dt-chat-msg--user {
+      max-width: 100%;
+    }
     .dt-chat-attachment {
       display: block;
-      width: 180px;
+      width: 160px;
       max-width: 100%;
-      max-height: 120px;
+      max-height: 108px;
       object-fit: contain;
       margin-top: 8px;
       border-radius: var(--dt-radius-sm);
@@ -662,12 +673,23 @@
       gap: 8px;
       margin-top: 8px;
     }
+    .dt-chat-attachments--user {
+      align-self: flex-end;
+      display: flex;
+      flex-flow: row wrap;
+      justify-content: flex-end;
+      align-items: flex-start;
+      max-width: min(75%, 300px);
+      margin-top: 0;
+      gap: 6px;
+    }
     .dt-chat-attachments .dt-chat-attachment {
       margin-top: 0;
-      width: 140px;
-      max-height: 100px;
+      flex: 0 0 136px;
+      width: 136px;
+      height: 86px;
+      max-height: none;
     }
-
     /* === Legacy tool msg (kept for backward compat) === */
     .dt-tool-msg {
       align-self: flex-start;
@@ -740,26 +762,31 @@
       display: flex;
       align-items: center;
       gap: 7px;
-      padding: 7px 10px;
+      min-height: 34px;
+      padding: 9px 11px;
       background: transparent;
       border: none;
       color: var(--dt-text-secondary);
       font-size: 11px;
       cursor: pointer;
       text-align: left;
-      transition: color 0.15s;
     }
-    .dt-thinking-toggle:hover {
+    .dt-thinking-toggle:hover,
+    .dt-thinking-toggle:focus-visible {
       color: var(--dt-text-primary);
+      outline: none;
+      background: rgba(148,163,184,0.08);
     }
     .dt-thinking-icon {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       flex: 0 0 auto;
+      pointer-events: none;
     }
     .dt-thinking-icon svg {
       display: block;
+      pointer-events: none;
     }
     .dt-thinking-label {
       font-weight: 600;
@@ -783,10 +810,12 @@
       justify-content: center;
       color: var(--dt-text-muted);
       line-height: 1;
+      pointer-events: none;
     }
     .dt-thinking-chev svg {
       display: block;
       margin: 0;
+      pointer-events: none;
     }
     .dt-thinking-body {
       padding: 9px 11px 11px;
@@ -1008,10 +1037,12 @@
       justify-content: center;
       color: var(--dt-text-muted);
       line-height: 1;
+      pointer-events: none;
     }
     .dt-tool-group-chev svg {
       display: block;
       margin: 0;
+      pointer-events: none;
     }
     .dt-tool-group-body {
       padding: 0 9px 9px;
@@ -1023,34 +1054,6 @@
     .dt-tool-group[data-tool-family="browser"] {
       border-color: rgba(45,212,191,0.22);
       background: linear-gradient(135deg, rgba(8,47,73,0.3), rgba(15,58,80,0.2));
-    }
-
-    /* === Waiting Pill === */
-    .dt-waiting-pill {
-      align-self: flex-start;
-      display: inline-flex;
-      align-items: center;
-      gap: 9px;
-      padding: 7px 11px;
-      border-radius: var(--dt-radius-sm);
-      border: 1px solid rgba(148,163,184,0.18);
-      background: linear-gradient(135deg, rgba(15,23,42,0.5), rgba(30,41,59,0.4));
-      color: var(--dt-text-secondary);
-      font-size: 12px;
-      backdrop-filter: blur(4px);
-    }
-    .dt-waiting-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #60a5fa, #3b82f6);
-      animation: dt-pulse 1.4s ease-in-out infinite;
-      flex-shrink: 0;
-      box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
-    }
-    @keyframes dt-pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(0.85); }
     }
 
     /* === Assistant Footer === */
@@ -1166,15 +1169,19 @@
 
     .dt-screenshot-wrap {
       position: relative;
-      display: inline-block;
+      flex: 0 0 136px;
+      width: 136px;
+      height: 86px;
       border-radius: var(--dt-radius-sm);
       overflow: hidden;
       border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.95);
     }
     .dt-screenshot-wrap img {
       display: block;
-      max-height: 80px;
-      width: auto;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
       cursor: zoom-in;
     }
     .dt-screenshot-remove {
@@ -1363,6 +1370,7 @@
     /* === Floating Action Ball === */
     .dt-fab {
       display: none;
+      position: fixed;
       width: 36px;
       height: 36px;
       border-radius: 50%;
@@ -1534,7 +1542,7 @@
 
   function clampPosition(x, y) {
     const rect = getPanelRect();
-    const margin = 12;
+    const margin = 0;
     const maxX = Math.max(margin, window.innerWidth - rect.width - margin);
     const maxY = Math.max(margin, window.innerHeight - rect.height - margin);
     return {
@@ -1590,8 +1598,15 @@
 
   function applyPanelSize(size) {
     panelSize = normalizePanelSize(size);
-    host.style.width = `min(${panelSize.width}px, calc(100vw - 24px))`;
-    host.style.height = `min(${panelSize.height}px, calc(100vh - 32px))`;
+    const sidebar = shadow.getElementById('dt-sidebar');
+    if (sidebar) {
+      sidebar.style.width = `min(${panelSize.width}px, calc(100vw - 24px))`;
+      sidebar.style.height = `min(${panelSize.height}px, calc(100vh - 32px))`;
+    }
+    if (sidebarVisible) {
+      host.style.width = 'auto';
+      host.style.height = 'auto';
+    }
     requestAnimationFrame(clampToViewport);
   }
 
@@ -1706,6 +1721,8 @@
       const fab = shadow.getElementById('dt-fab');
       if (sidebar) sidebar.style.display = 'flex';
       if (fab) fab.style.display = 'none';
+      host.style.width = 'auto';
+      host.style.height = 'auto';
 
       // Sidebar opens from where the FAB is (FAB is the anchor)
       const anchor = savedFabPos || {
@@ -1925,10 +1942,25 @@
       const dot = shadow.getElementById('dt-status-dot');
       const text = shadow.getElementById('dt-status-text');
       if (!dot || !text) return;
+
+      const projectInfo = window.__domReview.wsClient?.getProjectInfo?.() || {};
+      const agentName = projectInfo.agentLabel || projectInfo.agentKey || null;
+
       const map = {
-        disconnected: { cls: 'dt-status-dot--disconnected', label: '未连接' },
-        connecting: { cls: 'dt-status-dot--connecting', label: '连接中' },
-        connected: { cls: 'dt-status-dot--connected', label: isActive ? '已接管' : '已连接 · 点击接管' },
+        disconnected: {
+          cls: 'dt-status-dot--disconnected',
+          label: agentName ? `${agentName} 未连接` : '未连接 Bridge'
+        },
+        connecting: {
+          cls: 'dt-status-dot--connecting',
+          label: '连接中…'
+        },
+        connected: {
+          cls: 'dt-status-dot--connected',
+          label: isActive
+            ? (agentName ? `${agentName} 已接管` : '已接管')
+            : (agentName ? `${agentName} 已连接` : '已连接')
+        },
       };
       const cfg = map[status] || map.disconnected;
       dot.className = 'dt-status-dot ' + cfg.cls;

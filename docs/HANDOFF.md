@@ -238,6 +238,14 @@ npm run build
 - 再用 selector / xpath / locatorRecipes 兜底。
 - 保存的是“这个元素为什么是它”，不是只保存单个 CSS selector。
 
+**Label 匹配增强**：
+
+- 支持中文标点自动转换（`”任务名称”` ≈ `”任务名称”`）
+- 支持全角/半角空格统一（`任务　名称` ≈ `任务 名称`）
+- 支持零宽字符自动清理
+- 支持降级匹配（移除标点后重试）
+- `fill_text` / `type_text` 的 `text` 是写入内容，不参与 locator 匹配；定位请使用 `label`、`role`、`testId`、`nearText`、`selector` 或 `elementId`。
+
 ## 图片处理
 
 图片来源：

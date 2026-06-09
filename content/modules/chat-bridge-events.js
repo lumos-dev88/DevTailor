@@ -65,7 +65,7 @@
         role: 'assistant',
         type: 'loading',
         content: '',
-        statusText: statusText || 'Claude Code 思考中…',
+        statusText: statusText || '…',
         timestamp: Date.now()
       });
       trimMessages();
@@ -84,10 +84,11 @@
     }
 
     function removeLoading() {
-      if (!activeLoadingId) return;
+      if (!activeLoadingId) return false;
       const idx = messages.findIndex(m => m.id === activeLoadingId);
       if (idx >= 0) messages.splice(idx, 1);
       activeLoadingId = null;
+      return idx >= 0;
     }
 
     function startStream() {
@@ -108,6 +109,7 @@
     }
 
     function appendStream(delta) {
+      if (!delta) return;
       const wasCreated = ensureStreamAtTail();
       if (!activeStreamId) return;
 
@@ -185,13 +187,14 @@
     }
 
     function appendThinking(delta) {
-      updateLoadingStatus('思考中…');
+      if (!delta) return;
+      removeLoading();
       markLastPendingToolCompleted();
       const lastThinking = [...messages].reverse().find(m => m.type === 'thinking');
       if (lastThinking && !lastThinking.closed) {
         lastThinking.content += delta;
         renderMessages();
-        followLatestIfPinned();
+        if (!lastThinking.open) followLatestIfPinned();
         schedulePersist();
         return;
       }
@@ -221,7 +224,8 @@
       const browserName = inferBrowserToolName(tool.title, tool.input, tool.kind);
       const safeTitle = browserName ? normalizeToolTitle(browserName, 'Tool') : normalizeToolTitle(tool.title, 'Tool');
       const toolCallId = normalizeToolId(tool.toolCallId, tool.title);
-      updateLoadingStatus(safeTitle || '调用工具…');
+      removeLoading();
+      closeActiveThinking();
       const existing = messages.find(m => m.type === 'tool' && m.toolCallId === toolCallId);
       if (existing) {
         existing.title = safeTitle;
@@ -288,7 +292,6 @@
       if (!msg || typeof msg !== 'object') return;
       switch (msg.type) {
         case 'stream':
-          if (!activeStreamId) startStream();
           appendStream(msg.delta || '');
           break;
         case 'thinking':
