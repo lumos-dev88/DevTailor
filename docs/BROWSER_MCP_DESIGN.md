@@ -201,6 +201,7 @@ content/modules/
 ```text
 用户当前 tab 打开 DevTailor
   -> content script 建立 SSE: /events?clientId=tab_xxx
+  -> 用户点击「连接当前页」或已接管 tab 刷新重连
   -> Bridge 记录 activeClientId = tab_xxx
   -> Claude Code 调 browser tool，例如 get_page_snapshot({})
   -> Claude Code 使用 snapshot 和 locator，例如 click_page({ role: "button", text: "登录" })
@@ -226,9 +227,11 @@ interface BrowserContextState {
 
 更新规则：
 
-- `/events?clientId=...` 建立连接时，如果它属于当前 ACP session，设置为 active。
-- `/review` 成功进入某个 ACP session 时，把对应 `clientId` 设为 active。
-- 同一 bridge 里多个 tab 同时连接时，最后一次发送消息的 DevTailor tab 是 active。
+- `/events?clientId=...` 建立连接只表示 tab 在线；新 tab 不自动抢占 active。
+- `/activate` 是显式接管入口，成功后设置 `activeClientId` 并广播状态。
+- `/review` 要求请求来自当前 active tab；不活跃 tab 会收到 409，提示点击「连接当前页」。
+- 当前已接管 tab 刷新重连时保持 active ownership。
+- 会话加载/删除后，Bridge 会把操作发起 tab 与新的 display session 状态同步。
 - Browser tool 调用不接收 `clientId`、`tabId`、`pageUrl`。
 - 如果没有 active client，tool 返回 `NO_ACTIVE_TAB`。
 
@@ -277,10 +280,21 @@ SSE 下行：
 type BrowserActionEvent = {
   type: 'browser_action'
   requestId: string
-  action: 'take_visible_screenshot' | 'get_page_snapshot' | 'reload_page' | 'click_page' | 'type_text' | 'fill_text' | 'press_key' | 'clear_state' | 'wait_for_selector' | 'wait_for_text' | 'get_console_logs' | 'get_console_message' | 'request_user_assistance' | 'run_actions'
+  action: 'take_visible_screenshot' | 'get_page_snapshot' | 'reload_page' | 'click_page' | 'type_text' | 'fill_text' | 'press_key' | 'clear_state' | 'wait_for_selector' | 'wait_for_text' | 'get_console_logs' | 'get_console_message' | 'request_user_assistance' | 'run_actions' | 'run_js'
   params: Record<string, unknown>
 }
 ```
+
+Bridge-local actions 不走 SSE 往返：
+
+```ts
+type BridgeLocalBrowserAction =
+  | 'get_element_targets'
+  | 'save_element_target'
+  | 'delete_element_target'
+```
+
+元素库是项目级全量库，`get_element_targets` 默认返回项目全量，不做当前页路径过滤。
 
 HTTP 回传：
 
@@ -395,13 +409,22 @@ Browser tools 对 AI 暴露时，需要明确：
 ```typescript
 interface DevTailorBrowserTools {
   take_visible_screenshot: {
-    params: { hideDevTailor?: boolean }
+    params: {
+      hideDevTailor?: boolean
+      grid?: boolean
+      gridSize?: number
+      gridLabels?: boolean
+    }
     returns: { mimeType: 'image/png'; data: string }
   }
 
   get_page_snapshot: {
     params: {
       selectors?: string[]
+      level?: 'summary' | 'interactive-only' | 'full'
+      maxElements?: number
+      roles?: string[]
+      visibleOnly?: boolean
     }
     returns: {
       url: string
@@ -427,6 +450,50 @@ interface DevTailorBrowserTools {
         rect: { x: number; y: number; width: number; height: number }
       }>
     }
+  }
+
+  get_element_targets: {
+    params: {}
+    returns: {
+      targets: Array<{
+        id: string
+        targetId: string
+        name: string
+        description?: string
+        pagePattern?: string
+        pageUrl?: string
+        selector?: string
+        xpath?: string
+        locatorRecipes?: Array<Record<string, unknown>>
+        semantic?: Record<string, unknown>
+        context?: Record<string, unknown>
+        structure?: Record<string, unknown>
+        visual?: Record<string, unknown>
+        createdAt: string
+        updatedAt: string
+      }>
+    }
+  }
+
+  save_element_target: {
+    params: {
+      name: string
+      description?: string
+      pagePattern?: string
+      selector?: string
+      xpath?: string
+      locatorRecipes?: Array<Record<string, unknown>>
+      semantic?: Record<string, unknown>
+      context?: Record<string, unknown>
+      structure?: Record<string, unknown>
+      visual?: Record<string, unknown>
+    }
+    returns: { target: Record<string, unknown> }
+  }
+
+  delete_element_target: {
+    params: { targetId?: string; targetName?: string }
+    returns: { deleted: string }
   }
 }
 ```
@@ -681,18 +748,19 @@ Browser tool 调用时，Bridge 必须知道当前 ACP session 对应的 active 
 
 ### Phase 1: 最小闭环
 
-- [ ] Bridge 增加 browser tool request/response 通道，支持 requestId 超时。
-- [ ] Bridge 增加 active browser context，只绑定当前 DevTailor tab。
-- [ ] 扩展处理 `browser_action` SSE 消息。
-- [ ] 实现 `take_visible_screenshot`，复用现有截图模块。
-- [ ] 实现 `get_page_snapshot`，读取 URL、title、viewport、标记元素 rect。
-- [ ] Prompt 中只提示 AI 在"需要验证当前页面状态"时使用 browser tools。
+- [x] Bridge 增加 browser tool request/response 通道，支持 requestId 超时。
+- [x] Bridge 增加 active browser context，只绑定当前已接管 DevTailor tab。
+- [x] 扩展处理 `browser_action` SSE 消息。
+- [x] 实现 `take_visible_screenshot`，复用现有截图模块。
+- [x] 实现 `get_page_snapshot`，读取 URL、title、viewport、交互元素摘要。
+- [x] Prompt 中只提示 AI 按需使用最小 browser tool 集合。
+- [x] 实现项目级元素库：`get_element_targets`、`save_element_target`、`delete_element_target`。
 
 ### Phase 2: 调试辅助
 
 - [x] content script 缓存最近 console message。
 - [x] 实现 `get_console_logs` / `get_console_message`。
-- [ ] Bridge 对 tool result 做大小限制和结构化错误包装。
+- [x] Bridge 对 browser action 做 requestId 匹配、超时和结构化错误包装。
 - [ ] 评估 `hover_page`：hover 后读取 tooltip、菜单、浮层状态并截图验证。
 
 ### Phase 3: 页面操作与批量执行

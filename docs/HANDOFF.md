@@ -35,7 +35,7 @@ npm test
 - `--` 是 npm 参数分隔符，不能省。
 - `--dir` 是项目目录，用于计算项目身份和 `.devtailor/` 存储目录。
 - `--agent` 支持内置预设或原始 ACP 命令。
-- `--port` 默认 `34781`，只是通讯端口，不能作为会话或项目身份。
+- Bridge 固定监听 `34781`，这是扩展约定端口；当前 CLI 不暴露 `--port`。
 
 ## Agent 预设
 
@@ -90,8 +90,10 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
 - `POST /review`：发送当前用户请求。
 - `POST /activate`：当前 tab 接管项目浏览器操作权。
 - `POST /cancel`：取消当前 Agent turn。
+- `POST /mcp`：Bridge 内嵌 Browser MCP JSON-RPC endpoint。
 - `GET /health`：项目、Agent、激活 tab 和 ACP session 元数据。
-- `GET /sessions` / `POST /sessions/load` / `POST /sessions/delete`：展示会话管理。
+- `POST /new-session`：创建或复用空白展示会话。
+- `GET /sessions` / `GET /sessions/active` / `POST /sessions/load` / `POST /sessions/delete`：展示会话管理。
 - `GET /element-targets` / `POST /element-targets` / `DELETE /element-targets/:id`：元素库。
 - `POST /browser-action-result`：扩展回传 Browser MCP 执行结果。
 
@@ -328,3 +330,4 @@ Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid
 - 不要移除 Markdown sanitizer。
 - 不要让 DevTailor 面板拦截 Agent 的坐标/grid 点击。
 - 不要让元素库退化成只保存 CSS selector。
+- 不要恢复 `/element-targets?url=...` 当前页过滤；元素库查询统一项目全量。
