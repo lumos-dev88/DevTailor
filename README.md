@@ -76,34 +76,57 @@ AI 可以在你正在调试的页面上做这些事（不需要你写测试代�
 
 ## 快速开始
 
-### 1. 启动本地 Bridge 服务
+完整流程就四步：**装依赖 → 启动 Bridge → 加载扩展 → 打开页面使用**。
 
-在 `devtailor-bridge/` 目录执行：
+### 1. 安装依赖
+
+先确认电脑里已经安装 Node.js 20+。然后在终端进入本项目，运行：
 
 ```bash
-npm run dev -- --dir ../../todo --agent claude
+cd devtailor-bridge
+npm install
 ```
 
-更多启动方式：
+### 2. 启动 Bridge
+
+Bridge 是本地中转服务。它会把浏览器里的页面信息发给 AI，再把 AI 的操作指令送回浏览器。
 
 ```bash
-# 指定项目目录
-npm run dev -- --dir /absolute/path/to/project
+npm run dev -- --dir /path/to/your/frontend/project --agent claude
+```
 
-# 使用不同的 AI
-npm run dev -- --dir . --agent gemini
-npm run dev -- --dir . --agent codex
+把 `/path/to/your/frontend/project` 换成你真正要调试的前端项目目录。
+
+如果你的前端项目就是当前目录，可以写：
+
+```bash
 npm run dev -- --dir . --agent claude
-# 查看可用的 AI 列表
+```
+
+想看支持哪些 AI，可以运行：
+
+```bash
 npm run dev -- agents
 ```
 
-### 2. 在浏览器里加载扩展
+启动成功后，保持这个终端窗口不要关闭。
 
-1. 在 Chrome 中开启开发者模式，加载当前仓库的扩展源码。
-2. 打开你的本地开发页面（通常是 `localhost` 或 `127.0.0.1`）。
-3. 点击 DevTailor 悬浮面板里的「接管」，把当前标签页标记为调试目标。
-4. 然后就可以圈元素、截图、输入问题，开始和 AI 联动调试了。
+### 3. 在 Chrome 里加载扩展
+
+1. 打开 Chrome，访问 `chrome://extensions/`
+2. 右上角开启「开发者模式」
+3. 点击左上角「加载已解压的扩展程序」
+4. 选择本项目根目录（包含 `manifest.json` 的那个目录）
+5. 加载成功后，你会在浏览器工具栏看到 DevTailor 图标
+
+### 4. 开始使用
+
+1. 用 Chrome 打开你要调试的本地前端页面（比如 `http://localhost:3000`）
+2. 打开 DevTailor 悬浮面板
+3. 点击「接管」，让 DevTailor 使用当前标签页
+4. 在页面上标记元素、截图，或者直接在面板里输入问题
+
+如果面板里显示绿色「已连接」，说明已经可以开始调试。如果显示「未连接」，先检查刚才启动 Bridge 的终端窗口是否还开着。
 
 ## 环境要求
 
