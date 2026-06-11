@@ -11,10 +11,9 @@
   window.__domReview = window.__domReview || {};
 
   function create({
-    messages,
+    messageStore,
     maxMessages,
     toolHelpers,
-    renderMessages,
     followLatestIfPinned,
     scrollToBottom,
     schedulePersist,
@@ -36,12 +35,6 @@
     let activeStreamId = null;
     let activeLoadingId = null;
 
-    function trimMessages() {
-      if (messages.length > maxMessages) {
-        messages.splice(0, messages.length - maxMessages);
-      }
-    }
-
     function isStreamingMessage(msg) {
       return Boolean(msg && msg.id && msg.id === activeStreamId);
     }
@@ -49,18 +42,14 @@
     function startLoading(statusText) {
       if (activeLoadingId) {
         if (statusText) {
-          const msg = messages.find(m => m.id === activeLoadingId);
-          if (msg) {
-            msg.statusText = statusText;
-            renderMessages();
-            followLatestIfPinned();
-          }
+          messageStore.update(activeLoadingId, { statusText });
+          followLatestIfPinned();
         }
         return;
       }
       const id = 'msg_' + Date.now() + '_loading';
       activeLoadingId = id;
-      messages.push({
+      messageStore.append({
         id,
         role: 'assistant',
         type: 'loading',
@@ -68,27 +57,20 @@
         statusText: statusText || '…',
         timestamp: Date.now()
       });
-      trimMessages();
-      renderMessages();
       scrollToBottom();
     }
 
     function updateLoadingStatus(statusText) {
       if (!activeLoadingId) return;
-      const msg = messages.find(m => m.id === activeLoadingId);
-      if (msg) {
-        msg.statusText = statusText;
-        renderMessages();
-        followLatestIfPinned();
-      }
+      messageStore.update(activeLoadingId, { statusText });
+      followLatestIfPinned();
     }
 
     function removeLoading() {
       if (!activeLoadingId) return false;
-      const idx = messages.findIndex(m => m.id === activeLoadingId);
-      if (idx >= 0) messages.splice(idx, 1);
+      const removed = messageStore.remove(activeLoadingId);
       activeLoadingId = null;
-      return idx >= 0;
+      return removed;
     }
 
     function startStream() {
@@ -96,15 +78,13 @@
       removeLoading();
       const id = 'msg_' + Date.now() + '_stream';
       activeStreamId = id;
-      messages.push({
+      messageStore.append({
         id,
         role: 'assistant',
         type: 'stream',
         content: '',
         timestamp: Date.now()
       });
-      trimMessages();
-      renderMessages();
       followLatestIfPinned();
     }
 
@@ -119,11 +99,9 @@
       }
       closeActiveThinking();
 
-      const msg = messages.find(m => m.id === activeStreamId);
-      if (!msg) return;
-      msg.content += delta;
-      renderMessages();
-      followLatestIfPinned();
+      messageStore.update(activeStreamId, (msg) => {
+        msg.content += delta;
+      });
       schedulePersist();
     }
 
@@ -134,7 +112,7 @@
         return true;
       }
 
-      const idx = messages.findIndex(m => m.id === activeStreamId);
+      const idx = messageStore.findIndex(m => m.id === activeStreamId);
 
       // Stream message was removed, create new one
       if (idx === -1) {
@@ -144,7 +122,7 @@
       }
 
       // Stream is not at tail (other messages inserted after it), end old stream and create new one
-      if (idx < messages.length - 1) {
+      if (idx < messageStore.size - 1) {
         endStream();
         startStream();
         return true;
@@ -155,13 +133,13 @@
     }
 
     function markLastPendingToolCompleted() {
-      const lastTool = [...messages].reverse().find(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
+      const lastTool = messageStore.findLast(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
       if (!lastTool) return false;
 
       // Only mark as completed if we're actively streaming (which means the tool succeeded)
       // If there's no active stream, the tool might have failed or been interrupted
       if (activeStreamId) {
-        lastTool.status = 'completed';
+        messageStore.update(lastTool.id, { status: 'completed' });
         return true;
       }
 
@@ -177,10 +155,8 @@
     function applySessionSnapshot(msg) {
       activeStreamId = null;
       activeLoadingId = null;
-      messages.length = 0;
       const restored = Array.isArray(msg.messages) ? msg.messages : [];
-      messages.push(...restored.filter(item => item && typeof item === 'object'));
-      renderMessages();
+      messageStore.replaceAll(restored.filter(item => item && typeof item === 'object'));
       scrollToBottom();
       refreshSendState();
       schedulePersist();
@@ -190,15 +166,14 @@
       if (!delta) return;
       removeLoading();
       markLastPendingToolCompleted();
-      const lastThinking = [...messages].reverse().find(m => m.type === 'thinking');
+      const lastThinking = messageStore.findLast(m => m.type === 'thinking');
       if (lastThinking && !lastThinking.closed) {
-        lastThinking.content += delta;
-        renderMessages();
+        messageStore.update(lastThinking.id, (msg) => { msg.content += delta; });
         if (!lastThinking.open) followLatestIfPinned();
         schedulePersist();
         return;
       }
-      messages.push({
+      messageStore.append({
         id: 'msg_' + Date.now() + '_thinking',
         role: 'assistant',
         type: 'thinking',
@@ -206,16 +181,14 @@
         closed: false,
         timestamp: Date.now()
       });
-      trimMessages();
-      renderMessages();
       followLatestIfPinned();
       schedulePersist();
     }
 
     function closeActiveThinking() {
-      const lastThinking = [...messages].reverse().find(m => m.type === 'thinking' && !m.closed);
+      const lastThinking = messageStore.findLast(m => m.type === 'thinking' && !m.closed);
       if (!lastThinking) return false;
-      lastThinking.closed = true;
+      messageStore.update(lastThinking.id, { closed: true });
       return true;
     }
 
@@ -226,21 +199,22 @@
       const toolCallId = normalizeToolId(tool.toolCallId, tool.title);
       removeLoading();
       closeActiveThinking();
-      const existing = messages.find(m => m.type === 'tool' && m.toolCallId === toolCallId);
+      const existing = messageStore.find(m => m.type === 'tool' && m.toolCallId === toolCallId);
       if (existing) {
-        existing.title = safeTitle;
-        existing.kind = browserName
-          ? `browser:${browserName}`
-          : normalizeToolKind(tool.kind ?? toolTitleObject?.kind, existing.kind || 'other');
-        existing.input = tool.input ?? toolTitleObject?.rawInput ?? existing.input ?? null;
-        existing.locations = tool.locations ?? toolTitleObject?.locations ?? existing.locations ?? [];
-        existing.status = typeof tool.status === 'string' ? tool.status : existing.status || 'pending';
-        renderMessages();
+        messageStore.update(existing.id, {
+          title: safeTitle,
+          kind: browserName
+            ? `browser:${browserName}`
+            : normalizeToolKind(tool.kind ?? toolTitleObject?.kind, existing.kind || 'other'),
+          input: tool.input ?? toolTitleObject?.rawInput ?? existing.input ?? null,
+          locations: tool.locations ?? toolTitleObject?.locations ?? existing.locations ?? [],
+          status: typeof tool.status === 'string' ? tool.status : existing.status || 'pending',
+        });
         followLatestIfPinned();
         schedulePersist();
         return;
       }
-      messages.push({
+      messageStore.append({
         id: 'msg_' + Date.now() + '_tool',
         role: 'assistant',
         type: 'tool',
@@ -256,34 +230,32 @@
         toolContent: null,
         timestamp: Date.now()
       });
-      trimMessages();
-      renderMessages();
       followLatestIfPinned();
       schedulePersist();
     }
 
     function updateToolMessage(toolCallId, updates) {
       if (!toolCallId) return;
-      const msg = messages.find(m => m.type === 'tool' && m.toolCallId === toolCallId);
+      const msg = messageStore.find(m => m.type === 'tool' && m.toolCallId === toolCallId);
       if (!msg) return;
       const browserName = inferBrowserToolName(updates.title ?? msg.title, updates.input ?? msg.input, updates.kind ?? msg.kind);
-      if (updates.title != null) msg.title = browserName ? normalizeToolTitle(browserName, msg.title) : normalizeToolTitle(updates.title, msg.title);
-      if (updates.kind != null || browserName) msg.kind = browserName ? `browser:${browserName}` : normalizeToolKind(updates.kind, msg.kind || 'other');
-      if (updates.input !== undefined) msg.input = updates.input;
-      if (updates.locations !== undefined) msg.locations = updates.locations || [];
-      if (updates.status != null) msg.status = typeof updates.status === 'string' ? updates.status : String(updates.status);
-      if (updates.output !== undefined) msg.output = updates.output;
-      if (updates.content !== undefined) msg.toolContent = updates.content;
-      renderMessages();
+      messageStore.update(msg.id, (m) => {
+        if (updates.title != null) m.title = browserName ? normalizeToolTitle(browserName, m.title) : normalizeToolTitle(updates.title, m.title);
+        if (updates.kind != null || browserName) m.kind = browserName ? `browser:${browserName}` : normalizeToolKind(updates.kind, m.kind || 'other');
+        if (updates.input !== undefined) m.input = updates.input;
+        if (updates.locations !== undefined) m.locations = updates.locations || [];
+        if (updates.status != null) m.status = typeof updates.status === 'string' ? updates.status : String(updates.status);
+        if (updates.output !== undefined) m.output = updates.output;
+        if (updates.content !== undefined) m.toolContent = updates.content;
+      });
       followLatestIfPinned();
       schedulePersist();
     }
 
     function updateLastToolStatus(status) {
-      const msg = [...messages].reverse().find(item => item.type === 'tool');
+      const msg = messageStore.findLast(item => item.type === 'tool');
       if (!msg) return;
-      msg.status = status;
-      renderMessages();
+      messageStore.update(msg.id, { status });
       followLatestIfPinned();
       schedulePersist();
     }
@@ -330,12 +302,11 @@
             showHint('任务已停止');
           } else {
             // Mark any remaining pending tools as completed on successful completion
-            const pendingTools = messages.filter(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
+            const pendingTools = messageStore.filter(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
             pendingTools.forEach(tool => {
-              tool.status = 'completed';
+              messageStore.update(tool.id, { status: 'completed' });
             });
           }
-          renderMessages();
           followLatestIfPinned();
           refreshSendState();
           schedulePersist();

@@ -37,7 +37,8 @@
     isImageDataUrl,
   } = chatImages;
 
-  const messages = [];
+  const MAX_MESSAGES = 50;
+  const messageStore = window.__domReview.createMessageStore({ maxMessages: MAX_MESSAGES });
   let scrollManager = null;
   let imageManager = null;
   let persistenceManager = null;
@@ -48,7 +49,6 @@
   let sessionMenuOpen = false;
   let sessionsCache = [];
   const openToolGroups = new Set();
-  const MAX_MESSAGES = 50;
 
   function escapeHtml(str) {
     const div = document.createElement('div');
@@ -97,7 +97,7 @@
   // --- Message management ---
 
   function addMessage(role, type, content, meta = {}) {
-    messages.push({
+    messageStore.append({
       id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
       role,
       type,
@@ -105,10 +105,6 @@
       ...meta,
       timestamp: Date.now()
     });
-    if (messages.length > MAX_MESSAGES) {
-      messages.splice(0, messages.length - MAX_MESSAGES);
-    }
-    renderMessages();
     if (role === 'user') {
       scrollToBottom();
     } else {
@@ -118,9 +114,8 @@
   }
 
   function clearHistory() {
-    messages.length = 0;
+    messageStore.clear();
     getImageManager().clear({ render: false });
-    renderMessages();
     renderScreenshotPreview();
     persistNow();
   }
@@ -165,7 +160,7 @@
     window.__domReview.ui.setActivationBannerVisible?.(connected && !active);
     getSendManager().refreshSendState();
     // Refresh empty state when connection status changes
-    if (messages.length === 0) {
+    if (messageStore.size === 0) {
       renderMessages();
     }
   }
@@ -237,11 +232,7 @@
       }
       getSendManager().setSessionId(result.activeSessionId);
     }
-    messages.length = 0;
-    if (Array.isArray(result.messages)) {
-      messages.push(...result.messages.filter(item => item && typeof item === 'object'));
-    }
-    renderMessages();
+    messageStore.replaceAll(result.messages);
     scrollToBottom();
   }
 
@@ -313,12 +304,12 @@
     const container = getMessagesEl();
     if (!container) return;
 
-    if (messages.length === 0) {
+    if (messageStore.size === 0) {
       container.innerHTML = `<div class="dt-chat-empty">${getEmptyStateText()}</div>`;
       return;
     }
 
-    container.innerHTML = renderMessageBlocks(messages);
+    container.innerHTML = renderMessageBlocks(messageStore.getAll());
   }
 
   function getEmptyStateText() {
@@ -599,7 +590,7 @@
   function getPersistenceManager() {
     if (!persistenceManager) {
       persistenceManager = chatPersistenceFactory.create({
-        messages,
+        messageStore,
         maxMessages: MAX_MESSAGES,
         normalizeImages,
         stringifyAny,
@@ -631,7 +622,7 @@
   function getBridgeEvents() {
     if (!bridgeEvents) {
       bridgeEvents = chatBridgeEvents.create({
-        messages,
+        messageStore,
         maxMessages: MAX_MESSAGES,
         toolHelpers: chatTools,
         renderMessages,
@@ -743,6 +734,9 @@
   // --- Event wiring ---
 
   function init() {
+    // Subscribe messageStore to auto-render on changes
+    messageStore.subscribe(renderMessages);
+
     // Wire send button
     const sendBtn = getSendBtn();
     if (sendBtn) {
@@ -802,11 +796,10 @@
           e.preventDefault();
           e.stopPropagation();
           const msgId = thinkingBtn.dataset.msgId;
-          const msg = messages.find(m => m.id === msgId);
+          const msg = messageStore.find(m => m.id === msgId);
           if (msg) {
             const willOpen = !msg.open;
-            msg.open = willOpen;
-            renderMessages();
+            messageStore.update(msgId, { open: willOpen });
             if (willOpen) keepMessageInView(msgId);
           }
           return;
@@ -815,11 +808,10 @@
         const toolBtn = e.target.closest('[data-action="toggle-tool"]');
         if (toolBtn) {
           const msgId = toolBtn.dataset.msgId;
-          const msg = messages.find(m => m.id === msgId);
+          const msg = messageStore.find(m => m.id === msgId);
           if (msg) {
             const shouldFollow = isPinnedToBottom();
-            msg.open = !msg.open;
-            renderMessages();
+            messageStore.update(msgId, { open: !msg.open });
             if (shouldFollow) followLatestIfPinned();
           }
           return;
@@ -844,7 +836,7 @@
         const btn = e.target.closest('[data-action="copy-prompt"]');
         if (!btn) return;
         const msgId = btn.dataset.msgId;
-        const msg = messages.find(m => m.id === msgId);
+        const msg = messageStore.find(m => m.id === msgId);
         if (msg && msg.content) {
           copyPrompt(msg.content, btn);
         }

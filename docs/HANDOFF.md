@@ -72,6 +72,7 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
 
 当前 chat 拆分：
 
+- `message-store.js`：消息数组的 reactive facade，提供 append/update/remove/clear/replaceAll/find/findLast/filter/subscribe 等 API，内部通过 RAF 批处理合并同一帧内的多次 mutation，避免流式输出时频繁重绘。
 - `chat-markdown.js`：Markdown 渲染和 sanitizer。
 - `chat-tools.js`：ACP tool 标题、分组、状态、内容格式化。
 - `chat-scroll.js`：滚动跟随、回到底部按钮。

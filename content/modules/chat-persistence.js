@@ -16,7 +16,7 @@
   const DEFAULT_MAX_IMAGES = 3;
 
   function create({
-    messages,
+    messageStore,
     maxMessages = DEFAULT_MAX_MESSAGES,
     maxPersistedImages = DEFAULT_MAX_IMAGES,
     normalizeImages,
@@ -54,7 +54,7 @@
       chrome.storage.local.get([sessionKey], (result) => {
         if (sessionKey !== nextKey) return;
         const saved = result[sessionKey];
-        messages.length = 0;
+        messageStore.clear();
 
         const sameBridgeInstance = saved && saved.bridgeInstanceId && saved.bridgeInstanceId === currentBridgeInstanceId;
         setImages(sameBridgeInstance ? (saved.images || saved.screenshot) : [], { render: false });

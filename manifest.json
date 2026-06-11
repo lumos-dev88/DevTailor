@@ -57,6 +57,7 @@
         "content/modules/chat-tools.js",
         "content/modules/chat-scroll.js",
         "content/modules/chat-images.js",
+        "content/modules/message-store.js",
         "content/modules/chat-persistence.js",
         "content/modules/chat-preview-editor.js",
         "content/modules/chat-bridge-events.js",
