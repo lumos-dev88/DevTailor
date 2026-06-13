@@ -50,6 +50,15 @@
     'date', 'datetime-local', 'month', 'time', 'week',
   ]);
   const TEST_ID_ATTRIBUTES = ['data-ai-id', 'data-testid', 'data-test', 'data-cy', 'testid'];
+  const DEVTAILOR_UI_IDS = [
+    'dom-review-host',
+    'dom-review-highlights',
+    'dom-review-badges',
+    'devtailor-host',
+    'devtailor-highlights',
+    'devtailor-badges',
+  ];
+  const DEVTAILOR_UI_SELECTOR = DEVTAILOR_UI_IDS.map(id => `#${id}`).join(', ');
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -189,11 +198,38 @@
   }
 
   function isDevTailorElement(el) {
-    return Boolean(el?.closest?.('#dom-review-host, #dom-review-highlights, #dom-review-badges, #devtailor-host, #devtailor-highlights, #devtailor-badges'));
+    return Boolean(el?.closest?.(DEVTAILOR_UI_SELECTOR));
   }
 
   function isAnyDevTailorElement(el) {
-    return Boolean(el?.closest?.('#dom-review-host, #dom-review-highlights, #dom-review-badges, #devtailor-host, #devtailor-highlights, #devtailor-badges'));
+    if (!el || !(el instanceof Element)) return false;
+    if (isDevTailorElement(el)) return true;
+    const root = typeof el.getRootNode === 'function' ? el.getRootNode() : null;
+    if (typeof ShadowRoot === 'function' && root instanceof ShadowRoot) {
+      return isDevTailorElement(root.host);
+    }
+    return false;
+  }
+
+  function devTailorUiElements() {
+    return DEVTAILOR_UI_IDS
+      .map(id => document.getElementById(id))
+      .filter(Boolean);
+  }
+
+  async function withDevTailorUiHidden(fn) {
+    const originals = devTailorUiElements().map(el => ({ el, display: el.style.display }));
+    try {
+      for (const { el } of originals) {
+        el.style.display = 'none';
+      }
+      if (originals.length) await nextFrame();
+      return await fn();
+    } finally {
+      for (const { el, display } of originals) {
+        el.style.display = display;
+      }
+    }
   }
 
   function accessibleLabel(el) {
@@ -688,24 +724,17 @@
   function pageElementFromPoint(x, y) {
     const first = document.elementFromPoint(Number(x), Number(y));
     if (!isAnyDevTailorElement(first)) return first;
-    const blockers = [
-      document.getElementById('dom-review-host'),
-      document.getElementById('dom-review-highlights'),
-      document.getElementById('dom-review-badges'),
-      document.getElementById('devtailor-host'),
-      document.getElementById('devtailor-highlights'),
-      document.getElementById('devtailor-badges'),
-    ].filter(Boolean);
-    const originals = blockers.map(el => ({ el, pointerEvents: el.style.pointerEvents }));
+    const blockers = devTailorUiElements();
+    const originals = blockers.map(el => ({ el, display: el.style.display }));
     try {
       for (const item of originals) {
-        item.el.style.pointerEvents = 'none';
+        item.el.style.display = 'none';
       }
       const next = document.elementFromPoint(Number(x), Number(y));
       if (next && !isAnyDevTailorElement(next)) return next;
     } finally {
       for (const item of originals) {
-        item.el.style.pointerEvents = item.pointerEvents;
+        item.el.style.display = item.display;
       }
     }
     return first;
@@ -902,29 +931,31 @@
           ? { x: Number(params.point.x), y: Number(params.point.y) }
           : null);
     if (explicitPoint) {
-      const elAtPoint = pageElementFromPoint(explicitPoint.x, explicitPoint.y);
-      if (!elAtPoint || !(elAtPoint instanceof Element) || !isVisible(elAtPoint)) {
-        throw actionableError('No visible page element at requested point', 'POINT_NOT_ACTIONABLE', elAtPoint, explicitPoint);
-      }
-      const finishObserver = startChangeObserver();
-      dispatchMouseSequence(elAtPoint, explicitPoint);
-      if (typeof elAtPoint.click === 'function') elAtPoint.click();
-      const effects = await finishObserver(params.settleAfterMs);
-      return {
-        clicked: true,
-        element: elementFingerprint(elAtPoint, 0),
-        point: { x: Math.round(explicitPoint.x), y: Math.round(explicitPoint.y) },
-        rect: rectOf(elAtPoint),
-        actionability: {
-          visible: true,
-          enabled: !(elAtPoint.disabled || elAtPoint.getAttribute('aria-disabled') === 'true'),
-          stable: true,
-          receivesEvents: true,
-          hitElement: elementSummary(elAtPoint),
-        },
-        effects,
-        warning: effects.noObservedEffect ? 'Click dispatched at explicit point but no URL, focus, text, or DOM mutation was observed shortly after it.' : undefined,
-      };
+      return withDevTailorUiHidden(async () => {
+        const elAtPoint = document.elementFromPoint(explicitPoint.x, explicitPoint.y);
+        if (!elAtPoint || !(elAtPoint instanceof Element) || !isVisible(elAtPoint) || isAnyDevTailorElement(elAtPoint)) {
+          throw actionableError('No visible page element at requested point', 'POINT_NOT_ACTIONABLE', elAtPoint, explicitPoint);
+        }
+        const finishObserver = startChangeObserver();
+        dispatchMouseSequence(elAtPoint, explicitPoint);
+        if (typeof elAtPoint.click === 'function') elAtPoint.click();
+        const effects = await finishObserver(params.settleAfterMs);
+        return {
+          clicked: true,
+          element: elementFingerprint(elAtPoint, 0),
+          point: { x: Math.round(explicitPoint.x), y: Math.round(explicitPoint.y) },
+          rect: rectOf(elAtPoint),
+          actionability: {
+            visible: true,
+            enabled: !(elAtPoint.disabled || elAtPoint.getAttribute('aria-disabled') === 'true'),
+            stable: true,
+            receivesEvents: true,
+            hitElement: elementSummary(elAtPoint),
+          },
+          effects,
+          warning: effects.noObservedEffect ? 'Click dispatched at explicit point but no URL, focus, text, or DOM mutation was observed shortly after it.' : undefined,
+        };
+      });
     }
 
     const el = findElement(params, { allowActive: false });
@@ -934,26 +965,28 @@
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') {
       throw actionableError('Element is disabled', 'ELEMENT_DISABLED', el);
     }
-    const finishObserver = startChangeObserver();
-    const { point, hit, stableRect } = await waitForActionable(el, params);
-    dispatchMouseSequence(hit || el, point);
-    if (typeof el.click === 'function') el.click();
-    const effects = await finishObserver(params.settleAfterMs);
-    return {
-      clicked: true,
-      element: elementFingerprint(el, 0),
-      point: { x: Math.round(point.x), y: Math.round(point.y) },
-      rect: stableRect || rectOf(el),
-      actionability: {
-        visible: true,
-        enabled: true,
-        stable: true,
-        receivesEvents: true,
-        hitElement: elementSummary(hit),
-      },
-      effects,
-      warning: effects.noObservedEffect ? 'Click dispatched but no URL, focus, text, or DOM mutation was observed shortly after it.' : undefined,
-    };
+    return withDevTailorUiHidden(async () => {
+      const { point, hit, stableRect } = await waitForActionable(el, params);
+      const finishObserver = startChangeObserver();
+      dispatchMouseSequence(hit || el, point);
+      if (typeof el.click === 'function') el.click();
+      const effects = await finishObserver(params.settleAfterMs);
+      return {
+        clicked: true,
+        element: elementFingerprint(el, 0),
+        point: { x: Math.round(point.x), y: Math.round(point.y) },
+        rect: stableRect || rectOf(el),
+        actionability: {
+          visible: true,
+          enabled: true,
+          stable: true,
+          receivesEvents: true,
+          hitElement: elementSummary(hit),
+        },
+        effects,
+        warning: effects.noObservedEffect ? 'Click dispatched but no URL, focus, text, or DOM mutation was observed shortly after it.' : undefined,
+      };
+    });
   }
 
   function setNativeValue(el, value) {

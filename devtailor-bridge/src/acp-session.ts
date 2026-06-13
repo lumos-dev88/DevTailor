@@ -40,6 +40,13 @@ export interface SessionCallbacks {
   }) => void;
 }
 
+export type ACPSessionStartMode = 'reused' | 'created' | 'resumed';
+
+export interface ACPSessionStartResult {
+  sessionId: string | null;
+  mode: ACPSessionStartMode;
+}
+
 function stringifyAny(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value;
   if (value == null) return fallback;
@@ -151,6 +158,7 @@ class DevTailorClient implements acp.Client {
     this.chunks = [];
     return text;
   }
+
 }
 
 function normalizeToolContent(content: any): Record<string, unknown> {
@@ -195,6 +203,7 @@ export class ACPSession {
   private ready = false;
   private starting = false;
   private startPromise: Promise<void> | null = null;
+  private startMode: ACPSessionStartMode | null = null;
 
   constructor(
     private agent: string,
@@ -205,14 +214,16 @@ export class ACPSession {
     private agentEnv?: Record<string, string>,
   ) {}
 
-  async start(): Promise<void> {
-    if (this.ready) return;
+  async start(): Promise<ACPSessionStartResult> {
+    if (this.ready) return { sessionId: this.sessionId, mode: 'reused' };
     if (this.starting) {
-      return this.startPromise!;
+      await this.startPromise!;
+      return { sessionId: this.sessionId, mode: this.startMode || 'reused' };
     }
     this.starting = true;
     this.startPromise = this.doStart();
-    return this.startPromise;
+    await this.startPromise;
+    return { sessionId: this.sessionId, mode: this.startMode || 'created' };
   }
 
   private async doStart(): Promise<void> {
@@ -278,6 +289,7 @@ export class ACPSession {
             sessionId: this.previousSessionId,
           });
           this.sessionId = this.previousSessionId;
+          this.startMode = 'resumed';
           console.log(`[ACP] Session resumed: ${this.sessionId}`);
         } catch (resumeErr: any) {
           console.warn(`[ACP] Resume failed (${resumeErr.message}), falling back to newSession...`);
@@ -299,10 +311,12 @@ export class ACPSession {
           },
         });
         this.sessionId = sessionResult.sessionId;
+        this.startMode = 'created';
         console.log(`[ACP] Session created: ${this.sessionId}`);
       }
 
       this.ready = true;
+      this.starting = false;
     } catch (err) {
       this.starting = false;
       throw err;
@@ -367,6 +381,10 @@ export class ACPSession {
 
   get isReady(): boolean {
     return this.ready;
+  }
+
+  get isStarting(): boolean {
+    return this.starting;
   }
 
   get currentSessionId(): string | null {

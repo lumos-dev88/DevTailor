@@ -23,6 +23,7 @@
     flushQueue,
     clearSentMarks,
     setRequestInFlight,
+    getCurrentSessionId,
   }) {
     const {
       parseMaybeJsonObject,
@@ -162,6 +163,12 @@
       schedulePersist();
     }
 
+    function isCurrentSessionEvent(msg) {
+      if (!msg.sessionId || typeof getCurrentSessionId !== 'function') return true;
+      const currentSessionId = getCurrentSessionId();
+      return !currentSessionId || currentSessionId === msg.sessionId;
+    }
+
     function appendThinking(delta) {
       if (!delta) return;
       removeLoading();
@@ -264,12 +271,15 @@
       if (!msg || typeof msg !== 'object') return;
       switch (msg.type) {
         case 'stream':
+          if (!isCurrentSessionEvent(msg)) return;
           appendStream(msg.delta || '');
           break;
         case 'thinking':
+          if (!isCurrentSessionEvent(msg)) return;
           appendThinking(msg.delta || '');
           break;
         case 'tool_call':
+          if (!isCurrentSessionEvent(msg)) return;
           addToolMessage({
             title: msg.toolTitle || 'Tool',
             toolCallId: msg.toolCallId,
@@ -280,6 +290,7 @@
           });
           break;
         case 'tool_update':
+          if (!isCurrentSessionEvent(msg)) return;
           updateToolMessage(msg.toolCallId, {
             title: msg.toolTitle,
             kind: msg.toolKind,
@@ -291,9 +302,16 @@
           });
           break;
         case 'tool_status':
+          if (!isCurrentSessionEvent(msg)) return;
           updateLastToolStatus(msg.toolStatus || 'running');
           break;
         case 'done':
+          if (!isCurrentSessionEvent(msg)) {
+            setRequestInFlight(false);
+            refreshSendState();
+            flushQueue();
+            return;
+          }
           endStream();
           markLastPendingToolCompleted();
           clearSentMarks();
@@ -313,6 +331,12 @@
           flushQueue();
           break;
         case 'error': {
+          if (!isCurrentSessionEvent(msg)) {
+            setRequestInFlight(false);
+            refreshSendState();
+            flushQueue();
+            return;
+          }
           endStream();
           const errMsg = msg.message || 'Unknown error';
           if (/session|agent|process|exited|killed|not ready|eprconnreset/i.test(errMsg)) {
@@ -329,6 +353,15 @@
           break;
         }
         case 'session_reset':
+          activeStreamId = null;
+          activeLoadingId = null;
+          if (msg.reason === 'user_requested') {
+            messageStore.replaceAll([]);
+            setRequestInFlight(false);
+            refreshSendState();
+            schedulePersist();
+            break;
+          }
           addMessage('assistant', 'text', '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#10b981;"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg> Claude Code 会话已重建，可以继续发送消息。');
           setRequestInFlight(false);
           refreshSendState();

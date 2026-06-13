@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'crypto';
 import { basename } from 'path';
 import { realpathSync } from 'fs';
 import { ACPSession } from './acp-session';
+import { HistoryMessage } from './prompt-builder';
 import { WSMessage, ReviewPayload } from './types';
 import { BrowserActionRouter } from './browser-action-router';
 import { BrowserMCPServer } from './browser-mcp-server';
@@ -21,6 +22,7 @@ interface Client {
 
 interface PendingReview {
   payload: ReviewPayload['payload'];
+  displaySessionId: string;
 }
 
 interface DisplayMessage {
@@ -43,8 +45,14 @@ interface DisplaySession {
   updatedAt: number;
 }
 
+type ReviewSessionStart = {
+  sessionId: string | null;
+  mode: 'reused' | 'created' | 'resumed';
+};
+
 export class WSServer {
   private static readonly PROJECT_SESSION_SCOPE = 'project';
+  private static readonly CANCEL_FORCE_STOP_MS = 5000;
   private server: http.Server | null = null;
   private clients = new Map<string, Client>();
   private sessions = new Map<string, ACPSession>();
@@ -53,6 +61,9 @@ export class WSServer {
   private activeDisplaySessionId: string | null = null;
   private queues = new Map<string, PendingReview[]>();
   private processing = new Set<string>();
+  private processingDisplaySessions = new Map<string, string>();
+  private pendingCancels = new Set<string>();
+  private forcedCancels = new Set<string>();
   private lastActive = new Map<string, number>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
@@ -294,9 +305,10 @@ export class WSServer {
         return;
       }
 
-      this.browserRouter.activate(clientId, this.projectInfo.projectId, this.activeAcpSessionId());
+      const display = this.getOrCreateDisplaySession();
+      this.browserRouter.activate(clientId, this.projectInfo.projectId, display.acpSessionId || null);
       this.sendJson(res, 202, { ok: true });
-      this.enqueueReview(clientId, msg.payload);
+      this.enqueueReview(clientId, msg.payload, display.id);
     } catch (err: any) {
       this.sendJson(res, 400, { error: err.message || 'Invalid request body' });
     }
@@ -327,9 +339,9 @@ export class WSServer {
     }
   }
 
-  private enqueueReview(clientId: string, payload: ReviewPayload['payload']): void {
+  private enqueueReview(clientId: string, payload: ReviewPayload['payload'], displaySessionId: string): void {
     const queue = this.queues.get(clientId) || [];
-    queue.push({ payload });
+    queue.push({ payload, displaySessionId });
     this.queues.set(clientId, queue);
     this.processQueue(clientId);
   }
@@ -342,62 +354,71 @@ export class WSServer {
       const queue = this.queues.get(clientId);
       while (queue && queue.length > 0) {
         const pending = queue.shift()!;
-        await this.handleReview(clientId, pending.payload);
+        this.processingDisplaySessions.set(clientId, pending.displaySessionId);
+        try {
+          await this.handleReview(clientId, pending.payload, pending.displaySessionId);
+        } finally {
+          this.processingDisplaySessions.delete(clientId);
+        }
       }
       if (queue && queue.length === 0) {
         this.queues.delete(clientId);
       }
     } finally {
+      this.processingDisplaySessions.delete(clientId);
+      this.pendingCancels.delete(clientId);
+      this.forcedCancels.delete(clientId);
       this.processing.delete(clientId);
     }
   }
 
-  private async handleReview(clientId: string, payload: ReviewPayload['payload']): Promise<void> {
+  private async handleReview(clientId: string, payload: ReviewPayload['payload'], displaySessionId: string): Promise<void> {
     this.touch(clientId);
-    const display = this.getOrCreateDisplaySession();
-    const isNewSessionMarker = { value: false };
-    const session = this.getOrCreateSession(display.id, display.acpSessionId, isNewSessionMarker);
-    const isFreshSession = isNewSessionMarker.value;
+    const queuedDisplay = this.displaySessions.get(displaySessionId);
+    const display = queuedDisplay && queuedDisplay.agentKey === this.agentKey
+      ? queuedDisplay
+      : this.getOrCreateDisplaySession();
+    const session = this.getOrCreateSession(display.id, display.acpSessionId);
     this.appendUserMessage(display, payload);
     this.attachSessionCallbacks(clientId, display, session);
 
-    // Ensure session is started and notify frontend of session ID
+    let startResult: ReviewSessionStart;
     try {
-      await session.start();
-      const sid = session.currentSessionId;
-      if (sid) {
-        display.acpSessionId = sid;
-        display.updatedAt = Date.now();
-        this.browserRouter.activate(clientId, this.projectInfo.projectId, sid);
-        this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: display.id, acpSessionId: sid, sessionTitle: display.title } as any);
-      }
+      startResult = await this.startReviewSession(clientId, display, session);
     } catch (err: any) {
       console.error('[SSE] Failed to start session:', err.message);
-      this.send(clientId, { type: 'error', tabId: clientId, message: `Session start failed: ${err.message}` });
+      this.send(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: `Session start failed: ${err.message}` } as any);
       session.stop();
       this.sessions.delete(display.id);
       return;
     }
 
+    if (this.consumePendingCancel(clientId, display)) return;
+
     try {
-      // If this is a freshly-created ACPSession, inject prior display messages
-      // so the agent does not lose conversation context (ACP stdio agents cannot
-      // resume history across process restarts).
-      const history = isFreshSession
-        ? display.messages
-            .slice(0, -1) // exclude the user message just appended above
-            .map(m => ({ role: m.role, type: m.type, content: m.content }))
-        : undefined;
+      const history = this.historyForPrompt(display, startResult.mode);
       const stopReason = await session.sendReview(payload, history);
+      const wasCanceled = this.pendingCancels.delete(clientId) || this.forcedCancels.delete(clientId) || stopReason === 'cancelled';
       this.send(clientId, {
         type: 'done',
         tabId: clientId,
-        summary: stopReason === 'cancelled' ? 'Cancelled' : 'Done',
-        reason: stopReason,
-      });
+        sessionId: display.id,
+        summary: wasCanceled ? 'Cancelled' : 'Done',
+        reason: wasCanceled ? 'cancelled' : stopReason,
+      } as any);
     } catch (err: any) {
+      if (this.pendingCancels.delete(clientId) || this.forcedCancels.delete(clientId)) {
+        this.send(clientId, {
+          type: 'done',
+          tabId: clientId,
+          sessionId: display.id,
+          summary: 'Cancelled',
+          reason: 'cancelled',
+        } as any);
+        return;
+      }
       console.error('[SSE] Failed to send review:', err.message);
-      this.send(clientId, { type: 'error', tabId: clientId, message: err.message });
+      this.send(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: err.message } as any);
       session.stop();
       this.sessions.delete(display.id);
     }
@@ -415,35 +436,80 @@ export class WSServer {
   private getOrCreateSession(
     displaySessionId: string,
     acpSessionId?: string | null,
-    isNew?: { value: boolean },
   ): ACPSession {
     let session = this.sessions.get(displaySessionId);
-    if (!session || !session.isReady) {
+    if (!session || (!session.isReady && !session.isStarting)) {
       if (session) session.stop();
       session = new ACPSession(this.agent, this.cwd, this.agentArgs, this.mcpServers(), acpSessionId, this.agentEnv);
       this.sessions.set(displaySessionId, session);
-      if (isNew) isNew.value = true;
     }
     return session;
   }
 
-  private attachSessionCallbacks(clientId: string, display: DisplaySession, session: ACPSession): void {
+  private async startReviewSession(
+    clientId: string,
+    display: DisplaySession,
+    session: ACPSession,
+  ): Promise<ReviewSessionStart> {
+    const result = await session.start();
+    const sid = result.sessionId || session.currentSessionId;
+    if (sid) {
+      display.acpSessionId = sid;
+      display.updatedAt = Date.now();
+      this.store?.updateSession(display);
+      this.browserRouter.activate(clientId, this.projectInfo.projectId, sid);
+      this.send(clientId, {
+        type: 'session_info',
+        tabId: clientId,
+        sessionId: display.id,
+        acpSessionId: sid,
+        sessionTitle: display.title,
+      } as any);
+    }
+    return { sessionId: sid || null, mode: result.mode };
+  }
+
+  private consumePendingCancel(clientId: string, display: DisplaySession): boolean {
+    if (!this.pendingCancels.delete(clientId)) return false;
+    this.closeActiveThinking(display);
+    this.send(clientId, {
+      type: 'done',
+      tabId: clientId,
+      sessionId: display.id,
+      summary: 'Cancelled',
+      reason: 'cancelled',
+    } as any);
+    return true;
+  }
+
+  private historyForPrompt(display: DisplaySession, startMode: ReviewSessionStart['mode']): HistoryMessage[] | undefined {
+    if (startMode !== 'created') return undefined;
+    return display.messages
+      .slice(0, -1)
+      .map(m => ({ role: m.role, type: m.type, content: m.content }));
+  }
+
+  private attachSessionCallbacks(
+    clientId: string,
+    display: DisplaySession,
+    session: ACPSession,
+  ): void {
     session.setCallbacks({
       onStream: (delta) => {
         this.appendAssistantDelta(display, delta);
-        this.send(clientId, { type: 'stream', tabId: clientId, delta });
+        this.send(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta } as any);
       },
       onThinking: (delta) => {
         this.appendThinkingDelta(display, delta);
-        this.send(clientId, { type: 'thinking', tabId: clientId, delta });
+        this.send(clientId, { type: 'thinking', tabId: clientId, sessionId: display.id, delta } as any);
       },
       onDone: (summary) => {
         this.closeActiveThinking(display);
-        this.send(clientId, { type: 'done', tabId: clientId, summary });
+        this.send(clientId, { type: 'done', tabId: clientId, sessionId: display.id, summary } as any);
       },
       onError: (message) => {
         this.closeActiveThinking(display);
-        this.send(clientId, { type: 'error', tabId: clientId, message });
+        this.send(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message } as any);
       },
       onSessionInfoUpdate: (info) => {
         this.updateDisplaySessionInfo(clientId, display, info);
@@ -453,19 +519,21 @@ export class WSServer {
         this.send(clientId, {
           type: 'tool_call',
           tabId: clientId,
+          sessionId: display.id,
           toolTitle: tool.title,
           toolCallId: tool.toolCallId,
           toolKind: tool.kind,
           toolInput: tool.rawInput,
           toolLocations: tool.locations,
           toolStatus: tool.status,
-        });
+        } as any);
       },
       onToolUpdate: (update) => {
         this.updateToolDisplayMessage(display, update);
         this.send(clientId, {
           type: 'tool_update',
           tabId: clientId,
+          sessionId: display.id,
           toolCallId: update.toolCallId,
           toolTitle: update.title ?? undefined,
           toolKind: update.kind ?? undefined,
@@ -474,7 +542,7 @@ export class WSServer {
           toolOutput: update.rawOutput,
           toolLocations: update.locations ?? undefined,
           toolContent: update.content,
-        });
+        } as any);
       },
     });
   }
@@ -691,13 +759,16 @@ export class WSServer {
     try {
       const msg = await this.readJson(req) as { clientId?: string; tabId?: string };
       const clientId = msg.clientId || msg.tabId || 'default';
+      if (this.processing.has(clientId)) {
+        this.sendJson(res, 409, { ok: false, error: 'Cannot create a new session while a request is running' });
+        return;
+      }
 
       const current = this.currentDisplaySession();
       const reused = Boolean(current && this.isEmptyDisplaySession(current));
       const display = current && reused ? current : this.createDisplaySession();
       this.activeDisplaySessionId = display.id;
       this.queues.delete(clientId);
-      this.processing.delete(clientId);
 
       this.sendJson(res, 200, { ok: true, reset: true, reused, sessionId: display.id, sessionTitle: display.title });
       this.send(clientId, { type: 'session_reset', tabId: clientId, reason: 'user_requested', sessionId: display.id });
@@ -750,6 +821,7 @@ export class WSServer {
       this.queues.delete(clientId);
       this.activeDisplaySessionId = display.id;
       this.browserRouter.activate(clientId, this.projectInfo.projectId, display.acpSessionId || null);
+      this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: display.id, sessionTitle: display.title });
       this.send(clientId, {
         type: 'session_snapshot',
         tabId: clientId,
@@ -757,7 +829,6 @@ export class WSServer {
         sessionTitle: display.title,
         messages: display.messages,
       } as any);
-      this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: display.id, sessionTitle: display.title });
       this.sendJson(res, 200, { ok: true, sessionId: display.id, sessionTitle: display.title, messages: display.messages });
     } catch (err: any) {
       this.sendJson(res, 500, { ok: false, error: err.message || 'Failed to load session' });
@@ -783,6 +854,12 @@ export class WSServer {
       this.sessions.delete(sessionId);
       this.displaySessions.delete(sessionId);
       this.store?.deleteSession(sessionId);
+      const wasActive = this.activeDisplaySessionId === sessionId;
+      if (!wasActive) {
+        const active = this.currentDisplaySession();
+        this.sendJson(res, 200, { ok: true, deleted: sessionId, activeSessionId: active?.id || null, activeSessionTitle: active?.title || null });
+        return;
+      }
 
       let next = [...this.displaySessions.values()]
         .filter(session => session.agentKey === this.agentKey)
@@ -790,6 +867,7 @@ export class WSServer {
       if (!next) next = this.createDisplaySession();
       this.activeDisplaySessionId = next.id;
       this.browserRouter.activate(clientId, this.projectInfo.projectId, next.acpSessionId || null);
+      this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: next.id, sessionTitle: next.title });
       this.send(clientId, {
         type: 'session_snapshot',
         tabId: clientId,
@@ -966,7 +1044,7 @@ export class WSServer {
     try {
       const msg = await this.readJson(req) as { clientId?: string; tabId?: string };
       const clientId = msg.clientId || msg.tabId || 'default';
-      const displayId = this.activeDisplaySessionId;
+      const displayId = this.processingDisplaySessions.get(clientId) || this.activeDisplaySessionId;
       const session = displayId ? this.sessions.get(displayId) : null;
       const queue = this.queues.get(clientId);
       if (queue) queue.length = 0;
@@ -978,14 +1056,34 @@ export class WSServer {
       }
 
       const canceled = await session.cancelCurrentTurn();
-      this.processing.delete(clientId);
+      if (!canceled && this.processing.has(clientId)) {
+        this.pendingCancels.add(clientId);
+        this.sendJson(res, 200, { ok: true, canceled: true, pending: true });
+        return;
+      }
+      this.pendingCancels.add(clientId);
+      this.scheduleForcedCancel(clientId, displayId, session);
       this.sendJson(res, 200, { ok: true, canceled });
       if (canceled) {
-        this.send(clientId, { type: 'tool_status', tabId: clientId, toolStatus: 'canceled' });
+        this.send(clientId, { type: 'tool_status', tabId: clientId, sessionId: displayId, toolStatus: 'canceled' } as any);
       }
     } catch (err: any) {
       this.sendJson(res, 400, { error: err.message || 'Invalid request' });
     }
+  }
+
+  private scheduleForcedCancel(clientId: string, displayId: string | null, session: ACPSession): void {
+    if (!displayId) return;
+    setTimeout(() => {
+      if (!this.processing.has(clientId)) return;
+      if (this.processingDisplaySessions.get(clientId) !== displayId) return;
+      // 如果该 displaySession 已经被新 session 覆盖，不要误杀新 session
+      const currentSession = this.sessions.get(displayId);
+      if (currentSession !== session) return;
+      this.forcedCancels.add(clientId);
+      session.stop();
+      this.sessions.delete(displayId);
+    }, WSServer.CANCEL_FORCE_STOP_MS);
   }
 
   private async handleBrowserActionResult(req: IncomingMessage, res: ServerResponse): Promise<void> {

@@ -137,6 +137,11 @@ async function registerDynamicScripts() {
 async function injectDevTailorIntoTab(tabId) {
   if (!tabId) return { injected: false, error: 'Missing tabId' };
   try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!await isAllowedPageUrl(tab?.url || '')) {
+      return { injected: false, unsupported: true, error: 'DevTailor only runs on allowed http/https pages.' };
+    }
+
     const existing = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => Boolean(window.__domReview && window.__domReview.ui && window.__domReview.wsClient)
@@ -193,7 +198,8 @@ registerDynamicScripts();
 // --- Keyboard shortcut: toggle sidebar ---
 
 async function toggleSidebar(tabId) {
-  await injectDevTailorIntoTab(tabId);
+  const injection = await injectDevTailorIntoTab(tabId);
+  if (!injection.injected && !injection.alreadyInjected) return false;
   return chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
@@ -331,6 +337,19 @@ function urlMatchesPattern(url, pattern) {
   } catch {
     return false;
   }
+}
+
+async function isAllowedPageUrl(url) {
+  try {
+    const parsedUrl = new URL(url || '');
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return false;
+  } catch {
+    return false;
+  }
+
+  const customPatterns = await getCustomPatterns();
+  const allPatterns = [...DEFAULT_PATTERNS, ...customPatterns];
+  return allPatterns.some(pattern => urlMatchesPattern(url, pattern));
 }
 
 async function updateActionState(tabId, url) {

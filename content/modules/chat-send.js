@@ -58,7 +58,7 @@
       });
     }
 
-    function executeSend(text, marks, images) {
+    async function executeSend(text, marks, images, options = {}) {
       const promptBuilder = getPromptBuilder?.();
       const wsClient = getWsClient?.();
       const attachedImages = normalizeImages(images);
@@ -69,10 +69,12 @@
       }
 
       const payload = promptBuilder.buildPayload(marks, text, attachedImages);
-      const result = wsClient.send(payload, { queue: false });
+      const result = await wsClient.send(payload, { queue: false });
       if (!result.ok) {
-        pendingQueue.unshift({ text, marks, images: attachedImages });
-        showHint('发送失败，已重新加入队列');
+        if (options.requeue !== false) {
+          pendingQueue.unshift({ text, marks, images: attachedImages });
+        }
+        showHint(options.requeue === false ? '发送失败，稍后重试' : '发送失败，已重新加入队列');
         refreshSendState();
         return { ok: false, error: result.error };
       }
@@ -90,7 +92,7 @@
       return { ok: true };
     }
 
-    function flushQueue() {
+    async function flushQueue() {
       clearTimeout(flushTimer);
 
       if (pendingQueue.length === 0) {
@@ -106,16 +108,21 @@
 
       const wsClient = getWsClient?.();
       if (!wsClient || wsClient.getStatus() !== 'connected') {
-        // Not connected, retry with backoff
         const delay = retryCount < RETRY_DELAYS.length ? RETRY_DELAYS[retryCount] : 2000;
         retryCount = Math.min(retryCount + 1, MAX_RETRIES);
         flushTimer = setTimeout(flushQueue, delay);
         return;
       }
 
+      if (!wsClient.isActive?.()) {
+        retryCount = 0;
+        flushTimer = setTimeout(flushQueue, 1000);
+        return;
+      }
+
       // Connection OK, try to send next message
       const next = pendingQueue[0]; // Peek, don't shift yet
-      const result = executeSend(next.text, next.marks, next.images || next.screenshot);
+      const result = await executeSend(next.text, next.marks, next.images || next.screenshot, { requeue: false });
 
       if (result.ok) {
         // Success, remove from queue
@@ -153,7 +160,7 @@
       refreshSendState();
     }
 
-    function handleSend() {
+    async function handleSend() {
       if (requestInFlight) {
         handleStop();
         return;
@@ -202,7 +209,7 @@
       const attachedImages = pendingImages.slice();
       imageManager?.clear();
 
-      executeSend(text, marks, attachedImages);
+      await executeSend(text, marks, attachedImages);
 
       clearInput(input);
       schedulePersist();
@@ -288,6 +295,10 @@
     async function requestNewSession() {
       const wsClient = getWsClient?.();
       if (!wsClient) return;
+      if (requestInFlight) {
+        showHint('任务执行中，请结束后再开启新会话');
+        return;
+      }
       const result = await wsClient.newSession();
       if (result.ok) {
         currentSessionId = result.sessionId || null;
@@ -295,7 +306,7 @@
         refreshSendState();
         showHint(result.reused ? '当前已是新会话' : '已开启新会话');
       } else {
-        showHint('开启新会话失败');
+        showHint(result.error || '开启新会话失败');
       }
     }
 
@@ -306,7 +317,6 @@
     function getState() {
       const input = getInput?.();
       return {
-        requestInFlight,
         inputText: input ? input.value : '',
         pendingQueue: pendingQueue.map(item => ({
           text: item.text || '',
@@ -316,7 +326,8 @@
 
     function restoreState(state) {
       if (!state || typeof state !== 'object') return;
-      requestInFlight = Boolean(state.requestInFlight);
+      requestInFlight = false;
+      stopInFlight = false;
       const input = getInput?.();
       if (input && typeof state.inputText === 'string') {
         input.value = state.inputText;

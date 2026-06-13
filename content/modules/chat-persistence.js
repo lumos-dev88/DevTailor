@@ -87,8 +87,8 @@
         version: 1,
         pageKey: `${location.hostname}${location.pathname}`,
         bridgeInstanceId: currentBridgeInstanceId,
-        // NOTE: messages are NOT persisted here - they are managed by Bridge sessions
-        // and restored via session_snapshot events. Only UI state (images, sendState) is saved.
+        // NOTE: messages and in-flight request state are NOT persisted here.
+        // Messages are managed by Bridge sessions; running state must come from live SSE events.
         images,
         screenshot: images[0] || null,
         sendState: getSendState?.() || null,

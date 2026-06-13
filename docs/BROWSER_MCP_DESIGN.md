@@ -351,7 +351,7 @@ type BrowserActionResult = {
 - selector 使用 `document.querySelector`。
 - elementId 来自最近一次 `get_page_snapshot` 的 `interactiveElements`，刷新、重排或重渲染后只在指纹仍然匹配时复用；否则显式失败，提示重新 snapshot 或使用稳定 locator。
 - text 使用可见文本近似匹配，优先 button、a、input、textarea、select、role=button、tab。
-- point 使用 `document.elementFromPoint(x, y)`。
+- point 使用 `document.elementFromPoint(x, y)`；坐标/grid hit-test 与点击派发期间默认临时 `display:none` DevTailor host/highlights/badges，避免 Shadow DOM 内部可交互面板节点遮挡页面目标。
 - click 会先 `scrollIntoView`，再用中心点和边缘候选点做 hit-test；如果命中点不在目标元素内，直接失败，避免 silent fallback。
 - click 的可靠性参考 Playwright 的 actionability 模型：执行前等待元素可见、启用、布局稳定、点击点可接收事件；失败时返回 target、hit element、viewport、URL 等诊断信息，帮助 AI 改用更稳定的 locator。
 - click 返回 `clicked: true` 只代表动作已派发，不代表业务结果已满足；需要用 `wait_for_text`、`wait_for_selector` 或 assert 步骤验证预期结果。若点击后短时间内没有 URL、focus、文本长度或 DOM mutation 变化，会返回 warning。

@@ -102,6 +102,13 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
 
 `content/modules/ws-client.js` 名字保留是兼容历史调用点，但实现是 SSE，不是 WebSocket。不要因为文件名把传输层改回 WebSocket。
 
+休眠/网络恢复边界：
+
+- 前端 `EventSource` 可能长期停在 `CONNECTING` 而不触发新的 `error`；`connect()` 不能只因为 existing EventSource 非 `CLOSED` 就永久返回。
+- `online`、`pageshow`、窗口 focus 和页面重新可见时要主动做轻量恢复探测，必要时关闭旧 SSE 并重建连接。
+- Bridge 从未启动到启动完成的场景，应靠前端恢复探测和指数退避共同恢复，不要求用户刷新页面。
+- 刷新/重注入期间 `GET_TAB_ID` 可能短暂返回空；`clientId` 初始化必须 single-flight，优先保持真实 `tab_{id}`，临时 fallback id 只能兜底且要继续尝试升级回真实 tab id，避免刷新后 active tab 变成“待连接”。
+
 ## 项目身份与 Tab 接管
 
 Bridge 根据 `--dir` 计算项目身份：
@@ -144,8 +151,12 @@ Bridge 拥有展示会话：
 - 每个 display session 绑定一个 ACP session。
 - 展示会话按 project + agentKey 隔离。
 - 切换 display session 等于切换后续 prompt 进入哪个 ACP session。
+- live ACP session 继续多轮时直接 `session/prompt`；Bridge/agent 进程丢失后才 `session/resume`。`session/resume` 已恢复 Agent 上下文，不能再 replay 前端展示历史；只有无法 resume、真正 `session/new` 时才注入展示历史作为兜底上下文。
+- stream/thinking/tool/done/error 等运行事件必须携带 display `sessionId`；前端只接收当前会话的运行事件，避免新建/切换后旧 turn 回流污染当前 UI。
+- 用户主动新建会话的 `session_reset` 只清空当前展示，不插入“会话已重建”提示；Bridge 重启等异常 reset 才展示提示。
 - 删除 display session 应删除对应展示消息，并停止/移除对应 ACP session。
 - 会话标题优先采用 ACP `session_info_update.title`，Bridge 持久化后通过 SSE `session_info` 同步给前端；首条用户消息截断标题只是 fallback。
+- 前端发送队列里“未连接”和“当前 tab 未接管”是等待条件；只有真实 `/review` 发送失败才消耗有限重试次数，不能因为 active ownership 恢复较慢就丢弃用户消息。
 
 前端 `chrome.storage.local` 只适合缓存草稿、待发送图片、控件状态等轻量 UI 状态。不要让它成为聊天记录的权威来源，也不要把它当作 Agent 上下文。
 
@@ -166,6 +177,7 @@ SessionStore(SQLite)
 - 一个 display session 对应一个 ACP session。
 - 同一 client 的请求串行处理。
 - 不要并发调用同一个 ACP session 的 `prompt()`。
+- 当前 Bridge 不承诺 ACP 后台任务生命周期管理；底部「停止」只用于取消当前 turn。Bridge 发送 `session/cancel` 后如果 agent 不返回 `PromptResponse(cancelled)`，需要强制停止该 ACP session 兜底解锁 UI 和队列。
 - 空闲 session 会清理。
 - Browser action request/response 通过 requestId 匹配，超时要返回结构化错误。
 
@@ -292,7 +304,7 @@ npm run build
 Agent 使用 Browser MCP 操作页面时，DevTailor 面板不能影响命中：
 
 - 截图默认隐藏 DevTailor UI。
-- point/grid hit-test 要临时绕过 DevTailor host/highlights/badges。
+- point/grid hit-test 和点击派发期间要临时隐藏 DevTailor host/highlights/badges；不要只改 `pointer-events`，Shadow DOM 内部 `pointer-events: auto` 的面板节点仍可能参与 hit-test。
 - 元素库选择和标记选择要忽略 DevTailor 自身 UI。
 - DevTailor UI 内部点击要 stop propagation，避免触发页面外部点击关闭弹窗。
 

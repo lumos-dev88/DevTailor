@@ -438,6 +438,229 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
     refreshedStream.close();
   });
 
+  it('reuses the live ACP session across consecutive messages in one display session', async () => {
+    const stream = await openSse('tab-reuse-acp-session');
+    await stream.next();
+    await activate('tab-reuse-acp-session');
+    const created = await postJson('/new-session', {
+      clientId: 'tab-reuse-acp-session',
+      tabId: 'tab-reuse-acp-session',
+    });
+    assert.strictEqual(created.status, 200);
+
+    const firstMessages: Record<string, unknown>[] = [];
+    const firstDone = collectUntilDone(stream, firstMessages);
+    const first = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-reuse-acp-session',
+      tabId: 'tab-reuse-acp-session',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'reuse-acp-session-first',
+        items: [],
+        screenshot: null,
+      },
+    });
+    assert.strictEqual(first.status, 202);
+    await firstDone;
+    const firstInfo = firstMessages.find(message => message.type === 'session_info' && message.acpSessionId);
+    assert.ok(firstInfo?.acpSessionId);
+
+    const secondMessages: Record<string, unknown>[] = [];
+    const secondDone = collectUntilDone(stream, secondMessages);
+    const second = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-reuse-acp-session',
+      tabId: 'tab-reuse-acp-session',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'reuse-acp-session-second',
+        items: [],
+        screenshot: null,
+      },
+    });
+    assert.strictEqual(second.status, 202);
+    await secondDone;
+    const secondInfo = secondMessages.find(message => message.type === 'session_info' && message.acpSessionId);
+    if (secondInfo) {
+      assert.strictEqual(secondInfo.acpSessionId, firstInfo.acpSessionId);
+    }
+
+    stream.close();
+  });
+
+  it('keeps queued reviews bound to the session that was active when they were accepted', async () => {
+    const streamA = await openSse('tab-queued-session-a');
+    await streamA.next();
+    const streamB = await openSse('tab-queued-session-b');
+    await streamB.next();
+
+    const activation = await activate('tab-queued-session-a');
+    assert.strictEqual(activation.status, 200);
+
+    const createdA = await postJson('/new-session', {
+      clientId: 'tab-queued-session-a',
+      tabId: 'tab-queued-session-a',
+    });
+    assert.strictEqual(createdA.status, 200);
+    const sessionA = createdA.body.sessionId;
+
+    const messagesA: Record<string, unknown>[] = [];
+    const bothDone = collectDoneCount(streamA, messagesA, 2);
+
+    const first = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-queued-session-a',
+      tabId: 'tab-queued-session-a',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'queued-session-first',
+        items: [],
+        screenshot: null,
+      },
+    });
+    assert.strictEqual(first.status, 202);
+
+    const second = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-queued-session-a',
+      tabId: 'tab-queued-session-a',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'queued-session-second',
+        items: [],
+        screenshot: null,
+      },
+    });
+    assert.strictEqual(second.status, 202);
+
+    const createdB = await postJson('/new-session', {
+      clientId: 'tab-queued-session-b',
+      tabId: 'tab-queued-session-b',
+    });
+    assert.strictEqual(createdB.status, 200);
+    const sessionB = createdB.body.sessionId;
+    assert.notStrictEqual(sessionB, sessionA);
+
+    await bothDone;
+
+    const loadedA = await postJson('/sessions/load', {
+      clientId: 'tab-queued-session-a',
+      tabId: 'tab-queued-session-a',
+      sessionId: sessionA,
+    });
+    assert.strictEqual(loadedA.status, 200);
+    const aText = loadedA.body.messages.map((message: any) => message.content).join('\n');
+    assert.match(aText, /queued-session-first/);
+    assert.match(aText, /queued-session-second/);
+
+    const loadedB = await postJson('/sessions/load', {
+      clientId: 'tab-queued-session-b',
+      tabId: 'tab-queued-session-b',
+      sessionId: sessionB,
+    });
+    assert.strictEqual(loadedB.status, 200);
+    const bText = loadedB.body.messages.map((message: any) => message.content).join('\n');
+    assert.doesNotMatch(bText, /queued-session-second/);
+
+    streamA.close();
+    streamB.close();
+  });
+
+  it('cancels the running session for the requesting tab even if another tab changes the active session', async () => {
+    const streamA = await openSse('tab-cancel-session-a');
+    await streamA.next();
+    const streamB = await openSse('tab-cancel-session-b');
+    await streamB.next();
+
+    const activation = await activate('tab-cancel-session-a');
+    assert.strictEqual(activation.status, 200);
+
+    const createdA = await postJson('/new-session', {
+      clientId: 'tab-cancel-session-a',
+      tabId: 'tab-cancel-session-a',
+    });
+    assert.strictEqual(createdA.status, 200);
+
+    const messagesA: Record<string, unknown>[] = [];
+    const done = collectUntilDone(streamA, messagesA);
+    const review = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-cancel-session-a',
+      tabId: 'tab-cancel-session-a',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'cancel-session-running-turn',
+        items: [],
+        screenshot: null,
+      },
+    });
+    assert.strictEqual(review.status, 202);
+    await waitForMessage(streamA, message => message.type === 'stream');
+
+    const createdB = await postJson('/new-session', {
+      clientId: 'tab-cancel-session-b',
+      tabId: 'tab-cancel-session-b',
+    });
+    assert.strictEqual(createdB.status, 200);
+
+    const canceled = await postJson('/cancel', {
+      clientId: 'tab-cancel-session-a',
+      tabId: 'tab-cancel-session-a',
+    });
+    assert.strictEqual(canceled.status, 200);
+    assert.strictEqual(canceled.body.canceled, true);
+
+    await done;
+    assert.ok(messagesA.some(message => message.type === 'done' && message.reason === 'cancelled'));
+
+    streamA.close();
+    streamB.close();
+  });
+
+  it('accepts stop while the ACP session is still starting', async () => {
+    const stream = await openSse('tab-cancel-starting');
+    await stream.next();
+
+    const activation = await activate('tab-cancel-starting');
+    assert.strictEqual(activation.status, 200);
+
+    const created = await postJson('/new-session', {
+      clientId: 'tab-cancel-starting',
+      tabId: 'tab-cancel-starting',
+    });
+    assert.strictEqual(created.status, 200);
+
+    const messages: Record<string, unknown>[] = [];
+    const done = collectUntilDone(stream, messages);
+    const review = await postJson('/review', {
+      type: 'review',
+      clientId: 'tab-cancel-starting',
+      tabId: 'tab-cancel-starting',
+      payload: {
+        pageUrl: 'http://localhost:3000',
+        userIntent: 'cancel-before-session-ready',
+        items: [],
+        screenshot: null,
+      },
+    });
+    assert.strictEqual(review.status, 202);
+
+    const canceled = await postJson('/cancel', {
+      clientId: 'tab-cancel-starting',
+      tabId: 'tab-cancel-starting',
+    });
+    assert.strictEqual(canceled.status, 200);
+    assert.strictEqual(canceled.body.canceled, true);
+    assert.strictEqual(canceled.body.pending, true);
+
+    await done;
+    assert.ok(messages.some(message => message.type === 'done' && message.reason === 'cancelled'));
+    assert.ok(!messages.some(message => message.type === 'stream'));
+
+    stream.close();
+  });
+
   it('handles MCP JSON-RPC notifications without returning a null response body', async () => {
     const response = await postRaw('/mcp', {
       jsonrpc: '2.0',
@@ -529,6 +752,41 @@ describe('integration: sse-server -> acp-session -> mock agent', () => {
           clearTimeout(timeout);
           resolve();
         }
+      });
+    });
+  }
+
+  function collectDoneCount(
+    stream: Awaited<ReturnType<typeof openSse>>,
+    messages: Record<string, unknown>[],
+    count: number,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let seen = 0;
+      const timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${count} done events`)), 7000);
+      stream.onMessage((message) => {
+        messages.push(message);
+        if (message.type === 'done' || message.type === 'error') {
+          seen++;
+          if (seen >= count) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        }
+      });
+    });
+  }
+
+  function waitForMessage(
+    stream: Awaited<ReturnType<typeof openSse>>,
+    predicate: (message: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for matching message')), 5000);
+      stream.onMessage((message) => {
+        if (!predicate(message)) return;
+        clearTimeout(timeout);
+        resolve(message);
       });
     });
   }

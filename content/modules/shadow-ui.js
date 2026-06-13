@@ -787,6 +787,7 @@
     .dt-thinking-icon svg {
       display: block;
       pointer-events: none;
+      color: #fff;
     }
     .dt-thinking-label {
       font-weight: 600;
@@ -841,14 +842,34 @@
       line-height: 1.4;
       transition: border-color 0.2s, background 0.2s;
     }
+    .dt-tool-card.open {
+      background: linear-gradient(135deg, rgba(15,23,42,0.75), rgba(30,41,59,0.6));
+      border-color: rgba(148,163,184,0.25);
+    }
     .dt-tool-card:hover {
       border-color: rgba(148,163,184,0.28);
     }
     .dt-tool-card-head {
+      width: 100%;
       display: flex;
       align-items: center;
       gap: 7px;
       padding: 6px 9px;
+      background: transparent;
+      border: none;
+      color: var(--dt-text-secondary);
+      font-size: 11px;
+      text-align: left;
+    }
+    button.dt-tool-card-head {
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+    }
+    button.dt-tool-card-head:hover,
+    button.dt-tool-card-head:focus-visible {
+      color: var(--dt-text-primary);
+      outline: none;
+      background: rgba(148,163,184,0.08);
     }
     .dt-tool-card-icon {
       width: 17px;
@@ -861,11 +882,13 @@
       color: #93c5fd;
       font-size: 11px;
       flex: 0 0 auto;
+      pointer-events: none;
     }
     .dt-tool-card-icon svg {
       width: 12px;
       height: 12px;
       display: block;
+      pointer-events: none;
     }
     .dt-tool-card-title {
       font-weight: 600;
@@ -920,31 +943,27 @@
       background: rgba(148,163,184,0.12);
       color: var(--dt-text-muted);
     }
-    .dt-tool-card-toggle {
-      margin-left: 5px;
-      width: 22px;
-      height: 22px;
-      padding: 0;
+    .dt-tool-card-chev {
+      flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      flex: 0 0 auto;
-      font-size: 11px;
+      color: var(--dt-text-muted);
       line-height: 1;
-      color: var(--dt-text-secondary);
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 5px;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
+      pointer-events: none;
     }
-    .dt-tool-card-toggle:hover {
-      background: rgba(255,255,255,0.12);
-      border-color: rgba(255,255,255,0.15);
+    .dt-tool-card-chev svg {
+      display: block;
+      margin: 0;
+      pointer-events: none;
     }
     .dt-tool-card--browser {
       border-color: rgba(45,212,191,0.22);
       background: linear-gradient(135deg, rgba(8,47,73,0.35), rgba(15,58,80,0.25));
+    }
+    .dt-tool-card--browser.open {
+      background: linear-gradient(135deg, rgba(8,47,73,0.5), rgba(15,58,80,0.38));
+      border-color: rgba(45,212,191,0.28);
     }
     .dt-tool-card--browser .dt-tool-card-icon {
       background: rgba(45,212,191,0.2);
@@ -979,7 +998,11 @@
       border: 1px solid rgba(148,163,184,0.18);
       background: linear-gradient(135deg, rgba(15,23,42,0.45), rgba(30,41,59,0.35));
       font-size: 11px;
-      transition: border-color 0.2s;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .dt-tool-group.open {
+      background: linear-gradient(135deg, rgba(15,23,42,0.75), rgba(30,41,59,0.6));
+      border-color: rgba(148,163,184,0.25);
     }
     .dt-tool-group:hover {
       border-color: rgba(148,163,184,0.28);
@@ -996,10 +1019,13 @@
       font-size: 11px;
       cursor: pointer;
       text-align: left;
-      transition: color 0.15s;
+      transition: color 0.15s, background 0.15s;
     }
-    .dt-tool-group-toggle:hover {
+    .dt-tool-group-toggle:hover,
+    .dt-tool-group-toggle:focus-visible {
       color: var(--dt-text-primary);
+      outline: none;
+      background: rgba(148,163,184,0.08);
     }
     .dt-tool-group-toggle.running .dt-tool-group-summary strong {
       color: #93c5fd;
@@ -1015,11 +1041,13 @@
       color: #93c5fd;
       font-size: 11px;
       flex: 0 0 auto;
+      pointer-events: none;
     }
     .dt-tool-group-icon svg {
       width: 12px;
       height: 12px;
       display: block;
+      pointer-events: none;
     }
     .dt-tool-group-summary {
       flex: 1;
@@ -1054,6 +1082,11 @@
     .dt-tool-group[data-tool-family="browser"] {
       border-color: rgba(45,212,191,0.22);
       background: linear-gradient(135deg, rgba(8,47,73,0.3), rgba(15,58,80,0.2));
+    }
+    .dt-tool-group.open:has(.dt-tool-card--browser),
+    .dt-tool-group.open[data-tool-family="browser"] {
+      background: linear-gradient(135deg, rgba(8,47,73,0.5), rgba(15,58,80,0.38));
+      border-color: rgba(45,212,191,0.28);
     }
 
     /* === Assistant Footer === */

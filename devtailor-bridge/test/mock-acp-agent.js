@@ -9,6 +9,7 @@
 const { stdin, stdout } = process;
 let buffer = '';
 let requestId = 0;
+const activePromptIntervals = new Map();
 
 stdin.setEncoding('utf8');
 stdin.on('data', (chunk) => {
@@ -115,6 +116,7 @@ function handleLine(line) {
       const interval = setInterval(() => {
         if (idx >= words.length) {
           clearInterval(interval);
+          activePromptIntervals.delete(sessionId);
           write({
             jsonrpc: '2.0',
             id,
@@ -141,6 +143,24 @@ function handleLine(line) {
           },
         });
       }, 30);
+      activePromptIntervals.set(sessionId, { id, interval });
+      return;
+    }
+
+    if (method === 'session/cancel') {
+      const sessionId = req.params?.sessionId;
+      const active = activePromptIntervals.get(sessionId);
+      if (active) {
+        clearInterval(active.interval);
+        activePromptIntervals.delete(sessionId);
+        write({
+          jsonrpc: '2.0',
+          id: active.id,
+          result: {
+            stopReason: 'cancelled',
+          },
+        });
+      }
       return;
     }
 

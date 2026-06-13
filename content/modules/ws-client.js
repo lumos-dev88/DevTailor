@@ -14,6 +14,11 @@
   const RECONNECT_BASE_DELAY = 1000;
   const RECONNECT_MAX_DELAY = 30000;
   const HEARTBEAT_INTERVAL = 30000; // 30 秒心跳
+  const CONNECT_STALL_MS = 12000;
+  const RECOVERY_PROBE_MIN_INTERVAL = 5000;
+  const FRESH_CONNECTION_MS = 10000;
+  const CLIENT_ID_RETRY_DELAY = 100;
+  const CLIENT_ID_MAX_RETRIES = 8;
   const FALLBACK_CLIENT_ID_KEY = 'devtailor:fallback-client-id';
 
   let clientId = null;
@@ -23,6 +28,9 @@
   let reconnectTimer = null;
   let heartbeatTimer = null;
   let lastHeartbeatTime = 0;
+  let lastConnectAttemptAt = 0;
+  let lastRecoveryProbeAt = 0;
+  let clientIdPromise = null;
   let listeners = [];
   let statusListeners = [];
   let projectListeners = [];
@@ -73,6 +81,10 @@
     } catch {
       return `tab_fallback_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     }
+  }
+
+  function isChromeTabClientId(id) {
+    return /^tab_\d+$/.test(String(id || ''));
   }
 
   function setProjectInfo(info) {
@@ -130,14 +142,23 @@
     setSessionInfo(id, null);
   }
 
-  function connect() {
-    if (!clientId) {
-      initClientId().then(connect);
+  function connect(options = {}) {
+    const force = Boolean(options.force);
+    if (!isChromeTabClientId(clientId)) {
+      initClientId().then(() => connect(options));
       return;
     }
-    if (events && events.readyState !== EventSource.CLOSED) return;
+    if (events && events.readyState !== EventSource.CLOSED) {
+      const connectingTooLong = events.readyState === EventSource.CONNECTING &&
+        lastConnectAttemptAt > 0 &&
+        Date.now() - lastConnectAttemptAt > CONNECT_STALL_MS;
+      if (!force && !connectingTooLong) return;
+      try { events.close(); } catch {}
+      events = null;
+    }
 
     clearTimeout(reconnectTimer);
+    lastConnectAttemptAt = Date.now();
     setStatus('connecting');
 
     try {
@@ -284,10 +305,37 @@
     reconnectAttempts++;
     const delay = Math.min(RECONNECT_MAX_DELAY, RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts - 1));
     setStatus('connecting');
+    clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, delay);
   }
 
-  function send(payload, options = {}) {
+  function reconnectNow() {
+    clearTimeout(reconnectTimer);
+    disconnect(false);
+    connect({ force: true });
+  }
+
+  function recoverConnection() {
+    const now = Date.now();
+    if (!isChromeTabClientId(clientId)) {
+      initClientId().then(() => connect());
+      return;
+    }
+    if (status !== 'connected') {
+      connect();
+      return;
+    }
+    if (lastHeartbeatTime > 0 && now - lastHeartbeatTime < FRESH_CONNECTION_MS) return;
+    if (now - lastRecoveryProbeAt < RECOVERY_PROBE_MIN_INTERVAL) return;
+    lastRecoveryProbeAt = now;
+    fetch(`${BRIDGE_URL}/health`, { method: 'GET' })
+      .then(response => {
+        if (!response.ok) reconnectNow();
+      })
+      .catch(() => reconnectNow());
+  }
+
+  async function send(payload, options = {}) {
     if (status !== 'connected') {
       connect();
       return { ok: false, queued: false, status };
@@ -297,25 +345,27 @@
     }
 
     const body = typeof payload === 'string' ? JSON.parse(payload) : payload;
-    fetch(`${BRIDGE_URL}/review`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...body,
-        clientId,
-        tabId: clientId,
-      }),
-    }).then(async response => {
+    try {
+      const response = await fetch(`${BRIDGE_URL}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...body,
+          clientId,
+          tabId: clientId,
+        }),
+      });
       if (!response.ok) {
         const message = await response.text();
         emit({ type: 'error', message: message || `HTTP ${response.status}` });
+        return { ok: false, queued: false, status, error: message || `HTTP ${response.status}` };
       }
-    }).catch(err => {
+      return { ok: true, queued: false };
+    } catch (err) {
       emit({ type: 'error', message: err.message || 'Failed to send request to DevTailor Bridge' });
       if (options.reconnectOnError !== false) connect();
-    });
-
-    return { ok: true, queued: false };
+      return { ok: false, queued: false, status, error: err.message || 'Failed to send request to DevTailor Bridge' };
+    }
   }
 
   async function cancel() {
@@ -381,12 +431,11 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientId, tabId: clientId }),
     }).then(async response => {
+      const body = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const message = await response.text();
-        emit({ type: 'error', message: message || `HTTP ${response.status}` });
+        const message = body.error || `HTTP ${response.status}`;
         return { ok: false, error: message };
       }
-      const body = await response.json().catch(() => ({}));
       if (body.sessionId) setSessionInfo(body.sessionId, body.sessionTitle || '新会话');
       else setSessionInfo(null, null);
       return { ok: true, ...body };
@@ -570,29 +619,53 @@
   }
 
   function initClientId() {
-    if (clientId) return Promise.resolve(clientId);
-    return new Promise(resolve => {
+    if (isChromeTabClientId(clientId)) return Promise.resolve(clientId);
+    if (clientIdPromise) return clientIdPromise;
+
+    clientIdPromise = new Promise(resolve => {
+      const finish = (id) => {
+        if (!isChromeTabClientId(clientId) || isChromeTabClientId(id)) {
+          clientId = id;
+        }
+        const resolved = clientId;
+        clientIdPromise = null;
+        resolve(resolved);
+      };
       const useFallback = () => {
-        clientId = getStableFallbackClientId();
-        resolve(clientId);
+        finish(clientId || getStableFallbackClientId());
+      };
+      const retryOrFallback = (attempt) => {
+        if (attempt < CLIENT_ID_MAX_RETRIES) {
+          setTimeout(() => {
+            requestTabId(attempt + 1);
+          }, CLIENT_ID_RETRY_DELAY);
+          return;
+        }
+        useFallback();
       };
 
-      try {
-        chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
-          if (chrome.runtime.lastError) {
-            useFallback();
-            return;
-          }
-          const tabId = response && response.tabId;
-          clientId = tabId != null
-            ? `tab_${tabId}`
-            : getStableFallbackClientId();
-          resolve(clientId);
-        });
-      } catch (e) {
-        useFallback();
+      function requestTabId(attempt) {
+        try {
+          chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, (response) => {
+            if (chrome.runtime.lastError) {
+              retryOrFallback(attempt);
+              return;
+            }
+            const tabId = response && response.tabId;
+            if (tabId == null) {
+              retryOrFallback(attempt);
+              return;
+            }
+            finish(`tab_${tabId}`);
+          });
+        } catch (e) {
+          retryOrFallback(attempt);
+        }
       }
+
+      requestTabId(0);
     });
+    return clientIdPromise;
   }
 
   window.__domReview.wsClient = {
@@ -618,7 +691,15 @@
     onStatusChange,
     onProjectChange,
     onSessionChange,
+    reconnectNow,
   };
+
+  window.addEventListener('online', recoverConnection);
+  window.addEventListener('pageshow', recoverConnection);
+  window.addEventListener('focus', recoverConnection);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') recoverConnection();
+  });
 
   connect();
 })();

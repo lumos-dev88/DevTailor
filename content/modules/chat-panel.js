@@ -276,6 +276,12 @@
     const result = await wsClient.loadSession(sessionId);
     if (!result?.ok) {
       showHint(result?.error || '会话切换失败');
+      return;
+    }
+    if (Array.isArray(result.messages)) {
+      messageStore.replaceAll(result.messages);
+      scrollToBottom();
+      schedulePersist();
     }
   }
 
@@ -450,17 +456,26 @@
     const statusClass = toolStatusClass(status);
     const path = msg.locations?.[0]?.path ? escapeHtml(msg.locations[0].path) : '';
     const hasOutput = shouldShowToolOutput(msg, browserName);
+    const isOpen = msg.open && hasOutput;
+    const headerAttrs = hasOutput
+      ? `button class="dt-tool-card-head" type="button" data-action="toggle-tool" data-msg-id="${escapeHtml(msg.id)}" title="${isOpen ? '隐藏输出' : '查看输出'}" aria-label="${isOpen ? '隐藏输出' : '查看输出'}" aria-expanded="${isOpen ? 'true' : 'false'}"`
+      : 'div class="dt-tool-card-head"';
+    const headerClose = hasOutput ? 'button' : 'div';
     return `
-      <div class="dt-tool-card dt-tool-card--${escapeHtml(toolFamily(msg.kind))}" data-msg-id="${escapeHtml(msg.id)}">
-        <div class="dt-tool-card-head">
+      <div class="dt-tool-card dt-tool-card--${escapeHtml(toolFamily(msg.kind))} ${isOpen ? 'open' : ''}" data-msg-id="${escapeHtml(msg.id)}">
+        <${headerAttrs}>
           <span class="dt-tool-card-icon" aria-hidden>${icon}</span>
           <span class="dt-tool-card-title" title="${title}">${title}</span>
           ${path ? `<code class="dt-tool-card-path">${path}</code>` : ''}
           ${meta && !path ? `<span class="dt-tool-card-meta">${truncate(meta, 120)}</span>` : ''}
           <span class="dt-tool-card-status ${statusClass}">${statusLabel}</span>
-          ${hasOutput ? `<button class="dt-tool-card-toggle" type="button" data-action="toggle-tool" data-msg-id="${escapeHtml(msg.id)}" title="${msg.open ? '隐藏输出' : '查看输出'}" aria-label="${msg.open ? '隐藏输出' : '查看输出'}">${msg.open ? '▴' : '▾'}</button>` : ''}
-        </div>
-        ${msg.open && hasOutput ? renderToolOutput(msg) : ''}
+          ${hasOutput ? `<span class="dt-tool-card-chev" aria-hidden>
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              ${isOpen ? '<polyline points="6 9 12 15 18 9"/>' : '<polyline points="9 18 15 12 9 6"/>'}
+            </svg>
+          </span>` : ''}
+        </${headerClose}>
+        ${isOpen ? renderToolOutput(msg) : ''}
       </div>
     `;
   }
@@ -498,7 +513,7 @@
     const groupKey = getToolGroupKey(items);
     const isOpen = openToolGroups.has(groupKey);
     return `
-      <div class="dt-tool-group" data-tool-family="${escapeHtml(family)}" data-group-key="${escapeHtml(groupKey)}">
+      <div class="dt-tool-group ${isOpen ? 'open' : ''}" data-tool-family="${escapeHtml(family)}" data-group-key="${escapeHtml(groupKey)}">
         <button class="dt-tool-group-toggle ${anyRunning ? 'running' : ''}" type="button" data-action="toggle-tool-group" data-group-key="${escapeHtml(groupKey)}" aria-expanded="${isOpen ? 'true' : 'false'}">
           <span class="dt-tool-group-icon" aria-hidden>${icon}</span>
           <span class="dt-tool-group-summary"><strong>${count > 1 ? `${label} ×${count}` : label}</strong>${state ? `，${state}` : ''}</span>
@@ -566,7 +581,7 @@
   function keepMessageInView(msgId) {
     const container = getMessagesEl();
     if (!container || !msgId) return;
-    const block = container.querySelector(`.dt-thinking-block[data-msg-id="${CSS.escape(msgId)}"]`);
+    const block = container.querySelector(`[data-msg-id="${CSS.escape(msgId)}"]`);
     if (!block) return;
     const blockRect = block.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
@@ -635,6 +650,7 @@
         flushQueue: () => getSendManager().flushQueue(),
         clearSentMarks: () => getSendManager().clearSentMarks(),
         setRequestInFlight: (value) => getSendManager().setRequestInFlight(value),
+        getCurrentSessionId: () => window.__domReview.wsClient?.getSessionId?.(),
       });
     }
     return bridgeEvents;
@@ -807,11 +823,15 @@
 
         const toolBtn = e.target.closest('[data-action="toggle-tool"]');
         if (toolBtn) {
+          e.preventDefault();
+          e.stopPropagation();
           const msgId = toolBtn.dataset.msgId;
           const msg = messageStore.find(m => m.id === msgId);
           if (msg) {
             const shouldFollow = isPinnedToBottom();
-            messageStore.update(msgId, { open: !msg.open });
+            const willOpen = !msg.open;
+            messageStore.update(msgId, { open: willOpen });
+            if (willOpen) keepMessageInView(msgId);
             if (shouldFollow) followLatestIfPinned();
           }
           return;
@@ -819,15 +839,22 @@
 
         const groupBtn = e.target.closest('[data-action="toggle-tool-group"]');
         if (groupBtn) {
+          e.preventDefault();
+          e.stopPropagation();
           const groupKey = groupBtn.dataset.groupKey;
           if (groupKey) {
             const shouldFollow = isPinnedToBottom();
+            const willOpen = !openToolGroups.has(groupKey);
             if (openToolGroups.has(groupKey)) {
               openToolGroups.delete(groupKey);
             } else {
               openToolGroups.add(groupKey);
             }
             renderMessages();
+            if (willOpen) {
+              const group = getMessagesEl()?.querySelector(`.dt-tool-group[data-group-key="${CSS.escape(groupKey)}"]`);
+              if (group) group.scrollIntoView({ block: 'nearest' });
+            }
             if (shouldFollow) followLatestIfPinned();
           }
           return;
