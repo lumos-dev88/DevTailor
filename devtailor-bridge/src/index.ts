@@ -12,7 +12,7 @@
  */
 
 import { spawn, spawnSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync, openSync, closeSync } from 'fs';
 import { resolve, join } from 'path';
 import { WSServer } from './ws-server';
 import { listBuiltInAgents, resolveAgent, ResolvedAgent } from './agent-presets';
@@ -36,6 +36,7 @@ Arguments:
 Options:
   -a, --agent <agent>      agent type or command (default: ${DEFAULT_AGENT})
   -d, --daemon             run in background
+  -f, --follow             follow log output (used with logs)
   -h, --help               show this help message
   -v, --version            show version
 
@@ -44,17 +45,20 @@ Commands:
   start                    start bridge (default)
   stop                     stop daemon process
   status                   check daemon status
+  logs                     show daemon logs
 
 Examples:
   devtailor                              # start in current directory
   devtailor /path/to/project             # start in specific directory
   devtailor --agent gemini               # use gemini agent
   devtailor --daemon                     # run in background
+  devtailor logs                         # show recent logs
+  devtailor logs -f                      # follow logs
   devtailor agents                       # list available agents
   devtailor stop                         # stop daemon
 
 Environment Variables:
-  DEVTAILOR_AGENT          default agent (overrides --agent)
+  DEVTAILOR_AGENT          default agent (can be overridden by --agent)
 
 Note:
   Bridge runs on fixed port ${DEFAULT_PORT} (required by extension)
@@ -65,7 +69,7 @@ function printVersion(): void {
   console.log(VERSION);
 }
 
-function parseArgs(): { agent: string; dir: string; daemon: boolean; command: string } {
+function parseArgs(): { agent: string; dir: string; daemon: boolean; command: string; follow: boolean } {
   const args = process.argv.slice(2);
 
   // Handle help and version first
@@ -83,10 +87,11 @@ function parseArgs(): { agent: string; dir: string; daemon: boolean; command: st
   let agent = process.env.DEVTAILOR_AGENT || DEFAULT_AGENT;
   let dir = process.cwd();
   let daemon = false;
+  let follow = false;
   let command = 'start';
 
-  // First non-flag argument is the directory
-  if (args[0] && !args[0].startsWith('-') && !['stop', 'status', 'agents'].includes(args[0])) {
+  // First non-flag argument is the directory, unless it is a known command.
+  if (args[0] && !args[0].startsWith('-') && !['stop', 'status', 'agents', 'logs'].includes(args[0])) {
     dir = resolve(args[0]);
     args.shift();
   }
@@ -119,9 +124,15 @@ function parseArgs(): { agent: string; dir: string; daemon: boolean; command: st
         daemon = true;
         break;
 
+      case '-f':
+      case '--follow':
+        follow = true;
+        break;
+
       case 'stop':
       case 'status':
       case 'agents':
+      case 'logs':
         command = arg;
         break;
 
@@ -132,11 +143,27 @@ function parseArgs(): { agent: string; dir: string; daemon: boolean; command: st
     }
   }
 
-  return { agent, dir, daemon, command };
+  return { agent, dir, daemon, command, follow };
 }
 
 function checkAgent(agent: ResolvedAgent): void {
-  // Simple check: try to find the binary in PATH
+  // For npx-based presets, verify the package can be resolved instead of just checking `which npx`.
+  if (agent.command === 'npx' && agent.args.length > 0) {
+    const packageName = agent.args[0];
+    const check = spawnSync('npx', ['--yes', '--dry-run', packageName], {
+      stdio: 'pipe',
+      timeout: 20000,
+    });
+    if (check.status !== 0) {
+      console.error(`Error: npx package '${packageName}' could not be resolved for agent '${agent.label}'. Please install it first.`);
+      const detail = check.stderr?.toString().trim() || check.stdout?.toString().trim();
+      if (detail) console.error(detail);
+      process.exit(1);
+    }
+    return;
+  }
+
+  // For direct binaries, try to find them in PATH.
   const isWindows = process.platform === 'win32';
   const cmd = isWindows ? 'where' : 'which';
   const check = spawnSync(cmd, [agent.command], { stdio: 'pipe' });
@@ -147,12 +174,52 @@ function checkAgent(agent: ResolvedAgent): void {
 }
 
 function startDaemon(agent: string, dir: string): void {
+  const dataDir = join(dir, '.devtailor');
+  try {
+    mkdirSync(dataDir, { recursive: true });
+  } catch (err) {
+    console.error(`[DevTailor] Failed to create data directory ${dataDir}:`, err);
+    process.exit(1);
+  }
+  const logPath = join(dataDir, 'bridge.log');
+  let logFd: number;
+  try {
+    logFd = openSync(logPath, 'a');
+  } catch (err) {
+    console.error(`[DevTailor] Failed to open log file ${logPath}:`, err);
+    process.exit(1);
+  }
   const child = spawn(process.execPath, [__filename, '--agent', agent, '--dir', dir], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
   });
+  try {
+    closeSync(logFd);
+  } catch {
+    // Ignore close errors; the child holds its own descriptor.
+  }
   child.unref();
   console.log(`[DevTailor] Daemon started (PID: ${child.pid})`);
+  console.log(`[DevTailor] Logs: ${logPath}`);
+}
+
+function tailBridgeLog(dir: string, follow: boolean): void {
+  const logPath = join(dir, '.devtailor', 'bridge.log');
+  if (!existsSync(logPath)) {
+    console.log('[DevTailor] No log file found');
+    return;
+  }
+  if (follow) {
+    const tail = spawn('tail', ['-f', '-n', '100', logPath], { stdio: 'inherit' });
+    tail.on('error', (err) => {
+      console.error(`[DevTailor] Failed to follow log: ${err.message}`);
+    });
+    return;
+  }
+  const { readFileSync } = require('fs');
+  const content = readFileSync(logPath, 'utf8');
+  const lines = content.split('\n');
+  console.log(lines.slice(-100).join('\n'));
 }
 
 function stopDaemon(): void {
@@ -185,31 +252,34 @@ function printAgents(): void {
   console.log('Raw commands still work: npx devtailor --agent "my-acp-agent --flag" --dir <project>');
 }
 
-function killProcessOnPort(port: number): void {
+async function stopExistingBridgeIfOnPort(port: number): Promise<void> {
   try {
-    const { execSync } = require('child_process');
-    const stdout = execSync(`lsof -ti :${port}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-    if (!stdout) return;
-    const pids = stdout.split('\n').filter(Boolean);
-    for (const pidStr of pids) {
-      const pid = parseInt(pidStr, 10);
-      if (pid === process.pid) continue;
-      console.log(`[DevTailor] Killing old process on port ${port} (PID: ${pid})`);
+    const res = await fetch(`http://localhost:${port}/health`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return;
+    const info = (await res.json().catch(() => null)) as { projectId?: string; pid?: number } | null;
+    if (!info || typeof info.projectId !== 'string') {
+      console.error(`[DevTailor] Port ${port} is occupied by a non-DevTailor process. Please free the port and try again.`);
+      process.exit(1);
+    }
+    const pid = typeof info.pid === 'number' ? info.pid : null;
+    if (pid && pid !== process.pid) {
+      console.log(`[DevTailor] Stopping existing bridge on port ${port} (PID: ${pid})`);
       try {
         process.kill(pid, 'SIGTERM');
       } catch {
-        // Ignore kill errors
+        // Ignore kill errors; bind will fail later if process is still there.
       }
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
-    // Give processes a moment to die
-    execSync(`sleep 0.5`, { stdio: 'ignore' });
   } catch {
-    // No process on port, or lsof not available
+    // No responding process on the port; proceed and let bind fail if it is occupied.
   }
 }
 
 async function main(): Promise<void> {
-  const { agent, dir, daemon, command } = parseArgs();
+  const { agent, dir, daemon, command, follow } = parseArgs();
 
   if (command === 'agents') {
     printAgents();
@@ -223,6 +293,11 @@ async function main(): Promise<void> {
 
   if (command === 'status') {
     checkStatus();
+    return;
+  }
+
+  if (command === 'logs') {
+    tailBridgeLog(dir, follow);
     return;
   }
 
@@ -240,7 +315,7 @@ async function main(): Promise<void> {
   const resolvedAgent = resolveAgent(agent);
   checkAgent(resolvedAgent);
 
-  killProcessOnPort(DEFAULT_PORT);
+  await stopExistingBridgeIfOnPort(DEFAULT_PORT);
 
   const dataDir = join(dir, '.devtailor');
 

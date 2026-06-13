@@ -94,7 +94,7 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
 - `POST /activate`：当前 tab 接管项目浏览器操作权。
 - `POST /cancel`：取消当前 Agent turn。
 - `POST /mcp`：Bridge 内嵌 Browser MCP JSON-RPC endpoint。
-- `GET /health`：项目、Agent、激活 tab 和 ACP session 元数据。
+- `GET /health`：项目、Agent、激活 tab、ACP session 元数据和 Bridge 进程 PID（供 CLI 安全处理端口冲突）。
 - `POST /new-session`：创建或复用空白展示会话。
 - `GET /sessions` / `GET /sessions/active` / `POST /sessions/load` / `POST /sessions/delete`：展示会话管理。
 - `GET /element-targets` / `POST /element-targets` / `DELETE /element-targets/:id`：元素库。

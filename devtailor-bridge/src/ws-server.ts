@@ -191,6 +191,7 @@ export class WSServer {
       this.sendJson(res, 200, {
         ok: true,
         ...this.projectInfo,
+        pid: process.pid,
         activeClientId: this.browserRouter.activeClientId,
         activeSessionId: activeDisplay?.id || null,
         activeSessionTitle: activeDisplay?.title || null,
