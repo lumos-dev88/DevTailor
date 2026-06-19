@@ -21,7 +21,7 @@ describe('agent presets', () => {
     const gemini = resolveAgent('gemini');
     assert.strictEqual(gemini.source, 'preset');
     assert.strictEqual(gemini.command, 'npx');
-    assert.deepStrictEqual(gemini.args, ['@google/gemini-cli', '--experimental-acp']);
+    assert.deepStrictEqual(gemini.args, ['--yes', '@google/gemini-cli', '--experimental-acp']);
 
     const claude = resolveAgent('claude');
     assert.strictEqual(claude.command, 'claude-agent-acp');

@@ -157,7 +157,19 @@
       activeStreamId = null;
       activeLoadingId = null;
       const restored = Array.isArray(msg.messages) ? msg.messages : [];
-      messageStore.replaceAll(restored.filter(item => item && typeof item === 'object'));
+      const messages = restored.filter(item => item && typeof item === 'object');
+      messageStore.replaceAll(messages);
+      const tail = messages[messages.length - 1];
+      if (msg.reason === 'reconnect' && tail?.type === 'stream' && tail.id) {
+        activeStreamId = tail.id;
+      }
+      if (msg.reason === 'reconnect') {
+        setRequestInFlight(Boolean(msg.isProcessing));
+        if (!msg.isProcessing) {
+          clearSentMarks();
+          flushQueue();
+        }
+      }
       scrollToBottom();
       refreshSendState();
       schedulePersist();
@@ -369,7 +381,7 @@
           break;
         case 'session_snapshot':
           applySessionSnapshot(msg);
-          if (msg.sessionId) showHint('会话已切换');
+          if (msg.sessionId && msg.reason !== 'reconnect') showHint('会话已切换');
           break;
       }
     }

@@ -10,8 +10,11 @@
 
 const STORAGE_KEY = 'dr_custom_patterns';
 const ENABLED_KEY = 'dr_enabled';
-const BRIDGE_URL = 'http://localhost:34781';
+const BRIDGE_URLS = ['http://localhost:34781', 'http://127.0.0.1:34781'];
+const BRIDGE_CONNECT_TIMEOUT_MS = 1500;
 const pendingBrowserActions = new Map();
+const bridgeSseProxies = new Map();
+let preferredBridgeUrlIndex = 0;
 
 const MAIN_WORLD_START_SCRIPTS = [
   'content/modules/browser-console-bridge.js'
@@ -35,6 +38,7 @@ const ISOLATED_WORLD_SCRIPTS = [
   'content/modules/chat-tools.js',
   'content/modules/chat-scroll.js',
   'content/modules/chat-images.js',
+  'content/modules/message-store.js',
   'content/modules/chat-persistence.js',
   'content/modules/chat-preview-editor.js',
   'content/modules/chat-bridge-events.js',
@@ -152,6 +156,7 @@ async function injectDevTailorIntoTab(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
+        try { window.__domReview?.wsClient?.disconnect?.(); } catch {}
         [
           'dom-review-host',
           'dom-review-badges',
@@ -390,10 +395,11 @@ function postBrowserActionNavigation(tabId, url) {
   const existing = pendingBrowserActions.get(tabId);
   if (!existing) return;
   clearBrowserAction(tabId, existing.requestId);
-  fetch(`${BRIDGE_URL}/browser-action-result`, {
+  bridgeProxyRequest({
+    path: '/browser-action-result',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    body: {
       requestId: existing.requestId,
       ok: true,
       result: {
@@ -403,8 +409,240 @@ function postBrowserActionNavigation(tabId, url) {
         elapsedMs: Date.now() - existing.startedAt,
         note: 'The page started navigating before the content script could post a normal browser action result.',
       },
-    }),
+    },
   }).catch(() => {});
+}
+
+function bridgeProxyKey(tabId, clientId) {
+  return `${tabId || 'unknown'}:${clientId || 'default'}`;
+}
+
+function sendBridgeProxyEvent(tabId, payload) {
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, {
+    type: 'DEVTAILOR_BRIDGE_PROXY_EVENT',
+    ...payload,
+  }).catch(() => {});
+}
+
+function stopBridgeSseProxy(tabId, clientId) {
+  const key = bridgeProxyKey(tabId, clientId);
+  const existing = bridgeSseProxies.get(key);
+  if (!existing) return;
+  bridgeSseProxies.delete(key);
+  try { existing.controller.abort(); } catch {}
+}
+
+function orderedBridgeUrls() {
+  return [
+    ...BRIDGE_URLS.slice(preferredBridgeUrlIndex),
+    ...BRIDGE_URLS.slice(0, preferredBridgeUrlIndex),
+  ];
+}
+
+function rememberBridgeUrl(bridgeUrl) {
+  const index = BRIDGE_URLS.indexOf(bridgeUrl);
+  if (index >= 0) preferredBridgeUrlIndex = index;
+}
+
+async function fetchBridgeUrl(bridgeUrl, path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), BRIDGE_CONNECT_TIMEOUT_MS);
+  const externalSignal = options.signal;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
+
+  try {
+    return await fetch(`${bridgeUrl}${path}`, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', abortFromExternal);
+    }
+  }
+}
+
+function dispatchSseChunk(tabId, state, chunk) {
+  state.buffer += chunk;
+  const lines = state.buffer.split(/\r?\n/);
+  state.buffer = lines.pop() || '';
+
+  for (const line of lines) {
+    if (line === '') {
+      if (state.data.length > 0) {
+        sendBridgeProxyEvent(tabId, {
+          event: 'message',
+          data: state.data.join('\n'),
+          bridgeUrl: state.bridgeUrl,
+        });
+        state.data = [];
+      }
+      continue;
+    }
+    if (line.startsWith(':')) continue;
+    if (line.startsWith('data:')) {
+      state.data.push(line.slice(5).replace(/^ /, ''));
+    }
+  }
+}
+
+async function readSseResponse(tabId, clientId, bridgeUrl, response, signal) {
+  const reader = response.body?.getReader?.();
+  if (!reader) throw new Error('Bridge SSE response has no readable body');
+
+  const decoder = new TextDecoder();
+  const state = { buffer: '', data: [], bridgeUrl };
+  let receivedData = false;
+
+  while (!signal.aborted) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    receivedData = true;
+    dispatchSseChunk(tabId, state, decoder.decode(value, { stream: true }));
+  }
+
+  const tail = decoder.decode();
+  if (tail) dispatchSseChunk(tabId, state, tail);
+  if (state.data.length > 0) {
+    sendBridgeProxyEvent(tabId, {
+      event: 'message',
+      data: state.data.join('\n'),
+      bridgeUrl,
+    });
+  }
+
+  if (!signal.aborted && receivedData) {
+    const proxy = bridgeSseProxies.get(bridgeProxyKey(tabId, clientId));
+    if (proxy && !proxy.controller.signal.aborted) {
+      sendBridgeProxyEvent(tabId, {
+        event: 'error',
+        clientId,
+        bridgeUrl,
+        error: 'Bridge SSE stream ended unexpectedly',
+      });
+    }
+  }
+}
+
+async function startBridgeSseProxy(tabId, clientId) {
+  if (!tabId || !clientId) return { ok: false, error: 'Missing tabId or clientId' };
+  stopBridgeSseProxy(tabId, clientId);
+
+  const key = bridgeProxyKey(tabId, clientId);
+  const controller = new AbortController();
+  bridgeSseProxies.set(key, { controller, clientId });
+
+  (async () => {
+    let lastError = null;
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    for (const bridgeUrl of orderedBridgeUrls()) {
+      if (controller.signal.aborted) return;
+      try {
+        const response = await fetchBridgeUrl(bridgeUrl, `/events?clientId=${encodeURIComponent(clientId)}`, {
+          headers: { Accept: 'text/event-stream' },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        rememberBridgeUrl(bridgeUrl);
+
+        sendBridgeProxyEvent(tabId, {
+          event: 'open',
+          clientId,
+          bridgeUrl,
+        });
+        await readSseResponse(tabId, clientId, bridgeUrl, response, controller.signal);
+        if (!controller.signal.aborted) {
+          sendBridgeProxyEvent(tabId, {
+            event: 'error',
+            clientId,
+            bridgeUrl,
+            error: 'Bridge SSE stream ended',
+          });
+        }
+        return;
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        lastError = err;
+      }
+    }
+
+    if (retryCount < maxRetries && !controller.signal.aborted) {
+      retryCount++;
+      const delay = Math.min(1000 * Math.pow(2, retryCount - 1), 10000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      if (!controller.signal.aborted) {
+        const result = await startBridgeSseProxy(tabId, clientId);
+        return;
+      }
+    }
+
+    bridgeSseProxies.delete(key);
+    sendBridgeProxyEvent(tabId, {
+      event: 'error',
+      clientId,
+      error: lastError?.message || 'Failed to connect to DevTailor Bridge through background proxy',
+    });
+  })();
+
+  return { ok: true };
+}
+
+async function bridgeProxyRequest(message) {
+  const path = String(message.path || '/');
+  const method = String(message.method || 'GET').toUpperCase();
+  const headers = { ...(message.headers || {}) };
+  let body = message.body;
+  if (body !== undefined && typeof body !== 'string') {
+    body = JSON.stringify(body);
+    if (!headers['Content-Type'] && !headers['content-type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+  }
+
+  let lastError = null;
+  const maxRetries = 2;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    for (const bridgeUrl of orderedBridgeUrls()) {
+      try {
+        const response = await fetchBridgeUrl(bridgeUrl, path, {
+          method,
+          headers,
+          body: method === 'GET' || method === 'HEAD' ? undefined : body,
+        });
+        const text = await response.text();
+        rememberBridgeUrl(bridgeUrl);
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          bridgeUrl,
+          body: text,
+        };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (attempt < maxRetries) {
+      const delay = Math.min(500 * Math.pow(2, attempt), 2000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+
+  return {
+    ok: false,
+    status: 0,
+    error: lastError?.message || 'Failed to reach DevTailor Bridge',
+  };
 }
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
@@ -422,6 +660,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
   if (changeInfo.url) {
     await updateActionState(tabId, changeInfo.url);
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const [key, proxy] of bridgeSseProxies) {
+    if (!key.startsWith(`${tabId}:`)) continue;
+    bridgeSseProxies.delete(key);
+    try { proxy.controller.abort(); } catch {}
   }
 });
 
@@ -469,6 +715,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     clearBrowserAction(sender.tab?.id ?? null, message.requestId);
     sendResponse({ success: true });
     return false;
+  }
+
+  if (message.type === 'DEVTAILOR_BRIDGE_PROXY_CONNECT') {
+    (async () => {
+      const tabId = sender.tab?.id ?? null;
+      const result = await startBridgeSseProxy(tabId, message.clientId);
+      sendResponse(result);
+    })();
+    return true;
+  }
+
+  if (message.type === 'DEVTAILOR_BRIDGE_PROXY_DISCONNECT') {
+    stopBridgeSseProxy(sender.tab?.id ?? null, message.clientId);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'DEVTAILOR_BRIDGE_PROXY_REQUEST') {
+    bridgeProxyRequest(message).then(sendResponse);
+    return true;
   }
 
   if (message.type === 'GET_ENABLED') {

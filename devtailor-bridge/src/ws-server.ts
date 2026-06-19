@@ -188,14 +188,18 @@ export class WSServer {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       const activeDisplay = this.currentDisplaySession();
+      const clientId = url.searchParams.get('clientId') || '';
+      const activeSessionId = activeDisplay?.id || null;
       this.sendJson(res, 200, {
         ok: true,
         ...this.projectInfo,
         pid: process.pid,
         activeClientId: this.browserRouter.activeClientId,
-        activeSessionId: activeDisplay?.id || null,
+        activeSessionId,
         activeSessionTitle: activeDisplay?.title || null,
         acpSessionId: this.activeAcpSessionId(),
+        isProcessing: clientId ? this.isClientProcessingSession(clientId, activeSessionId) : false,
+        processingSessionId: clientId ? this.processingDisplaySessions.get(clientId) || null : null,
       });
       return;
     }
@@ -425,7 +429,15 @@ export class WSServer {
     }
   }
 
+  /** Returns true when the resolved agent ID matches the built-in Claude preset. */
+  private get isClaudeAgent(): boolean {
+    return this.agentKey === 'claude' || this.agent === 'claude-agent-acp';
+  }
+
   private mcpServers(): any[] {
+    // Non-Claude agents may not accept our Browser MCP server schema.
+    // Only pass Browser MCP to Claude; others get an empty list so session creation is not blocked.
+    if (!this.isClaudeAgent) return [];
     return [{
       type: 'http',
       name: 'devtailor-browser',
@@ -441,7 +453,7 @@ export class WSServer {
     let session = this.sessions.get(displaySessionId);
     if (!session || (!session.isReady && !session.isStarting)) {
       if (session) session.stop();
-      session = new ACPSession(this.agent, this.cwd, this.agentArgs, this.mcpServers(), acpSessionId, this.agentEnv);
+      session = new ACPSession(this.agent, this.cwd, this.agentArgs, this.mcpServers(), acpSessionId, this.agentEnv, this.agentKey);
       this.sessions.set(displaySessionId, session);
     }
     return session;
@@ -452,7 +464,31 @@ export class WSServer {
     display: DisplaySession,
     session: ACPSession,
   ): Promise<ReviewSessionStart> {
-    const result = await session.start();
+    let result: { sessionId: string | null; mode: 'reused' | 'created' | 'resumed' };
+    try {
+      result = await session.start();
+    } catch (startErr: any) {
+      // Fallback: if session creation failed and we passed Browser MCP servers,
+      // retry once without them. Non-Claude agents already get empty mcpServers
+      // so this path is only reachable for Claude or raw agents with MCP servers.
+      if (this.mcpServers().length > 0 && !session.isReady) {
+        console.warn(`[ACP] Session start failed with MCP servers (${startErr.message}), retrying without MCP servers...`);
+        session.stop();
+        const fallbackSession = new ACPSession(
+          this.agent, this.cwd, this.agentArgs, [], session.currentSessionId, this.agentEnv, this.agentKey,
+        );
+        this.sessions.set(display.id, fallbackSession);
+        try {
+          result = await fallbackSession.start();
+          session = fallbackSession;
+        } catch (fallbackErr: any) {
+          console.error(`[ACP] Fallback session start also failed: ${fallbackErr.message}`);
+          throw startErr;
+        }
+      } else {
+        throw startErr;
+      }
+    }
     const sid = result.sessionId || session.currentSessionId;
     if (sid) {
       display.acpSessionId = sid;
@@ -481,6 +517,11 @@ export class WSServer {
       reason: 'cancelled',
     } as any);
     return true;
+  }
+
+  private isClientProcessingSession(clientId: string, displaySessionId: string | null): boolean {
+    if (!displaySessionId || !this.processing.has(clientId)) return false;
+    return (this.processingDisplaySessions.get(clientId) || this.activeDisplaySessionId) === displaySessionId;
   }
 
   private historyForPrompt(display: DisplaySession, startMode: ReviewSessionStart['mode']): HistoryMessage[] | undefined {
@@ -790,12 +831,15 @@ export class WSServer {
   }
 
   private async handleActiveSession(url: URL, res: ServerResponse): Promise<void> {
+    const clientId = url.searchParams.get('clientId') || 'default';
     const display = this.getOrCreateDisplaySession();
     this.sendJson(res, 200, {
       ok: true,
       session: this.publicSession(display),
       messages: display.messages,
       activeSessionId: display.id,
+      isProcessing: this.isClientProcessingSession(clientId, display.id),
+      processingSessionId: this.processingDisplaySessions.get(clientId) || null,
     });
   }
 

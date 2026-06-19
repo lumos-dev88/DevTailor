@@ -4,7 +4,7 @@
 
 ## 当前核心规则
 
-- 浏览器与 Bridge 使用 SSE + HTTP POST；`content/modules/ws-client.js` 是历史命名，不是 WebSocket 实现。
+- 浏览器扩展与 Bridge 使用 SSE + HTTP POST，但网络连接由 `background/service-worker.js` 统一代理；content script 通过 `chrome.runtime.sendMessage` / `chrome.tabs.sendMessage` 与 background 通信。`content/modules/ws-client.js` 是历史命名，不是 WebSocket 实现。
 - Bridge 拥有 display session 和 ACP session 绑定；前端展示历史不再作为 Agent 上下文来源。
 - 当前可操作 tab 由 Bridge 的 `BrowserActionRouter.activeClientId` 管理；新 tab 在线不自动抢占，用户需要显式「连接当前页」。
 - Browser MCP 操作只发往当前已接管 tab；Agent 不传 `tabId`、`clientId` 或 `pageUrl`。
@@ -17,7 +17,7 @@
 
 ### 1. SSE 连接竞态条件
 
-- 使用 async/await 确保 `/health` 返回并设置 `projectInfo` 后再触发监听器。
+- background 维护 `/events` SSE fetch stream，content script 收到 proxy open 后通过代理 `/health`，确保返回并设置 `projectInfo` 后再触发监听器。
 - 增加响应验证和错误处理。
 - 规则：连接状态、项目状态和会话恢复必须按顺序推进。
 
@@ -36,8 +36,8 @@
 ### 4. SSE 心跳机制
 
 - 添加 30 秒定时检测。
-- 收到 SSE 消息时刷新 `lastHeartbeatTime`。
-- 超过 60 秒无消息时自动重连。
+- 收到 background proxy 转发的 SSE 消息时刷新 `lastHeartbeatTime`。
+- 超过 60 秒无消息时通知 background 断开旧 SSE proxy 并自动重连。
 
 ### 5. 元素库 URL 过滤 API 废除
 
@@ -118,6 +118,7 @@ function _notify() {
 ## 常见误区
 
 - 不要把 `ws-client.js` 改回 WebSocket。
+- 不要让 content script 直接访问 Bridge 或直接创建 `EventSource`；标准通道是 background service worker proxy。
 - 不要恢复 `/element-targets?url=...` 当前页过滤。
 - 不要让新 tab 建立 SSE 连接后自动抢占 active tab。
 - 不要把前端展示历史重新发给 Agent。

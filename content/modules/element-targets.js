@@ -10,8 +10,13 @@
   'use strict';
   window.__domReview = window.__domReview || {};
 
-  const BRIDGE_URL = 'http://localhost:34781';
   const TEST_ID_ATTRIBUTES = ['data-ai-id', 'data-testid', 'data-test', 'data-cy', 'testid'];
+
+  function bridgeRequest(path, options = {}) {
+    const request = window.__domReview.wsClient?.request;
+    if (typeof request === 'function') return request(path, options);
+    return Promise.reject(new Error('Bridge proxy not available'));
+  }
 
   function pagePatternForCurrentPage() {
     return `${location.origin}${location.pathname}`;
@@ -141,7 +146,7 @@
       throw new Error('Missing locator: provide selector, xpath, or locatorRecipes');
     }
 
-    const response = await fetch(`${BRIDGE_URL}/element-targets`, {
+    const response = await bridgeRequest('/element-targets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -165,7 +170,7 @@
       ...payload,
       name,
     };
-    const response = await fetch(`${BRIDGE_URL}/element-targets`, {
+    const response = await bridgeRequest('/element-targets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(bodyPayload),
@@ -178,7 +183,7 @@
   }
 
   async function listAllTargets() {
-    const response = await fetch(`${BRIDGE_URL}/element-targets`);
+    const response = await bridgeRequest('/element-targets');
     const body = await response.json().catch(() => ({}));
     if (!response.ok || body.ok === false) {
       throw new Error(body.error || `HTTP ${response.status}`);
@@ -189,7 +194,7 @@
   async function deleteTarget(targetId) {
     const id = String(targetId || '').trim();
     if (!id) throw new Error('Missing element target id');
-    const response = await fetch(`${BRIDGE_URL}/element-targets/${encodeURIComponent(id)}`, {
+    const response = await bridgeRequest(`/element-targets/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
     const body = await response.json().catch(() => ({}));

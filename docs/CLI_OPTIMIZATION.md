@@ -68,7 +68,8 @@ devtailor --agent "my-acp-agent --flag" --dir /path/to/project
 启动前会检查 resolved command 是否可用：
 
 - 直接二进制命令（如 `claude-agent-acp`、`kimi`）使用 `which` / `where` 检查 PATH。
-- `npx` 命令（如 `@github/copilot`、`@google/gemini-cli`）会执行 `npx --yes --dry-run <package>` 预检，提前发现包未安装的情况。
+- `npx` 命令只检查 `npx` 本身是否在 PATH 中，不对具体包做 `dry-run` 预检。真实解析失败会在 spawn 阶段暴露，避免 valid npx 包因 dry-run 失败被误杀。
+- 所有 npx 预设的 args 都以 `--yes` 开头，确保 npx 非交互安装，不污染 ACP stdio。
 
 ## 后台进程规则
 

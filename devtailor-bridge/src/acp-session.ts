@@ -212,7 +212,13 @@ export class ACPSession {
     private mcpServers: acp.McpServer[] = [],
     private previousSessionId?: string | null,
     private agentEnv?: Record<string, string>,
+    private agentId?: string,
   ) {}
+
+  /** Returns true when the agent is the built-in Claude preset. */
+  private get isClaudeAgent(): boolean {
+    return this.agentId === 'claude' || this.agent === 'claude-agent-acp';
+  }
 
   async start(): Promise<ACPSessionStartResult> {
     if (this.ready) return { sessionId: this.sessionId, mode: 'reused' };
@@ -299,17 +305,24 @@ export class ACPSession {
 
       if (!this.sessionId) {
         console.log('[ACP] Creating session...');
-        const sessionResult = await this.connection.newSession({
+        const newSessionParams: Record<string, unknown> = {
           cwd: this.cwd,
           mcpServers: this.mcpServers,
-          _meta: {
+        };
+        if (this.isClaudeAgent) {
+          newSessionParams._meta = {
             systemPrompt: {
               type: 'preset',
               preset: 'claude_code',
               append: systemPrompt,
             },
-          },
-        });
+          };
+        } else {
+          newSessionParams._meta = { systemPrompt: { append: systemPrompt } };
+        }
+        const sessionResult = await this.connection.newSession(
+          newSessionParams as Parameters<typeof this.connection.newSession>[0],
+        );
         this.sessionId = sessionResult.sessionId;
         this.startMode = 'created';
         console.log(`[ACP] Session created: ${this.sessionId}`);

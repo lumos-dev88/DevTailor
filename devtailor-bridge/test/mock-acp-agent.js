@@ -48,6 +48,17 @@ function handleLine(line) {
     }
 
     if (method === 'session/new') {
+      // Capture session/new params for test inspection when MOCK_PARAMS_FILE is set.
+      if (process.env.MOCK_PARAMS_FILE) {
+        try {
+          const dir = require('path').dirname(process.env.MOCK_PARAMS_FILE);
+          require('fs').mkdirSync(dir, { recursive: true });
+          require('fs').writeFileSync(
+            process.env.MOCK_PARAMS_FILE,
+            JSON.stringify(req.params ?? {}, null, 2),
+          );
+        } catch {}
+      }
       const sessionId = 'test-session-' + Date.now();
       if (process.env.MOCK_STARTUP_TITLE) {
         write({

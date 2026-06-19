@@ -53,6 +53,14 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
 
 不要把任何逻辑写死到 Claude Code。当前设计是 ACP Agent 中立的。
 
+### ACP session 兼容规则
+
+- `newSession()` 的 `_meta.systemPrompt` 按 agent 区分：Claude 预设传 `preset: 'claude_code'`，非 Claude 只传 `append`，不传 Claude 专用 preset。
+- Browser MCP server 只传给 Claude 预设。非 Claude agent 不传 MCP server，避免 schema 不兼容导致 `newSession` 失败。后续如需对特定 agent 开放 Browser MCP，可在 `ws-server.ts` 的 `mcpServers()` 方法中按 agent 逐个开启。
+- 若 Claude 预设 `newSession` 因 MCP server 失败，`startReviewSession` 会自动降级重试（不传 MCP server）。
+- npx 预设启动参数包含 `--yes`，避免 npx 安装确认污染 ACP stdio。
+- CLI 不再对 npx 包做 `npx --yes --dry-run` 阻断式预检，改为仅检查 `npx` 是否在 PATH 中。真实解析失败会在 spawn 阶段暴露。
+
 ## 前端技术栈边界
 
 保持扩展前端轻量原生：
@@ -104,10 +112,14 @@ npm run dev -- --dir . --agent "npx my-agent --acp"
 
 休眠/网络恢复边界：
 
-- 前端 `EventSource` 可能长期停在 `CONNECTING` 而不触发新的 `error`；`connect()` 不能只因为 existing EventSource 非 `CLOSED` 就永久返回。
-- `online`、`pageshow`、窗口 focus 和页面重新可见时要主动做轻量恢复探测，必要时关闭旧 SSE 并重建连接。
+- content script 不直接访问 Bridge，也不直接创建 `EventSource`；标准通道是 background service worker Bridge proxy。background 维护 SSE fetch stream 并通过 `chrome.tabs.sendMessage` 转发事件，普通 HTTP API 通过 `chrome.runtime.sendMessage` 代理，避免受宿主页面网络上下文限制。
+- `online`、`pageshow`、窗口 focus 和页面重新可见时要主动做轻量恢复探测，必要时通知 background 关闭旧 SSE proxy 并重建连接。
+- background proxy SSE 断开后，content 应快速重连，并在 proxy open 后主动拉 `/sessions/active` 发出 `session_snapshot(reason: "reconnect")`，用 Bridge 持久化消息补偿断线期间丢失的 stream/thinking/tool 事件；重连 snapshot 不应展示“会话已切换”提示。若重连 snapshot 尾部是 stream 消息，chat 层应把它恢复为 active stream，后续 delta 继续追加到同一条 assistant 消息。
+- 刷新后的发送/停止按钮状态必须从 Bridge 的运行状态恢复：`/health` 和 `/sessions/active` 应暴露当前 client 是否正在处理请求，前端恢复 active session 或 reconnect snapshot 时同步 `requestInFlight`，不能只依赖 content script 内存或 `chrome.storage`。
 - Bridge 从未启动到启动完成的场景，应靠前端恢复探测和指数退避共同恢复，不要求用户刷新页面。
 - 刷新/重注入期间 `GET_TAB_ID` 可能短暂返回空；`clientId` 初始化必须 single-flight，优先保持真实 `tab_{id}`，临时 fallback id 只能兜底且要继续尝试升级回真实 tab id，避免刷新后 active tab 变成“待连接”。
+- 手动或动态重注入 content scripts 前必须先调用旧 `window.__domReview.wsClient.disconnect()`（若存在），避免旧 background SSE proxy 残留，导致 Bridge 继续把 Browser MCP 指令路由到旧 tab 连接。
+- background 访问 Bridge 时应支持 `localhost:34781` 和 `127.0.0.1:34781` fallback；SSE 成功连接后，`review`、session、Browser action result、元素库等 HTTP API 应复用同一个当前可用 Bridge URL。fallback 初始连接要有短超时并优先尝试上次成功地址，避免页面刷新后卡在不可用 loopback hostname 上。
 
 ## 项目身份与 Tab 接管
 
@@ -205,6 +217,12 @@ cd devtailor-bridge
 npm test
 npm run build
 ```
+
+## Browser MCP 兼容性
+
+- Browser MCP server 默认只传给 Claude 预设（`agentKey === 'claude'` 或 `agent === 'claude-agent-acp'`）。
+- 非 Claude agent 的 `mcpServers` 为空数组，session 创建不会受 MCP schema 影响。
+- 若后续验证某 agent 支持 HTTP MCP server schema，可在 `ws-server.ts` 的 `mcpServers()` 中按 agent ID 白名单开启。
 
 ## Browser MCP 工具边界
 

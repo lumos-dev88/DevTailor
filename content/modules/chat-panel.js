@@ -232,6 +232,7 @@
       }
       getSendManager().setSessionId(result.activeSessionId);
     }
+    getSendManager().setRequestInFlight(Boolean(result.isProcessing));
     messageStore.replaceAll(result.messages);
     scrollToBottom();
   }

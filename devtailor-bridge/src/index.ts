@@ -147,17 +147,16 @@ function parseArgs(): { agent: string; dir: string; daemon: boolean; command: st
 }
 
 function checkAgent(agent: ResolvedAgent): void {
-  // For npx-based presets, verify the package can be resolved instead of just checking `which npx`.
-  if (agent.command === 'npx' && agent.args.length > 0) {
-    const packageName = agent.args[0];
-    const check = spawnSync('npx', ['--yes', '--dry-run', packageName], {
-      stdio: 'pipe',
-      timeout: 20000,
-    });
+  // For npx-based presets, only verify that npx itself is available.
+  // We intentionally skip the old npx --dry-run precheck: many valid npx packages
+  // fail --dry-run and blocking on it prevents non-Claude agents from starting.
+  // A real resolution failure will surface naturally when spawn() runs.
+  if (agent.command === 'npx') {
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows ? 'where' : 'which';
+    const check = spawnSync(cmd, ['npx'], { stdio: 'pipe' });
     if (check.status !== 0) {
-      console.error(`Error: npx package '${packageName}' could not be resolved for agent '${agent.label}'. Please install it first.`);
-      const detail = check.stderr?.toString().trim() || check.stdout?.toString().trim();
-      if (detail) console.error(detail);
+      console.error(`Error: 'npx' not found in PATH. Required to run agent '${agent.label}'.`);
       process.exit(1);
     }
     return;
@@ -172,7 +171,6 @@ function checkAgent(agent: ResolvedAgent): void {
     process.exit(1);
   }
 }
-
 function startDaemon(agent: string, dir: string): void {
   const dataDir = join(dir, '.devtailor');
   try {

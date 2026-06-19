@@ -19,7 +19,7 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   copilot: {
     label: 'GitHub Copilot',
     command: 'npx',
-    args: ['@github/copilot', '--acp', '--yolo', '--enable-all-github-mcp-tools'],
+    args: ['--yes', '@github/copilot', '--acp', '--yolo', '--enable-all-github-mcp-tools'],
     description: 'GitHub Copilot ACP',
   },
   claude: {
@@ -31,25 +31,25 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   gemini: {
     label: 'Gemini CLI',
     command: 'npx',
-    args: ['@google/gemini-cli', '--experimental-acp'],
+    args: ['--yes', '@google/gemini-cli', '--experimental-acp'],
     description: 'Gemini CLI ACP',
   },
   qwen: {
     label: 'Qwen Code',
     command: 'npx',
-    args: ['@qwen-code/qwen-code', '--acp', '--experimental-skills'],
+    args: ['--yes', '@qwen-code/qwen-code', '--acp', '--experimental-skills'],
     description: 'Qwen Code ACP',
   },
   codex: {
     label: 'Codex CLI',
     command: 'npx',
-    args: ['@zed-industries/codex-acp'],
+    args: ['--yes', '@zed-industries/codex-acp'],
     description: 'Codex ACP adapter',
   },
   opencode: {
     label: 'OpenCode',
     command: 'npx',
-    args: ['opencode-ai', 'acp'],
+    args: ['--yes', 'opencode-ai', 'acp'],
     description: 'OpenCode ACP',
   },
   kiro: {

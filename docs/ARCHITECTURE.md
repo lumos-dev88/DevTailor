@@ -18,7 +18,8 @@
 │                                        └─────────────────────────┘  │
 │                                                                   │
 └───────────────────────────────┬───────────────────────────────────┘
-                                │ SSE / HTTP
+                                │ background service worker proxy
+                                │ (SSE fetch stream + HTTP)
                                 │
 ┌───────────────────────────────▼───────────────────────────────────┐
 │                       Bridge Server (Node.js)                     │
@@ -85,7 +86,7 @@
 │ 3. sidebar.render()                        │
 │ 4. chatPanel.init()                        │
 │ 5. elementSaver.init()                     │
-│ 6. Wire SSE listeners                      │
+│ 6. Wire Bridge proxy listeners             │
 │ 7. badges.render()                         │
 └─────────┬──────────────────────────────────┘
           │
@@ -103,17 +104,11 @@
           ▼
 ┌────────────────────────────────────────────┐
 │ wsClient.connect()                         │
-│ 1. eventSource = new EventSource()         │
-│ 2. eventSource.onopen = async () => {      │
-│      const info = await fetch('/health')   │  ⚠️ Race condition fixed
-│      setProjectInfo(info)                  │
-│      triggerProjectListeners()             │
-│    }                                        │
-│ 3. eventSource.onmessage = (event) => {    │
-│      const msg = JSON.parse(event.data)    │
-│      triggerMessageListeners(msg)          │
-│    }                                        │
-│ 4. startHeartbeat() - 30s interval         │  ⚠️ Heartbeat added
+│ 1. chrome.runtime.sendMessage(CONNECT)     │
+│ 2. background fetches /events SSE stream   │
+│ 3. tabs.sendMessage(open/message/error)    │
+│ 4. content fetches /health through proxy   │
+│ 5. startHeartbeat() - 30s interval         │
 └────────────────────────────────────────────┘
 ```
 
@@ -273,7 +268,7 @@ User opens element library
 
 ## ⚠️ 已知时序问题
 
-### 1. ✅ **已修复：SSE 连接竞态条件**
+### 1. ✅ **已修复：Bridge proxy 连接竞态条件**
 
 **问题**：
 ```javascript
@@ -291,10 +286,10 @@ events.onopen = () => {
 **修复**：
 ```javascript
 // NEW (正确)
-events.onopen = async () => {
+onBridgeProxyOpen = async () => {
   setStatus('connected');
   try {
-    const response = await fetch(`${BRIDGE_URL}/health`);
+    const response = await bridgeFetch('/health');
     const info = await response.json();
     setProjectInfo(info);  // 同步完成后再触发
     projectListeners.forEach(fn => fn(info));

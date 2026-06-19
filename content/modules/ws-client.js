@@ -1,7 +1,7 @@
 /**
  * DevTailor — SSE Client Module
  *
- * Receives bridge events via EventSource and sends review requests via fetch.
+ * Receives Bridge events through the extension background proxy.
  * Kept as window.__domReview.wsClient to avoid touching the chat panel API.
  *
  * Registers: window.__domReview.wsClient
@@ -10,26 +10,21 @@
   'use strict';
   window.__domReview = window.__domReview || {};
 
-  const BRIDGE_URL = 'http://localhost:34781';
   const RECONNECT_BASE_DELAY = 1000;
   const RECONNECT_MAX_DELAY = 30000;
-  const HEARTBEAT_INTERVAL = 30000; // 30 秒心跳
-  const CONNECT_STALL_MS = 12000;
-  const RECOVERY_PROBE_MIN_INTERVAL = 5000;
-  const FRESH_CONNECTION_MS = 10000;
+  const HEARTBEAT_INTERVAL = 30000;
+  const HEARTBEAT_TIMEOUT = 60000;
   const CLIENT_ID_RETRY_DELAY = 100;
   const CLIENT_ID_MAX_RETRIES = 8;
   const FALLBACK_CLIENT_ID_KEY = 'devtailor:fallback-client-id';
+  const RECOVERY_DEBOUNCE_MS = 300;
 
   let clientId = null;
-  let events = null;
   let status = 'disconnected';
   let reconnectAttempts = 0;
   let reconnectTimer = null;
   let heartbeatTimer = null;
   let lastHeartbeatTime = 0;
-  let lastConnectAttemptAt = 0;
-  let lastRecoveryProbeAt = 0;
   let clientIdPromise = null;
   let listeners = [];
   let statusListeners = [];
@@ -40,6 +35,56 @@
   let sessionTitle = null;
   let activeClientId = null;
   let isActiveClient = false;
+  let currentBridgeUrl = null;
+  let connecting = false;
+  let recoveryTimer = null;
+
+  function getBridgeUrl() {
+    return currentBridgeUrl;
+  }
+
+  function setBridgeUrl(url) {
+    if (typeof url === 'string' && url) currentBridgeUrl = url;
+  }
+
+  function runtimeMessage(message) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message || 'Extension message failed'));
+            return;
+          }
+          resolve(response || {});
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  function responseFromProxy(result) {
+    const body = typeof result.body === 'string' ? result.body : '';
+    return {
+      ok: Boolean(result.ok),
+      status: Number(result.status || 0),
+      statusText: result.statusText || '',
+      text: () => Promise.resolve(body),
+      json: () => Promise.resolve().then(() => body ? JSON.parse(body) : {}),
+    };
+  }
+
+  async function bridgeFetch(path, options = {}) {
+    const result = await runtimeMessage({
+      type: 'DEVTAILOR_BRIDGE_PROXY_REQUEST',
+      path,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      body: options.body,
+    });
+    if (result.bridgeUrl) setBridgeUrl(result.bridgeUrl);
+    return responseFromProxy(result);
+  }
 
   function isExtensionContextInvalidated(error) {
     return /Extension context invalidated/i.test(error?.message || String(error || ''));
@@ -142,112 +187,89 @@
     setSessionInfo(id, null);
   }
 
+  function handleBridgeMessageData(data) {
+    lastHeartbeatTime = Date.now();
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'browser_action') {
+        handleBrowserAction(msg);
+        return;
+      }
+      if (msg.type === 'connected') {
+        setProjectInfo(msg);
+        setActiveClient(msg.activeClientId || null);
+        if (msg.activeSessionId || msg.activeSessionTitle) {
+          setSessionInfo(msg.activeSessionId || null, msg.activeSessionTitle || null);
+        }
+      }
+      if (msg.type === 'active_client') {
+        setActiveClient(msg.activeClientId || null);
+      }
+      if (msg.type === 'session_info' && msg.sessionId) {
+        setSessionInfo(msg.sessionId, msg.sessionTitle || null);
+      }
+      if (msg.type === 'session_reset') {
+        setSessionInfo(msg.sessionId || null, msg.sessionTitle || null);
+      }
+      listeners.forEach(fn => {
+        try { fn(msg); } catch (e) { if (!isExtensionContextInvalidated(e)) console.warn('[DevTailor] SSE message listener error:', e); }
+      });
+    } catch {
+      console.warn('[DevTailor] Invalid SSE message:', data);
+    }
+  }
+
+  async function syncActiveSessionSnapshot(reason = 'reconnect') {
+    try {
+      const url = `/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`;
+      const response = await bridgeFetch(url);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body?.ok || !body.activeSessionId) return;
+      setSessionInfo(body.activeSessionId, body.session?.title || null);
+      emit({
+        type: 'session_snapshot',
+        tabId: clientId,
+        sessionId: body.activeSessionId,
+        sessionTitle: body.session?.title || null,
+        messages: Array.isArray(body.messages) ? body.messages : [],
+        isProcessing: Boolean(body.isProcessing),
+        reason,
+      });
+    } catch (err) {
+      console.warn('[DevTailor] Failed to resync active session snapshot:', err.message || err);
+    }
+  }
+
+  async function connectViaProxy() {
+    if (connecting) return;
+    connecting = true;
+    clearTimeout(reconnectTimer);
+    setStatus('connecting');
+
+    try {
+      const result = await runtimeMessage({
+        type: 'DEVTAILOR_BRIDGE_PROXY_CONNECT',
+        clientId,
+      });
+      if (!result.ok) {
+        throw new Error(result.error || 'Failed to start Bridge proxy');
+      }
+      connecting = false;
+    } catch (err) {
+      connecting = false;
+      console.warn('[DevTailor] Bridge proxy connect failed:', err.message || err);
+      setStatus('disconnected');
+      scheduleReconnect();
+    }
+  }
+
   function connect(options = {}) {
-    const force = Boolean(options.force);
+    if (connecting) return;
     if (!isChromeTabClientId(clientId)) {
       initClientId().then(() => connect(options));
       return;
     }
-    if (events && events.readyState !== EventSource.CLOSED) {
-      const connectingTooLong = events.readyState === EventSource.CONNECTING &&
-        lastConnectAttemptAt > 0 &&
-        Date.now() - lastConnectAttemptAt > CONNECT_STALL_MS;
-      if (!force && !connectingTooLong) return;
-      try { events.close(); } catch {}
-      events = null;
-    }
-
-    clearTimeout(reconnectTimer);
-    lastConnectAttemptAt = Date.now();
-    setStatus('connecting');
-
-    try {
-      events = new EventSource(`${BRIDGE_URL}/events?clientId=${encodeURIComponent(clientId)}`);
-    } catch (e) {
-      console.error('[DevTailor] Failed to create EventSource:', e);
-      scheduleReconnect();
-      return;
-    }
-
-    events.onopen = async () => {
-      console.log('[DevTailor] SSE connected');
-      reconnectAttempts = 0;
-      setStatus('connected');
-      lastHeartbeatTime = Date.now();
-      startHeartbeat();
-
-      // Detect bridge restart (new projectId means all agent sessions are gone)
-      // Use async/await to ensure projectInfo is set before notifying listeners
-      try {
-        const response = await fetch(`${BRIDGE_URL}/health`);
-        if (!response.ok) {
-          console.warn('[DevTailor] Health check failed:', response.status);
-          return;
-        }
-
-        const info = await response.json();
-        if (!info || !info.projectId) {
-          console.warn('[DevTailor] Invalid health response:', info);
-          return;
-        }
-
-        // Detect bridge restart
-        if (projectInfo && projectInfo.projectId !== info.projectId) {
-          emit({ type: 'session_reset', reason: 'bridge_restarted' });
-        }
-
-        // Set project info first (this will trigger projectListeners)
-        setProjectInfo(info);
-
-        // Then set active client and session info
-        if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
-          setActiveClient(info.activeClientId || null);
-        }
-        if (info.activeSessionId || info.activeSessionTitle) {
-          setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
-        }
-      } catch (err) {
-        console.error('[DevTailor] Health check error:', err);
-      }
-    };
-
-    events.onmessage = (event) => {
-      lastHeartbeatTime = Date.now(); // 收到任何消息都更新心跳时间
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'browser_action') {
-          handleBrowserAction(msg);
-          return;
-        }
-        if (msg.type === 'connected') {
-          setProjectInfo(msg);
-          setActiveClient(msg.activeClientId || null);
-          if (msg.activeSessionId || msg.activeSessionTitle) {
-            setSessionInfo(msg.activeSessionId || null, msg.activeSessionTitle || null);
-          }
-        }
-        if (msg.type === 'active_client') {
-          setActiveClient(msg.activeClientId || null);
-        }
-        if (msg.type === 'session_info' && msg.sessionId) {
-          setSessionInfo(msg.sessionId, msg.sessionTitle || null);
-        }
-        if (msg.type === 'session_reset') {
-          setSessionInfo(msg.sessionId || null, msg.sessionTitle || null);
-        }
-        listeners.forEach(fn => {
-          try { fn(msg); } catch (e) { if (!isExtensionContextInvalidated(e)) console.warn('[DevTailor] SSE message listener error:', e); }
-        });
-      } catch {
-        console.warn('[DevTailor] Invalid SSE message:', event.data);
-      }
-    };
-
-    events.onerror = () => {
-      console.warn('[DevTailor] SSE connection error');
-      disconnect(false);
-      scheduleReconnect();
-    };
+    connectViaProxy();
   }
 
   function disconnect(stopReconnect = true) {
@@ -256,9 +278,12 @@
       reconnectAttempts = 0;
     }
     stopHeartbeat();
-    if (events) {
-      events.close();
-      events = null;
+    connecting = false;
+    if (clientId) {
+      runtimeMessage({
+        type: 'DEVTAILOR_BRIDGE_PROXY_DISCONNECT',
+        clientId,
+      }).catch(() => {});
     }
     setStatus('disconnected');
   }
@@ -269,26 +294,25 @@
       const now = Date.now();
       const timeSinceLastHeartbeat = now - lastHeartbeatTime;
 
-      // 如果超过 60 秒没收到消息，认为连接可能已断开
-      if (timeSinceLastHeartbeat > 60000) {
+      if (timeSinceLastHeartbeat > HEARTBEAT_TIMEOUT) {
         console.warn('[DevTailor] SSE heartbeat timeout, reconnecting...');
-        disconnect(false);
-        scheduleReconnect();
+        reconnectSoon();
         return;
       }
 
-      // 发送心跳请求
       if (status === 'connected') {
-        fetch(`${BRIDGE_URL}/health`, { method: 'GET' })
+        bridgeFetch('/health', { method: 'GET' })
           .then(response => {
             if (response.ok) {
-              lastHeartbeatTime = now;
+              lastHeartbeatTime = Date.now();
             } else {
               console.warn('[DevTailor] Heartbeat failed:', response.status);
+              reconnectSoon();
             }
           })
           .catch(err => {
             console.warn('[DevTailor] Heartbeat error:', err.message);
+            reconnectSoon();
           });
       }
     }, HEARTBEAT_INTERVAL);
@@ -311,28 +335,31 @@
 
   function reconnectNow() {
     clearTimeout(reconnectTimer);
+    reconnectAttempts = 0;
+    connecting = false;
     disconnect(false);
-    connect({ force: true });
+    connect();
+  }
+
+  function reconnectSoon() {
+    clearTimeout(reconnectTimer);
+    connecting = false;
+    disconnect(false);
+    reconnectAttempts = 0;
+    reconnectTimer = setTimeout(connect, 50);
   }
 
   function recoverConnection() {
-    const now = Date.now();
-    if (!isChromeTabClientId(clientId)) {
-      initClientId().then(() => connect());
-      return;
-    }
-    if (status !== 'connected') {
-      connect();
-      return;
-    }
-    if (lastHeartbeatTime > 0 && now - lastHeartbeatTime < FRESH_CONNECTION_MS) return;
-    if (now - lastRecoveryProbeAt < RECOVERY_PROBE_MIN_INTERVAL) return;
-    lastRecoveryProbeAt = now;
-    fetch(`${BRIDGE_URL}/health`, { method: 'GET' })
-      .then(response => {
-        if (!response.ok) reconnectNow();
-      })
-      .catch(() => reconnectNow());
+    clearTimeout(recoveryTimer);
+    recoveryTimer = setTimeout(() => {
+      if (!isChromeTabClientId(clientId)) {
+        initClientId().then(() => connect());
+        return;
+      }
+      if (status !== 'connected' && !connecting) {
+        connect();
+      }
+    }, RECOVERY_DEBOUNCE_MS);
   }
 
   async function send(payload, options = {}) {
@@ -346,7 +373,7 @@
 
     const body = typeof payload === 'string' ? JSON.parse(payload) : payload;
     try {
-      const response = await fetch(`${BRIDGE_URL}/review`, {
+      const response = await bridgeFetch('/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -363,7 +390,7 @@
       return { ok: true, queued: false };
     } catch (err) {
       emit({ type: 'error', message: err.message || 'Failed to send request to DevTailor Bridge' });
-      if (options.reconnectOnError !== false) connect();
+      if (options.reconnectOnError !== false) reconnectSoon();
       return { ok: false, queued: false, status, error: err.message || 'Failed to send request to DevTailor Bridge' };
     }
   }
@@ -374,7 +401,7 @@
     }
 
     try {
-      const response = await fetch(`${BRIDGE_URL}/cancel`, {
+      const response = await bridgeFetch('/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId, tabId: clientId }),
@@ -399,7 +426,7 @@
     }
 
     try {
-      const response = await fetch(`${BRIDGE_URL}/activate`, {
+      const response = await bridgeFetch('/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId, tabId: clientId }),
@@ -426,7 +453,7 @@
     if (status !== 'connected') {
       return Promise.resolve({ ok: false, status });
     }
-    return fetch(`${BRIDGE_URL}/new-session`, {
+    return bridgeFetch('/new-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientId, tabId: clientId }),
@@ -450,8 +477,8 @@
       return { ok: false, status };
     }
     try {
-      const url = `${BRIDGE_URL}/sessions?clientId=${encodeURIComponent(clientId || 'default')}`;
-      const response = await fetch(url);
+      const url = `/sessions?clientId=${encodeURIComponent(clientId || 'default')}`;
+      const response = await bridgeFetch(url);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         return { ok: false, error: body.error || `HTTP ${response.status}` };
@@ -467,8 +494,8 @@
       return { ok: false, status };
     }
     try {
-      const url = `${BRIDGE_URL}/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`;
-      const response = await fetch(url);
+      const url = `/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`;
+      const response = await bridgeFetch(url);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         return { ok: false, error: body.error || `HTTP ${response.status}` };
@@ -484,7 +511,7 @@
       return { ok: false, status };
     }
     try {
-      const response = await fetch(`${BRIDGE_URL}/sessions/load`, {
+      const response = await bridgeFetch('/sessions/load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId, tabId: clientId, sessionId: targetSessionId }),
@@ -508,7 +535,7 @@
       return { ok: false, status };
     }
     try {
-      const response = await fetch(`${BRIDGE_URL}/sessions/delete`, {
+      const response = await bridgeFetch('/sessions/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId, tabId: clientId, sessionId: targetSessionId }),
@@ -577,7 +604,7 @@
   }
 
   function postBrowserActionResult(result) {
-    return fetch(`${BRIDGE_URL}/browser-action-result`, {
+    return bridgeFetch('/browser-action-result', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(result),
@@ -668,6 +695,62 @@
     return clientIdPromise;
   }
 
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.type !== 'DEVTAILOR_BRIDGE_PROXY_EVENT') return false;
+    if (message.clientId && clientId && message.clientId !== clientId) return false;
+
+    if (message.bridgeUrl) setBridgeUrl(message.bridgeUrl);
+
+    if (message.event === 'open') {
+      const url = message.bridgeUrl || getBridgeUrl();
+      console.log('[DevTailor] SSE connected through background proxy', {
+        clientId,
+        url: url ? `${url}/events` : null,
+      });
+      connecting = false;
+      reconnectAttempts = 0;
+      setStatus('connected');
+      lastHeartbeatTime = Date.now();
+      startHeartbeat();
+      bridgeFetch(`/health?clientId=${encodeURIComponent(clientId || 'default')}`)
+        .then(async response => {
+          if (!response.ok) return;
+          const info = await response.json();
+          if (info?.projectId) {
+            setProjectInfo(info);
+            if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
+              setActiveClient(info.activeClientId || null);
+            }
+            if (info.activeSessionId || info.activeSessionTitle) {
+              setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
+            }
+          }
+          await syncActiveSessionSnapshot('reconnect');
+        })
+        .catch(err => console.warn('[DevTailor] Proxy health check failed:', err.message || err));
+      return false;
+    }
+
+    if (message.event === 'message') {
+      handleBridgeMessageData(message.data || '');
+      return false;
+    }
+
+    if (message.event === 'error') {
+      console.warn('[DevTailor] Background Bridge proxy SSE error', {
+        clientId,
+        bridgeUrl: message.bridgeUrl || null,
+        error: message.error || null,
+      });
+      connecting = false;
+      setStatus('disconnected');
+      scheduleReconnect();
+      return false;
+    }
+
+    return false;
+  });
+
   window.__domReview.wsClient = {
     connect,
     disconnect,
@@ -680,6 +763,8 @@
     loadSession,
     deleteSession,
     getStatus,
+    getBridgeUrl,
+    request: bridgeFetch,
     isActive: () => isActiveClient,
     getActiveClientId: () => activeClientId,
     getProjectInfo,
