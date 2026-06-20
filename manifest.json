@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "DevTailor",
   "version": "2.0.0",
-  "description": "Frontend development copilot panel — mark elements, capture context, and work with ACP agents",
-  "permissions": ["activeTab", "storage", "scripting"],
+  "description": "Frontend development copilot panel — mark elements, capture context, and work with local AI agents",
+  "permissions": ["activeTab", "storage", "scripting", "sidePanel"],
   "host_permissions": ["*://localhost/*", "*://127.0.0.1/*", "<all_urls>"],
   "commands": {
     "toggle-sidebar": {
@@ -25,6 +25,9 @@
   },
   "background": {
     "service_worker": "background/service-worker.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
   },
   "content_scripts": [
     {

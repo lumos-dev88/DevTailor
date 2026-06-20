@@ -9,6 +9,7 @@
  *   messages:  id, session_id, role, type, content, timestamp, extra (JSON)
  *   images:    id, session_id, data_url, filename, created_at
  *   element_targets: id, name, page_pattern, payload_json, created_at, updated_at
+ *   settings:  key, value_json, updated_at
  *
  * Images are saved to a separate `images/` folder; the DB only stores
  * the filename reference. The full data URL is reconstructed on load.
@@ -17,6 +18,7 @@
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { ModelConfig, normalizeModelConfig } from './model-config';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors ws-server.ts internal types)
@@ -36,7 +38,7 @@ export interface StoredSession {
   clientId: string;
   agentKey?: string;
   title: string;
-  acpSessionId: string | null;
+  agentSessionId: string | null;
   messages: StoredMessage[];
   createdAt: number;
   updatedAt: number;
@@ -153,6 +155,13 @@ export class SessionStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_element_targets_page ON element_targets(page_pattern, updated_at)
     `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key        TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER NOT NULL
+      )
+    `);
     this.flush();
   }
 
@@ -211,7 +220,7 @@ export class SessionStore {
         session.clientId,
         session.agentKey || SessionStore.DEFAULT_AGENT_KEY,
         session.title,
-        session.acpSessionId,
+        session.agentSessionId,
         session.createdAt,
         session.updatedAt,
       ],
@@ -225,7 +234,7 @@ export class SessionStore {
       [
         session.agentKey || SessionStore.DEFAULT_AGENT_KEY,
         session.title,
-        session.acpSessionId,
+        session.agentSessionId,
         session.updatedAt,
         session.id,
       ],
@@ -384,6 +393,32 @@ export class SessionStore {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Settings operations
+  // ---------------------------------------------------------------------------
+
+  getModelConfig(): ModelConfig | null {
+    const results = this.db.exec(
+      `SELECT value_json FROM settings WHERE key = ?`,
+      ['model_config'],
+    );
+    if (!results.length || !results[0].values.length) return null;
+    try {
+      return normalizeModelConfig(JSON.parse((results[0].values[0][0] as string) || '{}'));
+    } catch {
+      return null;
+    }
+  }
+
+  saveModelConfig(config: ModelConfig): void {
+    const normalized = normalizeModelConfig(config);
+    this.db.run(
+      `INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)`,
+      ['model_config', JSON.stringify(normalized), normalized.updatedAt || Date.now()],
+    );
+    this.markDirty();
+  }
+
   private queryImages(sessionId: string): Array<{ id: string; filename: string }> {
     const results = this.db.exec(
       `SELECT id, filename FROM images WHERE session_id = ?`,
@@ -413,7 +448,7 @@ export class SessionStore {
       clientId: row[1] as string,
       agentKey: row[2] as string,
       title: row[3] as string,
-      acpSessionId: row[4] as string | null,
+      agentSessionId: row[4] as string | null,
       createdAt: row[5] as number,
       updatedAt: row[6] as number,
       messages: [],
@@ -433,7 +468,7 @@ export class SessionStore {
       clientId: row[1] as string,
       agentKey: row[2] as string,
       title: row[3] as string,
-      acpSessionId: row[4] as string | null,
+      agentSessionId: row[4] as string | null,
       createdAt: row[5] as number,
       updatedAt: row[6] as number,
       messages: [],
@@ -479,7 +514,7 @@ export class SessionStore {
       clientId: row[1] as string,
       agentKey: row[2] as string,
       title: row[3] as string,
-      acpSessionId: row[4] as string | null,
+      agentSessionId: row[4] as string | null,
       createdAt: row[5] as number,
       updatedAt: row[6] as number,
       messages,

@@ -367,10 +367,6 @@
       connect();
       return { ok: false, queued: false, status };
     }
-    if (!isActiveClient) {
-      return { ok: false, queued: false, status, error: 'inactive_tab' };
-    }
-
     const body = typeof payload === 'string' ? JSON.parse(payload) : payload;
     try {
       const response = await bridgeFetch('/review', {

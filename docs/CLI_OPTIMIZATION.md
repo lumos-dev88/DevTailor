@@ -13,7 +13,6 @@ devtailor <command>
 
 ```text
 dir                     项目目录，默认当前目录
--a, --agent <agent>     Agent 类型或原始 ACP 命令，默认 claude
 -d, --daemon            后台运行
 -f, --follow            跟随日志输出（配合 logs 使用）
 -h, --help              输出帮助
@@ -25,17 +24,23 @@ dir                     项目目录，默认当前目录
 子命令：
 
 ```text
-agents                  列出内置 Agent 预设
 start                   启动 Bridge（默认）
 stop                    停止后台进程
 status                  查看后台进程状态
 logs                    查看后台日志
 ```
 
-环境变量：
+模型配置：
+
+- 首选入口是 Chrome 扩展 popup 的「模型配置」，通过 Bridge `GET/POST /model-config` 保存到当前项目 `.devtailor/sessions.db`。
+- 下列环境变量只作为一次性迁移兜底：当项目还没有 UI 模型配置时，Bridge 启动会把完整环境变量写入项目配置。
 
 ```text
-DEVTAILOR_AGENT         默认 Agent，可被 --agent 覆盖
+OPENAI_BASE_URL         OpenAI-compatible API base URL
+OPENAI_API_KEY          OpenAI-compatible API key
+OPENAI_MODEL            OpenAI-compatible model id
+DEVTAILOR_MODEL         OPENAI_MODEL 为空时的模型标识 fallback
+DEVTAILOR_MAX_STEPS     单次 provider/tool loop 最大步数，默认 8
 ```
 
 ## 固定端口规则
@@ -50,26 +55,17 @@ Bridge 固定运行在 `34781`，这是 Chrome 扩展侧的约定端口。
 
 不要在文档或示例里继续推荐 `--port`，除非扩展侧也同步支持动态端口发现。
 
-## Agent 规则
+## Runtime 规则
 
-内置 Agent 来自 `agent-presets.ts`，可通过以下命令查看：
+Bridge 不再支持 `--agent`、内置 Agent 预设或原始 ACP 命令。启动后使用本地后端 runtime：
 
-```bash
-devtailor agents
-```
-
-`--agent` 既支持内置 id，也支持原始 ACP 命令：
-
-```bash
-devtailor --agent codex --dir /path/to/project
-devtailor --agent "my-acp-agent --flag" --dir /path/to/project
-```
-
-启动前会检查 resolved command 是否可用：
-
-- 直接二进制命令（如 `claude-agent-acp`、`kimi`）使用 `which` / `where` 检查 PATH。
-- `npx` 命令只检查 `npx` 本身是否在 PATH 中，不对具体包做 `dry-run` 预检。真实解析失败会在 spawn 阶段暴露，避免 valid npx 包因 dry-run 失败被误杀。
-- 所有 npx 预设的 args 都以 `--yes` 开头，确保 npx 非交互安装，不污染 ACP stdio。
+- 项目模型配置完整时启用 `RealAgentSession` + `OpenAICompatibleProvider`。
+- 项目模型配置缺失或禁用时 fallback 到 `LocalAgentSession` 过渡 runtime。
+- `RealAgentSession` 同时注入 `BrowserToolRunner` 和 `WorkspaceToolRunner`：browser tools 路由到当前接管 tab，workspace tools 在 Bridge `--dir` 项目根目录内执行。
+- workspace tools 对齐 scream-code 的工作区边界：`--dir` / `--cwd` 是唯一 workspace root；相对路径从该目录解析，绝对路径必须位于该目录内。
+- 当前 workspace tools 包括 `bash`、`read_file`、`write_file`、`edit_file`、`grep_files`、`glob_files`、`list_directory`。
+- workspace tools 的模型体验对齐 scream-code 常用约定：`read_file` 提供 Anchor 和换行状态，`edit_file` 可用 Anchor 做冲突检测并保留 CRLF，`grep_files` 支持上下文/分页，`bash` 提供合并输出和明确失败退出码。
+- 不恢复 ACP/MCP adapter。
 
 ## 后台进程规则
 
@@ -115,7 +111,7 @@ devtailor logs --dir /path  # 查看指定项目目录的日志
   "activeClientId": "...",
   "activeSessionId": "...",
   "activeSessionTitle": "...",
-  "acpSessionId": "..."
+  "agentSessionId": "..."
 }
 ```
 
@@ -126,7 +122,7 @@ devtailor logs --dir /path  # 查看指定项目目录的日志
 当前 CLI 已实现：
 
 - 未知参数报错。
-- `--agent` / `--dir` 缺值报错。
+- `--dir` 缺值报错。
 - 项目目录不存在时报错。
 - `--help` / `--version` 直接退出。
 - 端口被非 Bridge 进程占用时报错退出。
@@ -142,12 +138,11 @@ devtailor logs --dir /path  # 查看指定项目目录的日志
 ```bash
 devtailor
 devtailor /path/to/project
-devtailor --dir /path/to/project --agent gemini
-devtailor --cwd /path/to/project --agent codex
+devtailor --dir /path/to/project
+devtailor --cwd /path/to/project
 devtailor --daemon --dir /path/to/project
 devtailor logs
 devtailor logs -f
-devtailor agents
 devtailor status
 devtailor stop
 ```

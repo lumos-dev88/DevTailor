@@ -132,7 +132,7 @@ npm run dev -- agents
 
 - **浏览器**：Chrome / Chromium 系列。
 - **运行环境**：Node.js 20+。
-- **AI 编码助手**：Claude Code、Copilot、Gemini、Qwen、Codex、Kimi 等（支持任意符合 ACP 协议的 AI）。
+- **AI 编码助手**：Claude Code、Copilot、Gemini、Qwen、Codex、Kimi 等本地 AI Agent。
 - **调试目标**：你的本地前端项目（通常跑在 `localhost` 或 `127.0.0.1` 上）。
 
 ## 整体数据流

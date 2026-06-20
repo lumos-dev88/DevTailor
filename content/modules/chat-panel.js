@@ -49,6 +49,7 @@
   let sessionMenuOpen = false;
   let sessionsCache = [];
   const openToolGroups = new Set();
+  const markdownRenderCache = new Map();
 
   function escapeHtml(str) {
     const div = document.createElement('div');
@@ -195,7 +196,7 @@
       return;
     }
     if (unsupported) {
-      menu.innerHTML = '<div class="dt-session-empty">当前 Agent 不支持 ACP 会话列表，继续使用本地展示缓存。</div>';
+      menu.innerHTML = '<div class="dt-session-empty">当前 Agent 不支持远程会话列表，继续使用本地展示缓存。</div>';
       return;
     }
     if (error) {
@@ -316,7 +317,16 @@
       return;
     }
 
-    container.innerHTML = renderMessageBlocks(messageStore.getAll());
+    const msgs = messageStore.getAll();
+    pruneMarkdownCache(msgs);
+    container.innerHTML = renderMessageBlocks(msgs);
+  }
+
+  function pruneMarkdownCache(msgs) {
+    const liveIds = new Set(msgs.map(msg => msg.id));
+    for (const id of markdownRenderCache.keys()) {
+      if (!liveIds.has(id)) markdownRenderCache.delete(id);
+    }
   }
 
   function getEmptyStateText() {
@@ -404,7 +414,14 @@
       return `<div class="dt-chat-user-stack">${text}${imageHtml}</div>`;
     }
 
-    const md = chatMarkdown.render(msg.content);
+    const cacheKey = `${msg.type}|${msg.content || ''}|${withFooter ? 'footer' : ''}`;
+    const cached = markdownRenderCache.get(msg.id);
+    const md = cached?.key === cacheKey
+      ? cached.html
+      : chatMarkdown.render(msg.content);
+    if (cached?.key !== cacheKey) {
+      markdownRenderCache.set(msg.id, { key: cacheKey, html: md });
+    }
     return `<div class="dt-chat-msg dt-chat-md">${md}</div>`;
   }
 

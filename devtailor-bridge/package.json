@@ -1,7 +1,7 @@
 {
   "name": "devtailor-bridge",
   "version": "0.1.0",
-  "description": "SSE to ACP bridge for DevTailor Chrome extension",
+  "description": "Local bridge for the DevTailor Chrome extension",
   "main": "dist/index.js",
   "bin": {
     "devtailor": "dist/index.js"
@@ -13,8 +13,6 @@
     "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.39.0",
-    "@agentclientprotocol/sdk": "^0.22.1",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {

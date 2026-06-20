@@ -152,7 +152,13 @@ export class BrowserActionRouter {
 
   receiveResult(result: BrowserActionResult): boolean {
     const pending = this.pending.get(result.requestId);
-    if (!pending) return false;
+    if (!pending) {
+      console.warn(
+        `[BrowserActionRouter] received result for unknown/late requestId=${result.requestId} ` +
+        `(ok=${result.ok}, pending=${this.pending.size})`,
+      );
+      return false;
+    }
     clearTimeout(pending.timer);
     this.pending.delete(result.requestId);
     pending.resolve(result);

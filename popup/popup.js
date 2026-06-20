@@ -28,8 +28,17 @@
   const customWidthInput = document.getElementById('custom-width');
   const customHeightInput = document.getElementById('custom-height');
   const customSizeApply = document.getElementById('custom-size-apply');
+  const openSidePanelBtn = document.getElementById('open-sidepanel');
+  const modelConfigBadge = document.getElementById('model-config-badge');
+  const modelConfigStatus = document.getElementById('model-config-status');
+  const modelConfigError = document.getElementById('model-config-error');
+  const modelConfigSave = document.getElementById('model-config-save');
+  const modelBaseUrlInput = document.getElementById('model-base-url');
+  const modelApiKeyInput = document.getElementById('model-api-key');
+  const modelNameInput = document.getElementById('model-name');
+  const modelMaxStepsInput = document.getElementById('model-max-steps');
 
-  if (!countEl || !noPage || !toggleBtn || !siteList || !addSiteInput || !addSiteBtn || !addSiteError || !sizePresetsEl || !customSizeRow || !customWidthInput || !customHeightInput || !customSizeApply) {
+  if (!countEl || !noPage || !toggleBtn || !siteList || !addSiteInput || !addSiteBtn || !addSiteError || !sizePresetsEl || !customSizeRow || !customWidthInput || !customHeightInput || !customSizeApply || !openSidePanelBtn || !modelConfigBadge || !modelConfigStatus || !modelConfigError || !modelConfigSave || !modelBaseUrlInput || !modelApiKeyInput || !modelNameInput || !modelMaxStepsInput) {
     console.warn('[DevTailor] Popup DOM is incomplete.');
     return;
   }
@@ -44,6 +53,7 @@
 
   let extensionEnabled = true;
   let currentPanelSize = PANEL_SIZE_PRESETS.default;
+  let modelHasApiKey = false;
 
   // --- Toggle ---
 
@@ -273,6 +283,113 @@
     });
   }
 
+  async function openSidePanel() {
+    const tab = await getActiveTab();
+    const response = await chrome.runtime.sendMessage({
+      type: 'OPEN_SIDE_PANEL',
+      tabId: tab?.id || null,
+      windowId: tab?.windowId || null
+    });
+    if (!response || !response.ok) {
+      showToast(response?.error || '打开侧边栏失败。');
+      return;
+    }
+    showToast('Chat 侧边栏已打开。');
+  }
+
+  // --- Model config ---
+
+  function bridgeRequest(path, options = {}) {
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage({
+        type: 'DEVTAILOR_BRIDGE_PROXY_REQUEST',
+        path,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+        body: options.body
+      }, (response) => {
+        resolve(response || { ok: false, status: 0, error: chrome.runtime.lastError?.message || 'Bridge request failed' });
+      });
+    });
+  }
+
+  function parseBridgeJson(response) {
+    if (!response || !response.body) return null;
+    try {
+      return JSON.parse(response.body);
+    } catch {
+      return null;
+    }
+  }
+
+  function renderModelConfig(config) {
+    const safe = config || {};
+    modelHasApiKey = Boolean(safe.hasApiKey);
+    modelBaseUrlInput.value = safe.baseUrl || '';
+    modelApiKeyInput.value = '';
+    modelNameInput.value = safe.model || '';
+    modelMaxStepsInput.value = safe.maxSteps || '';
+    modelConfigBadge.textContent = safe.activeAgentLabel ? '已连接' : '未连接';
+    modelConfigStatus.textContent = safe.activeAgentLabel || '启动 Bridge 后可配置';
+    modelApiKeyInput.placeholder = modelHasApiKey ? '已保存，留空保持不变' : 'sk-...';
+  }
+
+  function showModelError(msg) {
+    modelConfigError.textContent = msg;
+    modelConfigError.style.display = 'block';
+  }
+
+  function clearModelError() {
+    modelConfigError.style.display = 'none';
+    modelConfigError.textContent = '';
+  }
+
+  async function loadModelConfig() {
+    clearModelError();
+    const response = await bridgeRequest('/model-config');
+    const body = parseBridgeJson(response);
+    if (!response.ok || !body || !body.ok) {
+      modelConfigBadge.textContent = '未连接';
+      modelConfigStatus.textContent = 'Bridge 未启动';
+      return;
+    }
+    renderModelConfig(body.config);
+  }
+
+  async function saveModelConfig() {
+    clearModelError();
+    const baseUrl = modelBaseUrlInput.value.trim();
+    const apiKey = modelApiKeyInput.value.trim();
+    const model = modelNameInput.value.trim();
+    const maxStepsRaw = modelMaxStepsInput.value.trim();
+    const maxSteps = maxStepsRaw ? Number(maxStepsRaw) : null;
+
+    if (!baseUrl || !model || (!apiKey && !modelHasApiKey)) {
+      showModelError('请填写 Base URL、API Key 和 Model。');
+      return;
+    }
+
+    const response = await bridgeRequest('/model-config', {
+      method: 'POST',
+      body: {
+        provider: 'openai-compatible',
+        enabled: true,
+        baseUrl,
+        apiKey,
+        keepApiKey: !apiKey && modelHasApiKey,
+        model,
+        maxSteps
+      }
+    });
+    const body = parseBridgeJson(response);
+    if (!response.ok || !body || !body.ok) {
+      showModelError(body?.error || response.error || '保存模型配置失败。');
+      return;
+    }
+    renderModelConfig(body.config);
+    showToast('模型配置已保存。');
+  }
+
   // --- Add / Remove patterns ---
 
   async function addPattern() {
@@ -343,6 +460,7 @@
     });
 
     loadPanelSize();
+    loadModelConfig();
 
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       if (!tab || !tab.url) {
@@ -402,6 +520,7 @@
   // --- Event handlers ---
 
   toggleBtn.addEventListener('click', toggleExtension);
+  openSidePanelBtn.addEventListener('click', openSidePanel);
   addSiteBtn.addEventListener('click', addPattern);
   addSiteInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') addPattern();
@@ -432,6 +551,12 @@
           height: customHeightInput.value
         });
       }
+    });
+  });
+  modelConfigSave.addEventListener('click', saveModelConfig);
+  [modelBaseUrlInput, modelApiKeyInput, modelNameInput, modelMaxStepsInput].forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveModelConfig();
     });
   });
 

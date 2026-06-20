@@ -8,6 +8,7 @@
 
 DevTailor content UI 采用分层隔离策略：
 
+- **Chat 侧边栏**：可使用 `chrome.sidePanel` 作为后续 Chat 主体验容器，当前仅保留 shell/demo。
 - **主面板和复杂卡片**：使用 Shadow DOM 宿主，由 `content/modules/shadow-ui.js` 管理。
 - **页面选择/高亮/轻量 overlay**：使用普通 DOM + `dt-*` 命名空间 + 明确事件边界。
 - **强隔离需求**：未来才考虑 iframe，不作为当前默认。
@@ -16,6 +17,16 @@ DevTailor content UI 采用分层隔离策略：
 这比旧的“普通 DOM V1”描述更贴近当前代码。当前主 UI 已经是 Shadow DOM。
 
 ## 当前实现边界
+
+### Chrome Side Panel
+
+sidePanel 适合作为 Chat 主体验容器：
+
+- 会话列表、输入框、模型配置和 Bridge 状态可以放在扩展页面内，避免嵌入宿主页面 DOM。
+- sidePanel 与 content script 都通过 background service worker 访问 Bridge，避免形成两个状态权威。
+- 页面内 Shadow DOM / 普通 DOM overlay 继续负责必须贴近页面 DOM 的工具能力：元素标记、选择器模式、高亮、截图网格、命中测试和快速工具入口。
+
+当前 sidePanel 只是 shell/demo；正式迁移 chat 前不要删除现有 Shadow DOM chat 模块。
 
 ### Shadow DOM 主 UI
 

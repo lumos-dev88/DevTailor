@@ -1,19 +1,28 @@
 /**
  * SSE Server — Receives review requests from Chrome extension,
- * forwards to ACPSession, relays stream responses over Server-Sent Events.
+ * forwards to the local agent runtime, relays stream responses over Server-Sent Events.
  */
 
 import http, { IncomingMessage, ServerResponse } from 'http';
 import { createHash, randomUUID } from 'crypto';
 import { basename } from 'path';
 import { realpathSync } from 'fs';
-import { ACPSession } from './acp-session';
 import { HistoryMessage } from './prompt-builder';
 import { WSMessage, ReviewPayload } from './types';
 import { BrowserActionRouter } from './browser-action-router';
-import { BrowserMCPServer } from './browser-mcp-server';
 import { BrowserActionEvent, BrowserActionName, BrowserActionResult } from './browser-action-types';
 import { SessionStore, StoredElementTarget } from './session-store';
+import { AgentSession, BrowserToolRunner } from './agent-session';
+import { LocalAgentSession } from './local-agent-session';
+import { WorkspaceToolRunner } from './workspace-tool-runner';
+import { ModelConfig, RuntimeConfig, normalizeModelConfig } from './model-config';
+import { OpenAICompatibleProvider } from './runtime';
+import { RealAgentSession } from './real-agent-session';
+
+export type AgentSessionFactory = (
+  runner: BrowserToolRunner,
+  workspaceRunner: WorkspaceToolRunner,
+) => AgentSession;
 
 interface Client {
   id: string;
@@ -39,7 +48,7 @@ interface DisplaySession {
   clientId: string;
   agentKey: string;
   title: string;
-  acpSessionId: string | null;
+  agentSessionId: string | null;
   messages: DisplayMessage[];
   createdAt: number;
   updatedAt: number;
@@ -53,9 +62,11 @@ type ReviewSessionStart = {
 export class WSServer {
   private static readonly PROJECT_SESSION_SCOPE = 'project';
   private static readonly CANCEL_FORCE_STOP_MS = 5000;
+  /** Maximum number of queued reviews per client. Beyond this limit, new reviews are rejected with 429. */
+  private static readonly MAX_REVIEW_QUEUE_DEPTH = 10;
   private server: http.Server | null = null;
   private clients = new Map<string, Client>();
-  private sessions = new Map<string, ACPSession>();
+  private sessions = new Map<string, AgentSession>();
   private displaySessions = new Map<string, DisplaySession>();
   private elementTargets = new Map<string, StoredElementTarget>();
   private activeDisplaySessionId: string | null = null;
@@ -69,20 +80,26 @@ export class WSServer {
   private cleanupTimer: NodeJS.Timeout | null = null;
   private projectInfo: { projectId: string; projectName: string; bridgeInstanceId: string; agentKey: string; agentLabel: string };
   private browserRouter: BrowserActionRouter;
-  private browserMcpServer: BrowserMCPServer;
   private store: SessionStore | null = null;
-  private readonly idleTimeoutMs = 4 * 60 * 60 * 1000; // 4 hours — ACP stdio agents cannot resume across process restarts
+  private readonly idleTimeoutMs = 4 * 60 * 60 * 1000;
+  private readonly defaultRuntime: RuntimeConfig;
 
   constructor(
     private port: number,
-    private agent: string,
     private cwd: string,
-    private agentArgs: string[] = [],
     private dataDir?: string,
-    private agentEnv?: Record<string, string>,
-    private agentKey = WSServer.agentPersistenceKey(agent, agentArgs),
-    private agentLabel = agentKey,
+    agentKey = 'local',
+    agentLabel = 'Local Agent Runtime',
+    createAgentSession: AgentSessionFactory = runner => new LocalAgentSession(runner),
+    private runWorkspaceTool: WorkspaceToolRunner = async () => ({
+      ok: false,
+      error: { code: 'WORKSPACE_TOOLS_DISABLED', message: 'Workspace tools are not enabled.' },
+    }),
   ) {
+    this.agentKey = agentKey;
+    this.agentLabel = agentLabel;
+    this.createAgentSession = createAgentSession;
+    this.defaultRuntime = { key: agentKey, label: agentLabel, createSession: createAgentSession };
     const realDir = realpathSync(cwd);
     this.projectInfo = {
       projectId: createHash('sha256').update(realDir).digest('hex').slice(0, 12),
@@ -93,19 +110,89 @@ export class WSServer {
     };
     this.browserRouter = new BrowserActionRouter((clientId, event) => this.sendBrowserAction(clientId, event));
     this.browserRouter.setLocalHandler((action, params) => this.handleLocalBrowserAction(action, params));
-    this.browserMcpServer = new BrowserMCPServer(this.browserRouter);
   }
 
-  static agentPersistenceKey(agent: string, agentArgs: string[] = []): string {
-    const raw = [agent, ...agentArgs].join(' ').trim();
-    return `raw:${createHash('sha256').update(raw).digest('hex').slice(0, 12)}`;
-  }
+  private agentKey: string;
+  private agentLabel: string;
+  private createAgentSession: AgentSessionFactory;
 
   /** Async init — create SessionStore and load persisted sessions */
   async init(): Promise<void> {
     if (!this.dataDir) return;
     this.store = await SessionStore.create(this.dataDir);
+    this.applyStoredModelConfig();
     this.loadPersistedSessions();
+  }
+
+  private applyStoredModelConfig(): void {
+    const stored = this.store?.getModelConfig() || this.envModelConfig();
+    if (stored && !this.store?.getModelConfig()) {
+      this.store?.saveModelConfig(stored);
+      this.store?.flush();
+    }
+    if (!stored) return;
+    this.applyRuntimeConfig(this.runtimeFromModelConfig(stored));
+  }
+
+  private envModelConfig(): ModelConfig | null {
+    const baseUrl = process.env.OPENAI_BASE_URL || '';
+    const apiKey = process.env.OPENAI_API_KEY || '';
+    const model = process.env.OPENAI_MODEL || process.env.DEVTAILOR_MODEL || '';
+    if (!baseUrl || !apiKey || !model) return null;
+    return normalizeModelConfig({
+      provider: 'openai-compatible',
+      enabled: true,
+      baseUrl,
+      apiKey,
+      model,
+      maxSteps: Number(process.env.DEVTAILOR_MAX_STEPS) || null,
+      updatedAt: Date.now(),
+    });
+  }
+
+  private runtimeFromModelConfig(config: ModelConfig): RuntimeConfig {
+    const normalized = normalizeModelConfig(config);
+    if (normalized.enabled && normalized.baseUrl && normalized.apiKey && normalized.model) {
+      return {
+        key: `openai-compatible:${normalized.model}`,
+        label: `OpenAI Compatible (${normalized.model})`,
+        createSession: this.createConfiguredSessionFactory(normalized),
+      };
+    }
+    return this.defaultRuntime;
+  }
+
+  private createConfiguredSessionFactory(_config: ModelConfig): AgentSessionFactory {
+    const config = normalizeModelConfig(_config);
+    return (runBrowserTool, runWorkspaceTool) => new RealAgentSession({
+      provider: new OpenAICompatibleProvider({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+      }),
+      runBrowserTool,
+      runWorkspaceTool,
+      maxSteps: config.maxSteps,
+    });
+  }
+
+  private applyRuntimeConfig(runtime: RuntimeConfig): void {
+    const previousActiveDisplayId = this.activeDisplaySessionId;
+    this.agentKey = runtime.key;
+    this.agentLabel = runtime.label;
+    this.createAgentSession = runtime.createSession || (runner => new LocalAgentSession(runner));
+    this.projectInfo.agentKey = this.agentKey;
+    this.projectInfo.agentLabel = this.agentLabel;
+    const previousActiveDisplay = previousActiveDisplayId
+      ? this.displaySessions.get(previousActiveDisplayId)
+      : null;
+    if (previousActiveDisplay?.agentKey === this.agentKey) {
+      this.activeDisplaySessionId = previousActiveDisplay.id;
+      return;
+    }
+    this.activeDisplaySessionId = [...this.displaySessions.values()]
+      .filter(session => session.agentKey === this.agentKey)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id || null;
   }
 
   /** Restore sessions from SQLite into memory on startup */
@@ -181,8 +268,8 @@ export class WSServer {
       return;
     }
 
-    if (url.pathname === '/mcp') {
-      await this.browserMcpServer.handle(req, res, await this.readJson(req));
+    if (req.method === 'POST' && url.pathname === '/browser-tool') {
+      await this.handleBrowserTool(req, res);
       return;
     }
 
@@ -197,11 +284,22 @@ export class WSServer {
         activeClientId: this.browserRouter.activeClientId,
         activeSessionId,
         activeSessionTitle: activeDisplay?.title || null,
-        acpSessionId: this.activeAcpSessionId(),
+        agentSessionId: this.activeAgentSessionId(),
         isProcessing: clientId ? this.isClientProcessingSession(clientId, activeSessionId) : false,
         processingSessionId: clientId ? this.processingDisplaySessions.get(clientId) || null : null,
       });
       return;
+    }
+
+    if (url.pathname === '/model-config') {
+      if (req.method === 'GET') {
+        this.handleModelConfigGet(res);
+        return;
+      }
+      if (req.method === 'POST') {
+        await this.handleModelConfigSave(req, res);
+        return;
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/new-session') {
@@ -305,14 +403,26 @@ export class WSServer {
         this.sendJson(res, 409, { error: 'SSE client is not connected' });
         return;
       }
-      if (this.browserRouter.activeClientId !== clientId) {
-        this.sendJson(res, 409, { error: 'This tab is not the active DevTailor page. Click Connect to take over the current project tab.' });
+      const display = this.getOrCreateDisplaySession();
+      const existingQueueLength = this.queues.get(clientId)?.length || 0;
+      const queueDepth = existingQueueLength + 1;
+      if (existingQueueLength >= WSServer.MAX_REVIEW_QUEUE_DEPTH) {
+        this.sendJson(res, 429, {
+          ok: false,
+          error: `Review queue full (max ${WSServer.MAX_REVIEW_QUEUE_DEPTH}). Wait for current reviews to complete.`,
+          queueDepth: existingQueueLength,
+          maxDepth: WSServer.MAX_REVIEW_QUEUE_DEPTH,
+        });
         return;
       }
-
-      const display = this.getOrCreateDisplaySession();
-      this.browserRouter.activate(clientId, this.projectInfo.projectId, display.acpSessionId || null);
-      this.sendJson(res, 202, { ok: true });
+      const queued = this.processing.has(clientId) || queueDepth > 1;
+      this.sendJson(res, 202, {
+        ok: true,
+        queued,
+        queueDepth,
+        sessionId: display.id,
+        isProcessing: this.processing.has(clientId),
+      });
       this.enqueueReview(clientId, msg.payload, display.id);
     } catch (err: any) {
       this.sendJson(res, 400, { error: err.message || 'Invalid request body' });
@@ -329,7 +439,7 @@ export class WSServer {
       }
 
       this.touch(clientId);
-      this.browserRouter.activate(clientId, this.projectInfo.projectId, this.activeAcpSessionId());
+      this.browserRouter.activate(clientId, this.projectInfo.projectId, this.activeAgentSessionId());
       this.broadcastActiveClient();
       const activeDisplay = this.currentDisplaySession();
       this.sendJson(res, 200, {
@@ -337,7 +447,7 @@ export class WSServer {
         activeClientId: clientId,
         activeSessionId: activeDisplay?.id || null,
         activeSessionTitle: activeDisplay?.title || null,
-        acpSessionId: this.activeAcpSessionId(),
+        agentSessionId: this.activeAgentSessionId(),
       });
     } catch (err: any) {
       this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid request' });
@@ -348,6 +458,12 @@ export class WSServer {
     const queue = this.queues.get(clientId) || [];
     queue.push({ payload, displaySessionId });
     this.queues.set(clientId, queue);
+    this.sendRuntimeEvent(clientId, {
+      type: 'queue_status',
+      tabId: clientId,
+      sessionId: displaySessionId,
+      queueDepth: queue.length,
+    } as any);
     this.processQueue(clientId);
   }
 
@@ -360,6 +476,12 @@ export class WSServer {
       while (queue && queue.length > 0) {
         const pending = queue.shift()!;
         this.processingDisplaySessions.set(clientId, pending.displaySessionId);
+        this.sendRuntimeEvent(clientId, {
+          type: 'queue_status',
+          tabId: clientId,
+          sessionId: pending.displaySessionId,
+          queueDepth: queue.length,
+        } as any);
         try {
           await this.handleReview(clientId, pending.payload, pending.displaySessionId);
         } finally {
@@ -374,6 +496,15 @@ export class WSServer {
       this.pendingCancels.delete(clientId);
       this.forcedCancels.delete(clientId);
       this.processing.delete(clientId);
+      const activeDisplay = this.currentDisplaySession();
+      if (activeDisplay) {
+        this.sendRuntimeEvent(clientId, {
+          type: 'queue_status',
+          tabId: clientId,
+          sessionId: activeDisplay.id,
+          queueDepth: 0,
+        } as any);
+      }
     }
   }
 
@@ -383,7 +514,7 @@ export class WSServer {
     const display = queuedDisplay && queuedDisplay.agentKey === this.agentKey
       ? queuedDisplay
       : this.getOrCreateDisplaySession();
-    const session = this.getOrCreateSession(display.id, display.acpSessionId);
+    const session = this.getOrCreateSession(display.id, display.agentSessionId);
     this.appendUserMessage(display, payload);
     this.attachSessionCallbacks(clientId, display, session);
 
@@ -392,7 +523,7 @@ export class WSServer {
       startResult = await this.startReviewSession(clientId, display, session);
     } catch (err: any) {
       console.error('[SSE] Failed to start session:', err.message);
-      this.send(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: `Session start failed: ${err.message}` } as any);
+      this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: `Session start failed: ${err.message}` } as any);
       session.stop();
       this.sessions.delete(display.id);
       return;
@@ -404,7 +535,10 @@ export class WSServer {
       const history = this.historyForPrompt(display, startResult.mode);
       const stopReason = await session.sendReview(payload, history);
       const wasCanceled = this.pendingCancels.delete(clientId) || this.forcedCancels.delete(clientId) || stopReason === 'cancelled';
-      this.send(clientId, {
+      if (stopReason === 'error') {
+        return;
+      }
+      this.sendRuntimeEvent(clientId, {
         type: 'done',
         tabId: clientId,
         sessionId: display.id,
@@ -413,7 +547,7 @@ export class WSServer {
       } as any);
     } catch (err: any) {
       if (this.pendingCancels.delete(clientId) || this.forcedCancels.delete(clientId)) {
-        this.send(clientId, {
+        this.sendRuntimeEvent(clientId, {
           type: 'done',
           tabId: clientId,
           sessionId: display.id,
@@ -423,37 +557,23 @@ export class WSServer {
         return;
       }
       console.error('[SSE] Failed to send review:', err.message);
-      this.send(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: err.message } as any);
+      this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: err.message } as any);
       session.stop();
       this.sessions.delete(display.id);
     }
   }
 
-  /** Returns true when the resolved agent ID matches the built-in Claude preset. */
-  private get isClaudeAgent(): boolean {
-    return this.agentKey === 'claude' || this.agent === 'claude-agent-acp';
-  }
-
-  private mcpServers(): any[] {
-    // Non-Claude agents may not accept our Browser MCP server schema.
-    // Only pass Browser MCP to Claude; others get an empty list so session creation is not blocked.
-    if (!this.isClaudeAgent) return [];
-    return [{
-      type: 'http',
-      name: 'devtailor-browser',
-      url: `http://localhost:${this.port}/mcp`,
-      headers: [],
-    }];
-  }
-
   private getOrCreateSession(
     displaySessionId: string,
-    acpSessionId?: string | null,
-  ): ACPSession {
+    _agentSessionId?: string | null,
+  ): AgentSession {
     let session = this.sessions.get(displaySessionId);
     if (!session || (!session.isReady && !session.isStarting)) {
       if (session) session.stop();
-      session = new ACPSession(this.agent, this.cwd, this.agentArgs, this.mcpServers(), acpSessionId, this.agentEnv, this.agentKey);
+      session = this.createAgentSession(
+        (action, params = {}) => this.browserRouter.run(action, params),
+        this.runWorkspaceTool,
+      );
       this.sessions.set(displaySessionId, session);
     }
     return session;
@@ -462,44 +582,27 @@ export class WSServer {
   private async startReviewSession(
     clientId: string,
     display: DisplaySession,
-    session: ACPSession,
+    session: AgentSession,
   ): Promise<ReviewSessionStart> {
     let result: { sessionId: string | null; mode: 'reused' | 'created' | 'resumed' };
     try {
       result = await session.start();
     } catch (startErr: any) {
-      // Fallback: if session creation failed and we passed Browser MCP servers,
-      // retry once without them. Non-Claude agents already get empty mcpServers
-      // so this path is only reachable for Claude or raw agents with MCP servers.
-      if (this.mcpServers().length > 0 && !session.isReady) {
-        console.warn(`[ACP] Session start failed with MCP servers (${startErr.message}), retrying without MCP servers...`);
-        session.stop();
-        const fallbackSession = new ACPSession(
-          this.agent, this.cwd, this.agentArgs, [], session.currentSessionId, this.agentEnv, this.agentKey,
-        );
-        this.sessions.set(display.id, fallbackSession);
-        try {
-          result = await fallbackSession.start();
-          session = fallbackSession;
-        } catch (fallbackErr: any) {
-          console.error(`[ACP] Fallback session start also failed: ${fallbackErr.message}`);
-          throw startErr;
-        }
-      } else {
-        throw startErr;
-      }
+      throw startErr;
     }
     const sid = result.sessionId || session.currentSessionId;
     if (sid) {
-      display.acpSessionId = sid;
+      display.agentSessionId = sid;
       display.updatedAt = Date.now();
       this.store?.updateSession(display);
-      this.browserRouter.activate(clientId, this.projectInfo.projectId, sid);
+      if (this.browserRouter.activeClientId === clientId) {
+        this.browserRouter.activate(clientId, this.projectInfo.projectId, sid);
+      }
       this.send(clientId, {
         type: 'session_info',
         tabId: clientId,
         sessionId: display.id,
-        acpSessionId: sid,
+        agentSessionId: sid,
         sessionTitle: display.title,
       } as any);
     }
@@ -509,7 +612,7 @@ export class WSServer {
   private consumePendingCancel(clientId: string, display: DisplaySession): boolean {
     if (!this.pendingCancels.delete(clientId)) return false;
     this.closeActiveThinking(display);
-    this.send(clientId, {
+    this.sendRuntimeEvent(clientId, {
       type: 'done',
       tabId: clientId,
       sessionId: display.id,
@@ -534,31 +637,31 @@ export class WSServer {
   private attachSessionCallbacks(
     clientId: string,
     display: DisplaySession,
-    session: ACPSession,
+    session: AgentSession,
   ): void {
     session.setCallbacks({
       onStream: (delta) => {
         this.appendAssistantDelta(display, delta);
-        this.send(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta } as any);
+        this.sendRuntimeEvent(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta } as any);
       },
       onThinking: (delta) => {
         this.appendThinkingDelta(display, delta);
-        this.send(clientId, { type: 'thinking', tabId: clientId, sessionId: display.id, delta } as any);
+        this.sendRuntimeEvent(clientId, { type: 'thinking', tabId: clientId, sessionId: display.id, delta } as any);
       },
       onDone: (summary) => {
         this.closeActiveThinking(display);
-        this.send(clientId, { type: 'done', tabId: clientId, sessionId: display.id, summary } as any);
+        this.sendRuntimeEvent(clientId, { type: 'done', tabId: clientId, sessionId: display.id, summary } as any);
       },
       onError: (message) => {
         this.closeActiveThinking(display);
-        this.send(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message } as any);
+        this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message } as any);
       },
       onSessionInfoUpdate: (info) => {
         this.updateDisplaySessionInfo(clientId, display, info);
       },
       onToolCall: (tool) => {
         this.addToolDisplayMessage(display, tool);
-        this.send(clientId, {
+        this.sendRuntimeEvent(clientId, {
           type: 'tool_call',
           tabId: clientId,
           sessionId: display.id,
@@ -572,7 +675,7 @@ export class WSServer {
       },
       onToolUpdate: (update) => {
         this.updateToolDisplayMessage(display, update);
-        this.send(clientId, {
+        this.sendRuntimeEvent(clientId, {
           type: 'tool_update',
           tabId: clientId,
           sessionId: display.id,
@@ -589,10 +692,10 @@ export class WSServer {
     });
   }
 
-  private activeAcpSessionId(): string | null {
+  private activeAgentSessionId(): string | null {
     const displayId = this.activeDisplaySessionId;
     if (!displayId) return null;
-    return this.displaySessions.get(displayId)?.acpSessionId || null;
+    return this.displaySessions.get(displayId)?.agentSessionId || null;
   }
 
   private getOrCreateDisplaySession(): DisplaySession {
@@ -631,7 +734,7 @@ export class WSServer {
       clientId: WSServer.PROJECT_SESSION_SCOPE,
       agentKey: this.agentKey,
       title: '新会话',
-      acpSessionId: null,
+      agentSessionId: null,
       messages: [],
       createdAt: now,
       updatedAt: now,
@@ -642,7 +745,7 @@ export class WSServer {
   }
 
   private isEmptyDisplaySession(session: DisplaySession): boolean {
-    return session.messages.length === 0 && !session.acpSessionId && session.title === '新会话';
+    return session.messages.length === 0 && !session.agentSessionId && session.title === '新会话';
   }
 
   private appendUserMessage(display: DisplaySession, payload: ReviewPayload['payload']): void {
@@ -705,7 +808,7 @@ export class WSServer {
       type: 'session_info',
       tabId: clientId,
       sessionId: display.id,
-      acpSessionId: display.acpSessionId,
+      agentSessionId: display.agentSessionId,
       sessionTitle: display.title,
     } as any);
   }
@@ -788,13 +891,66 @@ export class WSServer {
   private publicSession(session: DisplaySession): Record<string, unknown> {
     return {
       sessionId: session.id,
-      acpSessionId: session.acpSessionId,
+      agentSessionId: session.agentSessionId,
       agentKey: session.agentKey,
       title: session.title,
       updatedAt: new Date(session.updatedAt).toISOString(),
       createdAt: new Date(session.createdAt).toISOString(),
       messageCount: session.messages.length,
     };
+  }
+
+  private publicModelConfig(config: ModelConfig | null): Record<string, unknown> {
+    const normalized = normalizeModelConfig(config || {});
+    return {
+      provider: normalized.provider,
+      enabled: normalized.enabled,
+      baseUrl: normalized.baseUrl,
+      model: normalized.model,
+      maxSteps: normalized.maxSteps,
+      hasApiKey: Boolean(normalized.apiKey),
+      updatedAt: normalized.updatedAt ? new Date(normalized.updatedAt).toISOString() : null,
+      activeAgentKey: this.agentKey,
+      activeAgentLabel: this.agentLabel,
+    };
+  }
+
+  private handleModelConfigGet(res: ServerResponse): void {
+    this.sendJson(res, 200, {
+      ok: true,
+      config: this.publicModelConfig(this.store?.getModelConfig() || null),
+    });
+  }
+
+  private async handleModelConfigSave(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      if ([...this.processing.values()].some(Boolean)) {
+        this.sendJson(res, 409, { ok: false, error: 'Cannot change model config while a request is running' });
+        return;
+      }
+      const body = await this.readJson(req) as Partial<ModelConfig> & { keepApiKey?: boolean };
+      const previous = this.store?.getModelConfig() || null;
+      const next = normalizeModelConfig({
+        ...body,
+        apiKey: body.keepApiKey ? (previous?.apiKey || '') : body.apiKey,
+        updatedAt: Date.now(),
+      });
+      this.store?.saveModelConfig(next);
+      this.store?.flush();
+      this.applyRuntimeConfig(this.runtimeFromModelConfig(next));
+      for (const session of this.sessions.values()) {
+        session.stop();
+      }
+      this.sessions.clear();
+      this.sendJson(res, 200, {
+        ok: true,
+        config: this.publicModelConfig(next),
+        agentKey: this.agentKey,
+        agentLabel: this.agentLabel,
+      });
+    } catch (err: any) {
+      this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid model config payload' });
+    }
   }
 
   private async handleNewSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -865,7 +1021,7 @@ export class WSServer {
 
       this.queues.delete(clientId);
       this.activeDisplaySessionId = display.id;
-      this.browserRouter.activate(clientId, this.projectInfo.projectId, display.acpSessionId || null);
+      this.browserRouter.activate(clientId, this.projectInfo.projectId, display.agentSessionId || null);
       this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: display.id, sessionTitle: display.title });
       this.send(clientId, {
         type: 'session_snapshot',
@@ -873,6 +1029,8 @@ export class WSServer {
         sessionId: display.id,
         sessionTitle: display.title,
         messages: display.messages,
+        isProcessing: this.isClientProcessingSession(clientId, display.id),
+        processingSessionId: this.processingDisplaySessions.get(clientId) || null,
       } as any);
       this.sendJson(res, 200, { ok: true, sessionId: display.id, sessionTitle: display.title, messages: display.messages });
     } catch (err: any) {
@@ -894,8 +1052,8 @@ export class WSServer {
         this.sendJson(res, 404, { ok: false, error: 'Session not found' });
         return;
       }
-      const acpSession = this.sessions.get(sessionId);
-      if (acpSession) acpSession.stop();
+      const agentSession = this.sessions.get(sessionId);
+      if (agentSession) agentSession.stop();
       this.sessions.delete(sessionId);
       this.displaySessions.delete(sessionId);
       this.store?.deleteSession(sessionId);
@@ -911,7 +1069,7 @@ export class WSServer {
         .sort((a, b) => b.updatedAt - a.updatedAt)[0];
       if (!next) next = this.createDisplaySession();
       this.activeDisplaySessionId = next.id;
-      this.browserRouter.activate(clientId, this.projectInfo.projectId, next.acpSessionId || null);
+      this.browserRouter.activate(clientId, this.projectInfo.projectId, next.agentSessionId || null);
       this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: next.id, sessionTitle: next.title });
       this.send(clientId, {
         type: 'session_snapshot',
@@ -919,6 +1077,8 @@ export class WSServer {
         sessionId: next.id,
         sessionTitle: next.title,
         messages: next.messages,
+        isProcessing: this.isClientProcessingSession(clientId, next.id),
+        processingSessionId: this.processingDisplaySessions.get(clientId) || null,
       } as any);
       this.sendJson(res, 200, { ok: true, deleted: sessionId, activeSessionId: next.id, activeSessionTitle: next.title });
     } catch (err: any) {
@@ -1117,7 +1277,7 @@ export class WSServer {
     }
   }
 
-  private scheduleForcedCancel(clientId: string, displayId: string | null, session: ACPSession): void {
+  private scheduleForcedCancel(clientId: string, displayId: string | null, session: AgentSession): void {
     if (!displayId) return;
     setTimeout(() => {
       if (!this.processing.has(clientId)) return;
@@ -1145,6 +1305,22 @@ export class WSServer {
     }
   }
 
+  private async handleBrowserTool(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = await this.readJson(req) as { action?: string; name?: string; params?: Record<string, unknown>; args?: Record<string, unknown> };
+      const action = String(body.action || body.name || '').trim() as BrowserActionName;
+      if (!isBrowserActionName(action)) {
+        this.sendJson(res, 400, { ok: false, error: `Unknown browser action: ${action || '(missing)'}` });
+        return;
+      }
+      const params = isRecord(body.params) ? body.params : isRecord(body.args) ? body.args : {};
+      const result = await this.browserRouter.run(action, params);
+      this.sendJson(res, result.ok ? 200 : 502, result);
+    } catch (err: any) {
+      this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid browser tool request' });
+    }
+  }
+
   private touch(clientId: string): void {
     this.lastActive.set(clientId, Date.now());
   }
@@ -1153,6 +1329,17 @@ export class WSServer {
     const client = this.clients.get(clientId);
     if (!client || client.res.destroyed) return;
     client.res.write(`data: ${JSON.stringify(msg)}\n\n`);
+  }
+
+  private sendRuntimeEvent(clientId: string, msg: WSMessage): void {
+    const activeDisplay = this.currentDisplaySession();
+    const sessionId = (msg as any).sessionId || activeDisplay?.id || null;
+    this.send(clientId, {
+      ...(msg as any),
+      activeSessionId: activeDisplay?.id || null,
+      isProcessing: sessionId ? this.isClientProcessingSession(clientId, sessionId) : this.processing.has(clientId),
+      processingSessionId: this.processingDisplaySessions.get(clientId) || null,
+    } as any);
   }
 
   private sendBrowserAction(clientId: string, event: BrowserActionEvent): boolean {
@@ -1246,4 +1433,33 @@ export class WSServer {
     this.server?.close();
     if (this.store) this.store.close();
   }
+}
+
+const BROWSER_ACTION_NAMES: ReadonlySet<string> = new Set([
+  'take_visible_screenshot',
+  'get_page_snapshot',
+  'get_console_logs',
+  'get_console_message',
+  'get_element_targets',
+  'save_element_target',
+  'delete_element_target',
+  'reload_page',
+  'click_page',
+  'type_text',
+  'fill_text',
+  'press_key',
+  'clear_state',
+  'wait_for_selector',
+  'wait_for_text',
+  'run_actions',
+  'request_user_assistance',
+  'run_js',
+]);
+
+function isBrowserActionName(value: string): value is BrowserActionName {
+  return BROWSER_ACTION_NAMES.has(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }

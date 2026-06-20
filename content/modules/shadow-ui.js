@@ -1486,8 +1486,8 @@
 
       <!-- Status Bar -->
       <div class="dt-status-bar">
-        <span class="dt-status-dot dt-status-dot--export" id="dt-status-dot"></span>
-        <span class="dt-status-text" id="dt-status-text">导出模式</span>
+        <span class="dt-status-dot dt-status-dot--connecting" id="dt-status-dot"></span>
+        <span class="dt-status-text" id="dt-status-text">连接中…</span>
         <div class="dt-session-wrap">
           <button class="dt-btn dt-btn--small dt-session-btn" id="dt-btn-session" title="切换会话" aria-label="切换会话">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1522,8 +1522,8 @@
         <button class="dt-chat-jump" id="dt-chat-jump" type="button">回到底部</button>
         <div class="dt-activation-banner" id="dt-activation-banner">
           <div class="dt-activation-text">
-            <strong>当前页面未接管</strong>
-            新 tab 需要连接后才会接收浏览器操作。
+            <strong>当前页面未连接</strong>
+            打开新标签页后，需要点击连接才能接收调试指令。
           </div>
           <button class="dt-btn dt-btn--primary dt-btn--small dt-activation-btn" id="dt-btn-activate-tab" type="button">连接当前页</button>
         </div>

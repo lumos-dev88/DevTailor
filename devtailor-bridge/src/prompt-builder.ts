@@ -1,20 +1,30 @@
 /**
  * Prompt Builder — System prompt (session-level) + User prompt (per-request)
- *
- * System prompt: injected once via newSession _meta.systemPrompt
- * User prompt:    sent with each sendReview call
  */
 
-import * as acp from '@agentclientprotocol/sdk';
 import { ReviewPayload } from './types';
+
+export type PromptContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string };
 
 // ---------------------------------------------------------------------------
 // System prompt — fixed instructions, set once at session creation
 // ---------------------------------------------------------------------------
 
 export function buildSystemPrompt(): string {
-  let text = `You are an expert frontend developer working through the DevTailor browser extension and local ACP bridge.\n\n`;
-  text += `DevTailor is the primary browser-page bridge for this task. Prefer DevTailor-provided Browser MCP tools when you need page structure, console logs, screenshots, element targets, clicks, fills, key presses, assertions, or runtime verification. Use external browser/devtools tools only when DevTailor does not provide the needed capability.\n\n`;
+  let text = `You are an expert frontend developer working through the DevTailor browser extension and local bridge.\n\n`;
+  text += `DevTailor is the primary browser-page bridge for this task. Prefer DevTailor-provided browser tools when you need page structure, console logs, screenshots, element targets, clicks, fills, key presses, assertions, or runtime verification. Use external browser/devtools tools only when DevTailor does not provide the needed capability.\n\n`;
+  text += `You also have workspace tools for the project directory selected when the bridge was started. Use them to inspect, edit, build, test, and run the frontend project directly. Relative paths resolve from that workspace root.\n\n`;
+  text += `## Workspace Tools\n`;
+  text += `- \`bash\`: Run shell commands in the workspace, with optional \`cwd\` and \`timeout\`. Use it for package scripts, build/test commands, dependency inspection, and local server workflows.\n`;
+  text += `- \`read_file\`: Read UTF-8 source files with line numbers. Use it before editing existing files.\n`;
+  text += `- \`write_file\`: Create, overwrite, or append text files. Parent directories must already exist.\n`;
+  text += `- \`edit_file\`: Apply exact string replacements. Prefer this for small focused changes; include enough surrounding context in \`old_string\` so the replacement is unique.\n`;
+  text += `- \`grep_files\`: Search project files by regular expression.\n`;
+  text += `- \`glob_files\`: Find files by glob pattern.\n`;
+  text += `- \`list_directory\`: Inspect project structure.\n\n`;
+  text += `For UI debugging tasks, the expected loop is: inspect the live page with browser tools, inspect and edit the source with workspace tools, run relevant build/test/dev commands with \`bash\`, then verify the result in the browser tab.\n\n`;
   text += `## Browser Tools\n`;
   text += `Browser tools operate on the current DevTailor tab. Do not pass tabId, clientId, or pageUrl.\n\n`;
   text += `### Available Tools\n`;
@@ -55,7 +65,7 @@ export function buildSystemPrompt(): string {
 }
 
 // ---------------------------------------------------------------------------
-// History formatting — injected when ACPSession is rebuilt
+// History formatting — injected when an agent session lacks previous context
 // ---------------------------------------------------------------------------
 
 export interface HistoryMessage {
@@ -100,7 +110,7 @@ function formatHistoryForPrompt(history: HistoryMessage[]): string {
 export function buildPrompt(
   payload: ReviewPayload['payload'],
   history?: HistoryMessage[],
-): acp.ContentBlock[] {
+): PromptContentBlock[] {
   const { pageUrl, userIntent, items, screenshot } = payload;
   const intent = userIntent || '(No additional description provided)';
   const hasMarks = items.length > 0;
@@ -110,7 +120,7 @@ export function buildPrompt(
 
   let text = '';
 
-  // Inject conversation history when ACPSession was rebuilt and lacks context
+  // Inject conversation history when a local runtime lacks previous context
   if (history && history.length > 0) {
     const historyText = formatHistoryForPrompt(history);
     if (historyText) {
@@ -155,10 +165,10 @@ export function buildPrompt(
   }
 
   if (images.length) {
-    text += `## Screenshots / Images\n${images.length} image content block${images.length > 1 ? 's are' : ' is'} attached via ACP. Use them directly for visual or image-content questions.\n\n`;
+    text += `## Screenshots / Images\n${images.length} image content block${images.length > 1 ? 's are' : ' is'} attached. Use them directly for visual or image-content questions.\n\n`;
   }
 
-  const blocks: acp.ContentBlock[] = [
+  const blocks: PromptContentBlock[] = [
     { type: 'text', text },
   ];
 

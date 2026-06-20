@@ -1,7 +1,7 @@
 /**
  * DevTailor — Browser Action DOM Helpers
  *
- * Finds and interacts with elements in the current page for Browser MCP.
+ * Finds and interacts with elements in the current page for browser tools.
  *
  * Registers: window.__domReview.browserActionDom
  */
@@ -1421,7 +1421,7 @@
   }
 
   function runJs(params = {}) {
-    const fnString = String(params.function || '() => {}');
+    const fnString = String(params.code || params.function || '() => {}');
     const args = Array.isArray(params.args) ? params.args : [];
     const dialogAction = params.dialogAction || 'accept';
     const timeoutMs = Math.max(1000, Math.min(Number(params.timeout) || 30000, 120000));

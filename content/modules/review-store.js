@@ -2,7 +2,7 @@
  * DevTailor — Review Store Module
  *
  * Central CRUD store for review marks.
- * Session-only (no persistence). Replaced DOM persistence with SSE + ACP.
+ * Session-only (no persistence). Replaced DOM persistence with SSE + local bridge.
  *
  * Registers: window.__domReview.store
  */

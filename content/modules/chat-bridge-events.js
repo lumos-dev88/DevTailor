@@ -1,7 +1,7 @@
 /**
  * DevTailor — Chat Bridge Event Handler
  *
- * Owns SSE/ACP event projection into display messages: stream, thinking,
+ * Owns local bridge event projection into display messages: stream, thinking,
  * tool calls, terminal statuses, done/error/session_reset.
  *
  * Registers: window.__domReview.chatBridgeEvents
@@ -330,6 +330,11 @@
           setRequestInFlight(false);
           if (msg.reason === 'cancelled') {
             showHint('任务已停止');
+          } else if (msg.reason === 'tool_calls') {
+            const pendingTools = messageStore.filter(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
+            pendingTools.forEach(tool => {
+              messageStore.update(tool.id, { status: 'skipped' });
+            });
           } else {
             // Mark any remaining pending tools as completed on successful completion
             const pendingTools = messageStore.filter(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
@@ -352,12 +357,13 @@
           endStream();
           const errMsg = msg.message || 'Unknown error';
           if (/session|agent|process|exited|killed|not ready|eprconnreset/i.test(errMsg)) {
-            addMessage('assistant', 'text', `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#f59e0b;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg> Claude Code 会话异常：${errMsg}\n\n下一条消息将自动重建会话。`);
+            const _agentInfo1 = window.__domReview.wsClient?.getProjectInfo?.() || {};
+            const _agent1 = _agentInfo1.agentLabel || _agentInfo1.agentKey || 'AI Agent';
+            addMessage('assistant', 'text', `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#f59e0b;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg> ${_agent1} 会话异常：${errMsg}\n\n下一条消息将自动重建会话。`);
           } else {
             addMessage('assistant', 'text', 'Error: ' + errMsg);
           }
           setRequestInFlight(false);
-          renderMessages();
           followLatestIfPinned();
           refreshSendState();
           schedulePersist();
@@ -374,7 +380,9 @@
             schedulePersist();
             break;
           }
-          addMessage('assistant', 'text', '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#10b981;"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg> Claude Code 会话已重建，可以继续发送消息。');
+          const _agentInfo2 = window.__domReview.wsClient?.getProjectInfo?.() || {};
+          const _agent2 = _agentInfo2.agentLabel || _agentInfo2.agentKey || 'AI Agent';
+          addMessage('assistant', 'text', `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px;color:#10b981;"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg> ${_agent2} 会话已重建，可以继续发送消息。`);
           setRequestInFlight(false);
           refreshSendState();
           flushQueue();

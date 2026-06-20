@@ -1,7 +1,7 @@
 /**
  * DevTailor — Browser Console Cache
  *
- * Keeps a small cache of page console messages for Browser MCP tools.
+ * Keeps a small cache of page console messages for browser tools.
  * Page messages are forwarded from browser-console-bridge.js running in MAIN world.
  *
  * Registers: window.__domReview.browserConsole

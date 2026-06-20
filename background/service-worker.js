@@ -196,9 +196,16 @@ async function injectDevTailorIntoTab(tabId) {
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('DevTailor extension installed');
   await registerDynamicScripts();
+  if (chrome.sidePanel?.setPanelBehavior) {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+  }
 });
 
 registerDynamicScripts();
+
+if (chrome.sidePanel?.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+}
 
 // --- Keyboard shortcut: toggle sidebar ---
 
@@ -677,6 +684,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GET_TAB_ID') {
     sendResponse({ tabId: sender.tab?.id ?? null });
     return false;
+  }
+
+  if (message.type === 'OPEN_SIDE_PANEL') {
+    (async () => {
+      const tabId = message.tabId || sender.tab?.id || null;
+      const windowId = message.windowId || sender.tab?.windowId || null;
+      if (tabId) {
+        await chrome.sidePanel.open({ tabId });
+      } else if (windowId) {
+        await chrome.sidePanel.open({ windowId });
+      } else {
+        throw new Error('No active tab or window for side panel');
+      }
+      sendResponse({ ok: true });
+    })().catch(err => {
+      sendResponse({ ok: false, error: err?.message || 'Failed to open side panel' });
+    });
+    return true;
   }
 
   if (message.type === 'ENSURE_INJECTED') {

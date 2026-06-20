@@ -124,7 +124,7 @@ describe('prompt-builder', () => {
     assert.strictEqual((blocks[1] as any).data, 'iVBORw0KGgo=');
   });
 
-  it('includes one ACP image block per screenshot', () => {
+  it('includes one image block per screenshot', () => {
     const screenshots = [
       'data:image/png;base64,iVBORw0KGgo=',
       'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==',

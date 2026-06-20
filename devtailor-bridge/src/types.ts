@@ -49,7 +49,7 @@ export interface WSMessage {
   toolOutput?: unknown;
   toolContent?: Array<Record<string, unknown>>;
   sessionId?: string;
-  acpSessionId?: string | null;
+  agentSessionId?: string | null;
   sessionTitle?: string | null;
   updatedAt?: string | null;
   messages?: Array<Record<string, unknown>>;

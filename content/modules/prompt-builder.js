@@ -5,7 +5,7 @@
  * into a structured payload for the bridge.
  *
  * System prompt (browser tools, workflow guidelines) is injected once
- * at ACP session creation in devtailor-bridge. This module only
+ * in the local bridge runtime. This module only
  * handles user-level dynamic data.
  *
  * Registers: window.__domReview.promptBuilder

@@ -5,10 +5,11 @@
 ## 当前核心规则
 
 - 浏览器扩展与 Bridge 使用 SSE + HTTP POST，但网络连接由 `background/service-worker.js` 统一代理；content script 通过 `chrome.runtime.sendMessage` / `chrome.tabs.sendMessage` 与 background 通信。`content/modules/ws-client.js` 是历史命名，不是 WebSocket 实现。
-- Bridge 拥有 display session 和 ACP session 绑定；前端展示历史不再作为 Agent 上下文来源。
+- Bridge 拥有 display session 和本地 agent session 绑定；前端展示历史不再作为常规 Agent 上下文来源。
 - 当前可操作 tab 由 Bridge 的 `BrowserActionRouter.activeClientId` 管理；新 tab 在线不自动抢占，用户需要显式「连接当前页」。
-- Browser MCP 操作只发往当前已接管 tab；Agent 不传 `tabId`、`clientId` 或 `pageUrl`。
-- 元素库是项目级全量库；`GET /element-targets` 和 MCP `get_element_targets` 都返回项目全量。
+- 发送 chat review 不要求当前 tab 已接管；接管状态只影响 browser tool/action 路由目标。
+- Browser tool 操作只发往当前已接管 tab；Agent 不传 `tabId`、`clientId` 或 `pageUrl`。
+- 元素库是项目级全量库；`GET /element-targets` 和 browser tool `get_element_targets` 都返回项目全量。
 - 旧的 `/element-targets?url=...` 当前页过滤 API 已废除，不应恢复。
 
 ## 已完成修复
@@ -31,6 +32,7 @@
 
 - 工具状态不再无条件标记完成。
 - 只在有活跃流输出或 done 收尾时按当前事件语义统一清理剩余工具状态。
+- `done.reason === "tool_calls"` 表示 runtime 达到显式步骤上限但仍有未执行工具调用，前端必须把剩余 pending/running 工具标为 skipped，而不是 completed；默认模型配置不设置工具轮次上限，由用户停止。
 - 规则：工具卡片 UI 是展示状态，不等同于工具真实业务断言；业务成功仍应看 tool result 或后续断言。
 
 ### 4. SSE 心跳机制
@@ -56,10 +58,17 @@
 
 ### 7. 队列管理增强
 
-- 发送队列支持渐进退避：`100ms -> 500ms -> 2000ms`。
-- 失败时使用 peek 模式保留消息，成功后才移除。
-- 连接断开时等待重连，避免直接丢弃。
-- 新增 `clearQueue()`，用于取消和清理待发送任务。
+- Review 请求队列由 Bridge 持有；前端发送不再维护待发送消息队列。
+- Bridge 对每个 client 设置等待队列上限，超过上限返回 HTTP 429 和结构化 `{ ok: false, queueDepth, maxDepth }`，避免异常重复发送无限堆积。
+- 运行期通过 `queue_status` SSE 事件同步后端队列深度和处理状态。
+- 前端仍可在连接断开时依靠 SSE/HTTP 恢复探测重连，但不要恢复旧的前端待发送队列。
+
+### 8. Runtime 上下文轻量压缩
+
+- `RealAgentSession` 保留本地 AI runtime 多轮上下文，但在写回 history 前执行 micro-compaction。
+- 规则：最近消息保持原样；旧的大型 `tool_result` content 只保留短 marker；旧图片 content block 替换为图片存在性 marker，再执行字符预算裁剪。
+- `OpenAICompatibleProvider` 会把上下文超限类 HTTP 错误标记为 `context_overflow` code，便于后续接入自动压缩/重试。
+- 规则：micro-compaction 不调用 LLM，不改变 display session 展示消息，只影响后续 runtime prompt history。
 
 ## 仍需关注
 
@@ -108,6 +117,7 @@ function _notify() {
 **位置**：`browser-action-router.ts`、`browser-actions.js`
 
 截图和大型 `run_js` 结果已经有部分外部化/限制，但仍需持续防止 tool result 过大。
+`BrowserActionRouter.receiveResult()` 对未知或迟到的 requestId 会输出 warn 日志并保持返回 `false`，用于诊断超时后结果回流、tab 切换或旧 content script 残留。
 
 建议：
 
@@ -129,7 +139,7 @@ function _notify() {
 
 ### P0
 
-- 保持 active tab、display session、ACP session 三者边界清晰。
+- 保持 active tab、display session、agent session 三者边界清晰。
 - 保持元素库项目全量语义。
 - 持续维护 SSE/HTTP 的结构化错误。
 

@@ -1,7 +1,7 @@
 /**
  * DevTailor — Browser Actions
  *
- * Executes Browser MCP actions in the current tab.
+ * Executes local browser tool actions in the current tab.
  *
  * Registers: window.__domReview.browserActions
  */
@@ -380,7 +380,8 @@
     const stepTimeoutMs = Math.max(500, Math.min(Number(params.stepTimeoutMs) || 5000, 30000));
     const results = [];
 
-    for (const action of actions) {
+    for (const rawAction of actions) {
+      const action = normalizeActionBatch(rawAction);
       const label = String(action?.label || `Action ${results.length + 1}`);
       const steps = Array.isArray(action?.steps) ? action.steps : [];
       const actionResult = {
@@ -427,6 +428,45 @@
     }
 
     return { results };
+  }
+
+  function normalizeActionBatch(action = {}) {
+    if (Array.isArray(action?.steps)) {
+      return {
+        ...action,
+        steps: action.steps.map(normalizeActionStep),
+      };
+    }
+    if (action?.action || action?.type) {
+      return {
+        label: action.label || action.action || action.type,
+        steps: [normalizeActionStep(action)],
+      };
+    }
+    return action;
+  }
+
+  function normalizeActionStep(step = {}) {
+    const params = step.params && typeof step.params === 'object' ? step.params : {};
+    const type = normalizeActionStepType(step.type || step.action);
+    return {
+      ...params,
+      ...step,
+      type,
+    };
+  }
+
+  function normalizeActionStepType(type) {
+    switch (type) {
+      case 'press':
+        return 'press_key';
+      case 'wait_selector':
+        return 'wait_for_selector';
+      case 'wait_text':
+        return 'wait_for_text';
+      default:
+        return type;
+    }
   }
 
   function requestUserAssistance(params = {}) {

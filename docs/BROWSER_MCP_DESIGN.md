@@ -1,13 +1,15 @@
-# DevTailor Browser MCP — 用户故事与技术选型
+# DevTailor Browser Tool — 用户故事与历史设计
+
+> 当前实现已不再暴露 `/mcp` Browser MCP JSON-RPC endpoint，也不再通过 ACP 注册 MCP server。本文保留 browser 操作层的用户故事和工具边界作为设计参考；运行时入口已改为 Bridge 本地 `/browser-tool` + `BrowserActionRouter`。
 
 ## 一、定位
 
-Browser MCP 不是把 DevTailor 做成通用浏览器自动化平台，但也不应该把页面操作限制得过死。
+Browser tool 不是把 DevTailor 做成通用浏览器自动化平台，但也不应该把页面操作限制得过死。
 
 它的主轴是：
 
 - 用户仍然通过 DevTailor 面板标记元素、截图、描述问题。
-- Bridge 仍然负责把当前这一次请求转给 ACP agent。
+- Bridge 仍然负责把当前这一次请求转给本地 agent runtime。
 - Browser 能力补齐一个短板：AI 修改代码后，可以在用户当前开发页面里查看状态、刷新、点击、输入少量文本，并截图确认，而不是完全依赖用户手动操作和描述渲染结果。
 
 换句话说，它是"当前 DevTailor 工作流的浏览器操作层"。它可以参考 Nanobrowser 这类本地浏览器 agent 的实用取向：操作在用户本机浏览器中发生，默认面向开发环境，权限边界主要放在当前会话 tab 上，而不是把每个点击都设计成重审批。
@@ -698,8 +700,10 @@ interface DevTailorBrowserToolsP1 {
       }>
     }
   }
-}
+  }
 ```
+
+`run_actions` 的 tool definition 必须使用上面的 batch/steps 结构：`actions[] -> { label?, steps[] }`，step 以 `type` 加扁平参数表达。Content runner 仍兼容迁移期的 `{ action, params }` 单步输入，但这不是模型主 schema。
 
 暂不进入 P0：
 

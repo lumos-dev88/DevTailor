@@ -30,7 +30,7 @@
 │  │  HTTP/SSE Routes                                         │   │
 │  │  - GET  /health        (ProjectInfo)                     │   │
 │  │  - GET  /events        (SSE Stream)                      │   │
-│  │  - POST /mcp           (Browser MCP JSON-RPC)            │   │
+│  │  - POST /browser-tool  (Local browser tool endpoint)     │   │
 │  │  - POST /review        (Send message)                    │   │
 │  │  - POST /activate      (Take over active tab)            │   │
 │  │  - POST /cancel        (Stop generation)                 │   │
@@ -53,14 +53,16 @@
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                   │
 └───────────────────────────────┬───────────────────────────────────┘
-                                │ ACP (Agent Communication Protocol)
-                                │ stdio
+                                │ in-process runtime boundary
 ┌───────────────────────────────▼───────────────────────────────────┐
-│                      ACP Agent Process                            │
-│              (Claude Code / Custom Agent)                         │
+│                   Agent Runtime Boundary                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
+│  - LocalAgentSession fallback or RealAgentSession provider loop  │
+│  - Model config: project .devtailor settings via /model-config   │
 │  - Receives user messages + context (screenshots, marks, etc.)   │
+│  - Browser tools: routed through BrowserActionRouter to active tab│
+│  - Workspace tools: bash/read/write/edit/grep/glob/list under dir │
 │  - Streams back: thinking, text, tool calls                      │
 │  - Emits: stream, thinking, tool_call, tool_update, done, error  │
 │                                                                   │
@@ -143,16 +145,21 @@ User types message
           ▼
 ┌────────────────────────────────────────────┐
 │ Bridge: handleReview()                     │
-│ 1. Get/Create ACP session                  │
-│ 2. session.sendMessage(payload)            │
-│ 3. Pipe ACP events → SSE clients           │
+│ 1. Accept request into backend queue        │
+│ 2. Get/Create AgentSession when dequeued    │
+│ 3. session.sendReview(payload)              │
+│ 4. Pipe runtime events + processing state   │
+│    → SSE clients                            │
 └─────────┬──────────────────────────────────┘
           │
           ▼
 ┌────────────────────────────────────────────┐
-│ ACP Agent                                  │
+│ Agent Runtime Boundary                     │
 │ 1. Process message + context               │
-│ 2. Stream events:                          │
+│ 2. Optional provider loop                   │
+│ 3. Tool routing: browser tools or workspace │
+│    tools under Bridge --dir                 │
+│ 4. Stream events:                          │
 │    - thinking { delta }                    │
 │    - stream { delta }                      │
 │    - tool_call { toolTitle, toolCallId }   │
@@ -488,80 +495,21 @@ function persistNow() {
 }
 ```
 
-### 2. **队列管理增强**
+### 2. **后端队列管理**
 
-**位置**：`chat-send.js:87-158`
+**位置**：`devtailor-bridge/src/ws-server.ts`、`content/modules/chat-send.js`
 
 **状态**：
-- 已完成渐进退避、自动重试、peek 模式、连接感知和 `clearQueue()`。
-- 后续只需在真实使用中观察是否还需要优先级队列或更细的取消 UI。
+- 前端不再维护待发送消息队列、重试计数或退避定时器。
+- active tab 连续调用 `/review` 时，Bridge 接收请求并进入后端 `Map<clientId, PendingReview[]>` 队列。
+- `/review` 返回 `queued`、`queueDepth`、`isProcessing`，运行期 SSE 事件附带 `isProcessing`、`processingSessionId`、`activeSessionId`。
+- `chat-send.js` 的 `flushQueue()` / `clearQueue()` 仅保留兼容空实现。
 
 **当前要点**：
-1. **智能延迟**：成功时 100ms，失败时渐进退避（100ms → 500ms → 2s）
-2. **自动重试**：最多 3 次，使用 `RETRY_DELAYS = [100, 500, 2000]`
-3. **连接感知**：检查连接状态，断开时等待重连
-4. **Peek 模式**：失败时保留消息在队列中，成功才移除
-5. **清空队列**：新增 `clearQueue()` 方法
-
-**核心改进**：
-```javascript
-// 新增变量
-let flushTimer = null;
-let retryCount = 0;
-const MAX_RETRIES = 3;
-const RETRY_DELAYS = [100, 500, 2000];
-
-function flushQueue() {
-  clearTimeout(flushTimer);
-
-  if (pendingQueue.length === 0) {
-    retryCount = 0;
-    return;
-  }
-
-  // 等待当前请求完成
-  if (requestInFlight) {
-    flushTimer = setTimeout(flushQueue, 500);
-    return;
-  }
-
-  const wsClient = getWsClient?.();
-  // 连接断开时等待重连，使用指数退避
-  if (!wsClient || wsClient.getStatus() !== 'connected') {
-    const delay = retryCount < RETRY_DELAYS.length ? RETRY_DELAYS[retryCount] : 2000;
-    retryCount = Math.min(retryCount + 1, MAX_RETRIES);
-    flushTimer = setTimeout(flushQueue, delay);
-    return;
-  }
-
-  // Peek 而不是 shift，失败时保留在队列中
-  const next = pendingQueue[0];
-  const result = executeSend(next.text, next.marks, next.images || next.screenshot);
-
-  if (result.ok) {
-    pendingQueue.shift();  // 成功才移除
-    retryCount = 0;
-    if (pendingQueue.length > 0) {
-      flushTimer = setTimeout(flushQueue, 100);
-    }
-  } else {
-    // 失败重试，最多 3 次
-    if (retryCount < MAX_RETRIES) {
-      const delay = RETRY_DELAYS[retryCount] || 2000;
-      retryCount++;
-      flushTimer = setTimeout(flushQueue, delay);
-    } else {
-      // 超过最大重试次数，跳过此消息
-      pendingQueue.shift();
-      retryCount = 0;
-      showHint('消息发送失败次数过多，已跳过');
-      if (pendingQueue.length > 0) {
-        flushTimer = setTimeout(flushQueue, 500);
-      }
-    }
-  }
-}
-```
+1. **权威状态在后端**：`processing`、`processingDisplaySessions` 和 `queues` 由 Bridge 维护。
+2. **前端只提交当前输入**：未连接或未接管时提示用户，不缓存消息。
+3. **连续发送可排队**：同一 active client 的第二条及之后 `/review` 会返回 `queued: true`。
+4. **停止会清空后端队列**：`/cancel` 清理当前 client 的 pending queue，并取消当前 turn。
 
 ---
 

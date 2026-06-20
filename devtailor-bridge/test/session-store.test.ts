@@ -41,6 +41,23 @@ describe('SessionStore', () => {
       assert.ok(existsSync(join(tmpDir, 'images')));
     });
 
+    it('should create settings table for project config', () => {
+      store.saveModelConfig({
+        provider: 'openai-compatible',
+        enabled: true,
+        baseUrl: 'http://example.test/v1/',
+        apiKey: 'test-key',
+        model: 'mimo-v2.5',
+        maxSteps: 12,
+      });
+      const config = store.getModelConfig();
+      assert.ok(config);
+      assert.equal(config!.baseUrl, 'http://example.test/v1');
+      assert.equal(config!.apiKey, 'test-key');
+      assert.equal(config!.model, 'mimo-v2.5');
+      assert.equal(config!.maxSteps, 12);
+    });
+
     it('migrates legacy sessions without agent_key to claude', async () => {
       const legacyDir = join(process.cwd(), '.test-tmp-session-store-legacy');
       if (existsSync(legacyDir)) rmSync(legacyDir, { recursive: true });
@@ -117,7 +134,7 @@ describe('SessionStore', () => {
       id: 'dt_test-001',
       clientId: 'tab_123',
       title: '测试会话',
-      acpSessionId: 'acp_001',
+      agentSessionId: 'agent_001',
       messages: [],
       createdAt: 1000000,
       updatedAt: 1000000,
@@ -131,22 +148,22 @@ describe('SessionStore', () => {
       assert.equal(loaded!.clientId, session.clientId);
       assert.equal(loaded!.agentKey, 'claude');
       assert.equal(loaded!.title, session.title);
-      assert.equal(loaded!.acpSessionId, session.acpSessionId);
+      assert.equal(loaded!.agentSessionId, session.agentSessionId);
       assert.equal(loaded!.createdAt, session.createdAt);
       assert.equal(loaded!.messages.length, 0);
     });
 
-    it('updateSession changes title and acpSessionId', () => {
+    it('updateSession changes title and agentSessionId', () => {
       const updated: StoredSession = {
         ...session,
         title: '更新后的标题',
-        acpSessionId: 'acp_002',
+        agentSessionId: 'agent_002',
         updatedAt: 2000000,
       };
       store.updateSession(updated);
       const loaded = store.getSession(session.id);
       assert.equal(loaded!.title, '更新后的标题');
-      assert.equal(loaded!.acpSessionId, 'acp_002');
+      assert.equal(loaded!.agentSessionId, 'agent_002');
       assert.equal(loaded!.updatedAt, 2000000);
     });
 
@@ -155,7 +172,7 @@ describe('SessionStore', () => {
         id: 'dt_test-002',
         clientId: 'tab_123',
         title: '较新的会话',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 3000000,
         updatedAt: 3000000,
@@ -173,7 +190,7 @@ describe('SessionStore', () => {
         clientId: 'tab_123',
         agentKey: 'gemini',
         title: 'Gemini 会话',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 3500000,
         updatedAt: 3500000,
@@ -292,7 +309,7 @@ describe('SessionStore', () => {
         id: trimSessionId,
         clientId: 'tab_trim',
         title: 'Trim Test',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 6000000,
         updatedAt: 6000000,
@@ -382,7 +399,7 @@ describe('SessionStore', () => {
         id: 'dt_load_1',
         clientId: 'tab_load',
         title: '会话1',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 7000000,
         updatedAt: 7000000,
@@ -399,7 +416,7 @@ describe('SessionStore', () => {
         id: 'dt_load_2',
         clientId: 'tab_load',
         title: '会话2',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 7000010,
         updatedAt: 7000010,
@@ -456,7 +473,7 @@ describe('SessionStore', () => {
         id: 'dt_unicode',
         clientId: 'tab_unicode',
         title: '🧪 Unicode 测试 🎌',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 8000000,
         updatedAt: 8000000,
@@ -481,7 +498,7 @@ describe('SessionStore', () => {
         id: 'dt_large',
         clientId: 'tab_large',
         title: '大内容测试',
-        acpSessionId: null,
+        agentSessionId: null,
         messages: [],
         createdAt: 9000000,
         updatedAt: 9000000,

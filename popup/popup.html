@@ -386,6 +386,71 @@
       font-size: 10px;
       line-height: 1.5;
     }
+    .sidepanel-note {
+      margin-top: 8px;
+      color: #64748b;
+      font-size: 10px;
+      line-height: 1.5;
+    }
+    .model-form {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .model-row {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 8px;
+      align-items: center;
+    }
+    .model-label {
+      color: #94a3b8;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .model-input {
+      min-width: 0;
+      padding: 7px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: #1e293b;
+      color: #f8fafc;
+      font-size: 11px;
+      font-family: 'SF Mono', 'Consolas', monospace;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .model-input::placeholder { color: #475569; }
+    .model-input:focus {
+      border-color: #3b82f6;
+      background: #0f172a;
+    }
+    .model-actions {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin-top: 2px;
+    }
+    .model-status {
+      min-width: 0;
+      color: #64748b;
+      font-size: 10px;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .model-error {
+      display: none;
+      font-size: 10px;
+      color: #f87171;
+      padding: 6px 8px;
+      background: rgba(239, 68, 68, 0.1);
+      border-radius: 4px;
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      line-height: 1.4;
+    }
 
     .toast {
       display: none;
@@ -445,6 +510,18 @@
       请在下方添加站点或访问已允许的页面
     </div>
 
+    <div id="sidepanel-section" class="section">
+      <div class="section-header">
+        <div class="section-title">Chat 侧边栏</div>
+        <div class="section-badge">sidePanel</div>
+      </div>
+      <button class="btn btn--primary" id="open-sidepanel">
+        <span class="btn-icon">▥</span>
+        <span class="btn-label">打开 Chat 侧边栏</span>
+      </button>
+      <div class="sidepanel-note">Chat 放到浏览器侧边栏；页面内悬浮层继续负责标记、选择和工具。</div>
+    </div>
+
     <div id="panel-size-section" class="section">
       <div class="section-header">
         <div class="section-title">悬浮卡片尺寸</div>
@@ -461,6 +538,37 @@
         <button class="size-apply" id="custom-size-apply">应用尺寸</button>
       </div>
       <div class="size-hint">调整页面中 DevTailor 聊天面板的宽度和高度</div>
+    </div>
+
+    <div id="model-config-section" class="section">
+      <div class="section-header">
+        <div class="section-title">模型配置</div>
+        <div class="section-badge" id="model-config-badge">未连接</div>
+      </div>
+      <div class="model-form">
+        <div class="model-row">
+          <label class="model-label" for="model-base-url">Base URL</label>
+          <input class="model-input" id="model-base-url" type="text" placeholder="http://127.0.0.1:8000">
+        </div>
+        <div class="model-row">
+          <label class="model-label" for="model-api-key">API Key</label>
+          <input class="model-input" id="model-api-key" type="password" placeholder="留空表示保持不变">
+        </div>
+        <div class="model-row">
+          <label class="model-label" for="model-name">Model</label>
+          <input class="model-input" id="model-name" type="text" placeholder="mimo-v2.5">
+        </div>
+        <div class="model-row">
+          <label class="model-label" for="model-max-steps">工具轮次</label>
+          <input class="model-input" id="model-max-steps" type="number" min="1" step="1" placeholder="不限制">
+        </div>
+        <div class="model-actions">
+          <div class="model-status" id="model-config-status">启动 Bridge 后可配置</div>
+          <button class="add-site-btn" id="model-config-save">保存</button>
+        </div>
+        <div class="model-error" id="model-config-error"></div>
+      </div>
+      <div class="size-hint">配置保存到当前项目的 .devtailor。工具轮次留空表示不限制，由用户手动停止。</div>
     </div>
 
     <div id="allowed-sites-section" class="section">

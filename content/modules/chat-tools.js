@@ -1,7 +1,7 @@
 /**
  * DevTailor — Chat Tool Helpers
  *
- * Pure formatting and normalization helpers for ACP tool messages.
+ * Pure formatting and normalization helpers for agent tool messages.
  *
  * Registers: window.__domReview.chatTools
  */
