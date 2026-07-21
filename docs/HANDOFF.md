@@ -48,7 +48,9 @@ Bridge 通过 `AgentSession` + `BrowserToolRunner` + `WorkspaceToolRunner` 连�
 - Scream SDK 以 ESM bundle 形式在 `scream-code-main/runtime/node-sdk/dist/index.mjs` 就地载入，通过 CommonJS `import()` 动态导入（Node 22+ 支持从 CJS 模块动态 import ESM）。bridge `tsc` 构建和 `tsx` dev 运行均通过。
 - 配置映射：DevTailor `ModelConfig`（`baseUrl`, `apiKey`, `model`）→ Scream `ScreamConfigPatch`，provider type 设为 `'openai'`，provider 名称 `devtailor`，model alias `devtailor-model`，`maxContextSize` 默认 128000。
 - Scream home 作用域在 `{projectDir}/.devtailor/scream-home`，不污染用户的 `~/.scream` 目录。
-- Phase 1 限制：仅支持 text-only turn；`permission: 'yolo'` 自动批准所有工具；Scream 原生 workspace tools（bash/read/write/edit/grep）由 Scream 自身管理。
+- Phase 1 限制：`permission: 'yolo'` 自动批准所有工具；Scream 原生 workspace tools（bash/read/write/edit/grep）由 Scream 自身管理。
+- 入站图片（Story 3）：`sendReview` 用 `buildPrompt(payload)`（不带 history——Scream session 自持对话历史，注入会重复）生成 `PromptContentBlock[]`，再由 `buildPromptInput()` 映射为 Scream `PromptInput`：text 块 → `{ type: 'text', text }`；image 块先经 `compressImage()` 压缩，再 → `{ type: 'image_url', imageUrl: { url: 'data:${mediaType};base64,${data}' } }`，顺序为 text 块在前、image 块按原顺序在后。压缩失败回退原图，不因单张坏图中断整个 turn。图片持久化与 resume 顺序由 Scream 原生 session store 保证。
+- 未做（Story 9 出站截图）：`take_visible_screenshot` 的结果仍按 JSON 字符串回传，未作为 image content part 供模型「看」。原因：DevTailor 用 openai-compatible provider，OpenAI Chat Completions 的 `tool` 角色消息只接受文本（见 `scream-code-main/runtime/ltod/src/providers/openai-legacy.ts` 的 tool-message content 策略），tool result 里的 image_url 会被降级。留作后续（需 Anthropic 类 provider 或专门的 media 引用通道）。
 - 事件映射：`assistant.delta` → `onStream`，`thinking.delta` → `onThinking`，`tool.call.started` → `onToolCall`，`tool.progress` / `tool.result` → `onToolUpdate`，`turn.ended` → resolve/reject `sendReview` promise + `onDone`/`onError`，`session.meta.updated` → `onSessionInfoUpdate`。
 - 此 runtime 在同一 `AgentSession` 边界后面，不破坏现有 SSE、display session、cancel、queue 和 browser tool 路由逻辑。
 

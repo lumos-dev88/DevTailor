@@ -22,7 +22,8 @@ import {
   ToolCallInfo,
   ToolUpdateInfo,
 } from './agent-session';
-import { HistoryMessage } from './prompt-builder';
+import { buildPrompt, HistoryMessage, PromptContentBlock } from './prompt-builder';
+import { compressImage } from './image-handler';
 import { ReviewPayload } from './types';
 import { WorkspaceToolRunner } from './workspace-tool-runner';
 import { ModelConfig, normalizeModelConfig } from './model-config';
@@ -63,7 +64,9 @@ interface CreateSessionOptions {
   permission?: 'yolo' | 'manual' | 'auto';
 }
 
-type PromptPart = { type: 'text'; text: string };
+type PromptPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; imageUrl: { url: string; id?: string } };
 type PromptInput = readonly PromptPart[];
 
 // Minimal AgentEvent shape for our event handler
@@ -241,6 +244,7 @@ export class ScreamAgentSession implements AgentSession {
     if (!this.screamSession) throw new Error('Scream session not initialized');
 
     this.busy = true;
+    const promptInput = await this.buildPromptInput(payload);
     let accumulated = '';
     let turnEndReason: string = 'completed';
     let turnError: string | null = null;
@@ -288,10 +292,6 @@ export class ScreamAgentSession implements AgentSession {
           },
         });
       });
-
-      // Build text-only PromptInput from the review payload (Phase 1: text only)
-      const text = buildTextPrompt(payload);
-      const promptInput: PromptInput = [{ type: 'text', text }];
 
       this.screamSession!.prompt(promptInput).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
@@ -448,6 +448,29 @@ export class ScreamAgentSession implements AgentSession {
 
   // ── Helpers ────────────────────────────────────────────────────────────
 
+  private async buildPromptInput(payload: ReviewPayload['payload']): Promise<PromptInput> {
+    const blocks: PromptContentBlock[] = buildPrompt(payload);
+    const parts: PromptPart[] = [];
+    for (const block of blocks) {
+      if (block.type === 'text') {
+        parts.push({ type: 'text', text: block.text });
+      } else {
+        // image block
+        let data = block.data;
+        let mediaType = block.mimeType;
+        try {
+          const compressed = await compressImage(block.data, block.mimeType);
+          data = compressed.data;
+          mediaType = compressed.mediaType;
+        } catch {
+          // fall back to original on error
+        }
+        parts.push({ type: 'image_url', imageUrl: { url: `data:${mediaType};base64,${data}` } });
+      }
+    }
+    return parts;
+  }
+
   private waitReady(): Promise<void> {
     return new Promise((resolve) => {
       const check = () => {
@@ -459,31 +482,3 @@ export class ScreamAgentSession implements AgentSession {
   }
 }
 
-// ── Prompt builder (Phase 1: text only) ─────────────────────────────────────
-
-function buildTextPrompt(payload: ReviewPayload['payload']): string {
-  const parts: string[] = [];
-
-  if (payload.pageUrl) {
-    parts.push(`Page URL: ${payload.pageUrl}`);
-  }
-
-  if (payload.userIntent) {
-    parts.push(payload.userIntent);
-  }
-
-  // Include marked elements as structured text
-  if (payload.items && payload.items.length > 0) {
-    parts.push('\nMarked elements:');
-    for (const item of payload.items) {
-      const elementParts = [`  - selector: ${item.selector}`];
-      if (item.annotation) elementParts.push(`    annotation: ${item.annotation}`);
-      if (item.text) elementParts.push(`    text: ${item.text}`);
-      if (item.outerHTML) elementParts.push(`    html: ${item.outerHTML.slice(0, 200)}`);
-      parts.push(elementParts.join('\n'));
-    }
-  }
-
-  // Phase 1: screenshots/images are ignored
-  return parts.join('\n');
-}
