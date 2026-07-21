@@ -18,6 +18,7 @@ import { WorkspaceToolRunner } from './workspace-tool-runner';
 import { ModelConfig, RuntimeConfig, normalizeModelConfig } from './model-config';
 import { OpenAICompatibleProvider } from './runtime';
 import { RealAgentSession } from './real-agent-session';
+import { ScreamAgentSession } from './scream-agent-session';
 
 export type AgentSessionFactory = (
   runner: BrowserToolRunner,
@@ -164,15 +165,34 @@ export class WSServer {
 
   private createConfiguredSessionFactory(_config: ModelConfig): AgentSessionFactory {
     const config = normalizeModelConfig(_config);
+    const bridgeInstanceId = this.projectInfo.bridgeInstanceId;
+    const cwd = this.cwd;
+
+    // DEVTAILOR_RUNTIME=scream  → use ScreamAgentSession (new Scream-backed runtime)
+    // DEVTAILOR_RUNTIME=<other> or unset → use RealAgentSession (legacy OpenAI-compatible runtime)
+    const useScream = (process.env.DEVTAILOR_RUNTIME ?? 'scream') === 'scream';
+
+    if (useScream) {
+      return (runBrowserTool, runWorkspaceTool) => new ScreamAgentSession({
+        modelConfig: config,
+        projectDir: cwd,
+        runBrowserTool,
+        runWorkspaceTool,
+      });
+    }
+
     return (runBrowserTool, runWorkspaceTool) => new RealAgentSession({
       provider: new OpenAICompatibleProvider({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         model: config.model,
+        cacheStrategy: config.cacheStrategy,
+        sessionId: bridgeInstanceId,
       }),
       runBrowserTool,
       runWorkspaceTool,
       maxSteps: config.maxSteps,
+      projectDir: cwd,
     });
   }
 
@@ -515,7 +535,13 @@ export class WSServer {
       ? queuedDisplay
       : this.getOrCreateDisplaySession();
     const session = this.getOrCreateSession(display.id, display.agentSessionId);
-    this.appendUserMessage(display, payload);
+    const userMessage = this.appendUserMessage(display, payload);
+    this.sendRuntimeEvent(clientId, {
+      type: 'display_message',
+      tabId: clientId,
+      sessionId: display.id,
+      displayMessage: userMessage,
+    });
     this.attachSessionCallbacks(clientId, display, session);
 
     let startResult: ReviewSessionStart;
@@ -748,7 +774,7 @@ export class WSServer {
     return session.messages.length === 0 && !session.agentSessionId && session.title === '新会话';
   }
 
-  private appendUserMessage(display: DisplaySession, payload: ReviewPayload['payload']): void {
+  private appendUserMessage(display: DisplaySession, payload: ReviewPayload['payload']): DisplayMessage {
     const images = Array.isArray(payload.screenshots)
       ? payload.screenshots
       : payload.screenshot
@@ -771,6 +797,7 @@ export class WSServer {
     this.trimDisplayMessages(display);
     this.store?.addMessage(display.id, msg);
     this.store?.updateSession(display);
+    return msg;
   }
 
   private appendAssistantDelta(display: DisplaySession, delta: string): void {

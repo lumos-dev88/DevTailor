@@ -40,15 +40,81 @@ Bridge 不再保留 ACP adapter，不再 spawn ACP 进程，也不暴露 Browser
 
 Bridge 通过 `AgentSession` + `BrowserToolRunner` + `WorkspaceToolRunner` 连接 AI runtime、browser tools 和项目 workspace tools。
 
-- 模型配置入口在扩展 popup 的「模型配置」区域，通过 Bridge `GET/POST /model-config` 读写当前项目 `.devtailor/sessions.db` 的 `settings.model_config`。配置完整时使用 `RealAgentSession` + `OpenAICompatibleProvider`。模型 browser tool call 会映射到 `BrowserActionRouter.run()`，再通过 SSE/HTTP 路由到当前已连接 tab；workspace tool call 会映射到 Bridge 进程内的 `WorkspaceToolService`。
+### Scream runtime (Phase 1)
+
+`ScreamAgentSession`（`devtailor-bridge/src/scream-agent-session.ts`）是新的 Scream-backed runtime，通过 `DEVTAILOR_RUNTIME=scream`（默认）环境变量启用；设置为其他值时退回 `RealAgentSession`（旧 OpenAI-compatible runtime）。
+
+- 选择逻辑在 `ws-server.ts` 的 `createConfiguredSessionFactory()` 中，通过 `process.env.DEVTAILOR_RUNTIME` 判断。默认值是 `'scream'`。
+- Scream SDK 以 ESM bundle 形式在 `scream-code-main/runtime/node-sdk/dist/index.mjs` 就地载入，通过 CommonJS `import()` 动态导入（Node 22+ 支持从 CJS 模块动态 import ESM）。bridge `tsc` 构建和 `tsx` dev 运行均通过。
+- 配置映射：DevTailor `ModelConfig`（`baseUrl`, `apiKey`, `model`）→ Scream `ScreamConfigPatch`，provider type 设为 `'openai'`，provider 名称 `devtailor`，model alias `devtailor-model`，`maxContextSize` 默认 128000。
+- Scream home 作用域在 `{projectDir}/.devtailor/scream-home`，不污染用户的 `~/.scream` 目录。
+- Phase 1 限制：仅支持 text-only turn；`permission: 'yolo'` 自动批准所有工具；browser tools 忽略（Phase 2）；Scream 原生 workspace tools（bash/read/write/edit/grep）由 Scream 自身管理。
+- 事件映射：`assistant.delta` → `onStream`，`thinking.delta` → `onThinking`，`tool.call.started` → `onToolCall`，`tool.progress` / `tool.result` → `onToolUpdate`，`turn.ended` → resolve/reject `sendReview` promise + `onDone`/`onError`，`session.meta.updated` → `onSessionInfoUpdate`。
+- 此 runtime 在同一 `AgentSession` 边界后面，不破坏现有 SSE、display session、cancel、queue 和 browser tool 路由逻辑。
+
+- 模型配置入口在扩展 popup 的「模型配置」区域，通过 Bridge `GET/POST /model-config` 读写当前项目 `.devtailor/sessions.db` 的 `settings.model_config`。配置完整时使用 `RealAgentSession` + `OpenAICompatibleProvider`（或 `ScreamAgentSession`，视 `DEVTAILOR_RUNTIME` 环境变量而定）。模型 browser tool call 会映射到 `BrowserActionRouter.run()`，再通过 SSE/HTTP 路由到当前已连接 tab；workspace tool call 会映射到 Bridge 进程内的 `WorkspaceToolService`（RealAgentSession）或 Scream 原生工具（ScreamAgentSession）。
+- `OpenAICompatibleProvider` 请求仍走 `/v1/chat/completions` 和 OpenAI-compatible body，但 HTTP headers 模拟 Claude Code 客户端：包含 `User-Agent: claude-code/2.1.195`、`anthropic-version: 2023-06-01`、`anthropic-beta: claude-code-20250219`、`x-api-key`，同时保留 `Authorization: Bearer ...` 以兼容 OpenAI 风格代理。
+- `OpenAICompatibleProvider` 的响应解析必须兼容常见 OpenAI-like 代理差异：`data: {...}`、`data:{...}`、非流式 JSON `choices[].message.content` 和 200 JSON error body；无法识别的 200 响应必须显式返回 error，不能静默 `done` 导致前端看不到回复也看不到异常。
+- OpenAI-like tool_call 也不能假设严格流式格式：解析时要兼容缺失 `index` / `id`、`arguments` 为对象而非字符串、以及非流式 `choices[].message.tool_calls`；缺 id 时生成稳定 `call_N`，对象参数要 `JSON.stringify`，否则工具执行和 tool result 回填会卡住。
+- runtime history 不能把完全空的 assistant turn 发给模型；`generate()` 不应把无文本且无 tool_calls 的 assistant 写入 history，`OpenAICompatibleProvider` 序列化时也要跳过旧 history 中的空 assistant，避免代理返回 `assistant must not be empty`。
 - 环境变量 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL` / `DEVTAILOR_MODEL` 只作为迁移兜底：当项目尚无 UI 模型配置时，Bridge 启动会把它们写入项目配置；之后应通过 UI 修改，不再依赖环境变量注入。
 - 模型配置缺失或被禁用时，Bridge fallback 到 `LocalAgentSession` 过渡 runtime；它会在 review turn 中收集页面快照、console 和元素库上下文，并以 `tool_call` / `tool_update` / `stream` 事件回传。
 - workspace 边界对齐 scream-code：Bridge 启动时的 `--dir` / `--cwd` 是项目工作区根目录；workspace tools 的相对路径从该目录解析，绝对路径也必须落在该根目录内。
 - 当前 workspace tools：`bash`、`read_file`、`write_file`、`edit_file`、`grep_files`、`glob_files`、`list_directory`。用于“检查页面 → 修改代码 → 构建/测试 → 浏览器验证”的闭环。
+
+## Prompt 缓存策略
+
+**核心原则：稳定内容放前面，动态用户输入放后面。缓存命中依赖前缀一致，不依赖某个 header。**
+
+不要把缓存设计成统一的 `headers["cache"] = true`。不同厂商的缓存机制不同，按 provider 配置 `cacheStrategy`：
+
+| 策略 | 适用厂商 | 行为 |
+|------|---------|------|
+| `automatic`（默认） | OpenAI GPT-4o+、DeepSeek、Gemini 2.5+、Grok、MiniMax | 不改请求结构，依赖厂商自动缓存 |
+| `body_cache_control` | Anthropic Claude、Qwen 显式缓存、Bedrock Claude | 请求体 content block 添加 `cache_control: { type: "ephemeral" }` |
+| `cached_content_object` | Gemini 显式缓存 | 先创建 cache，再引用 `cachedContent`（未实现） |
+| `routing_hint` | OpenRouter、xAI Grok（可选） | 添加 `x-grok-conv-id` / `x-session-id` header，仅帮助粘性路由提高命中率，非缓存开关 |
+| `none` | 无 | 不做任何缓存优化 |
+
+### `body_cache_control` 的 cache_control 放置规则
+
+`OpenAICompatibleProvider` 在 `body_cache_control` 策略下自动在请求体中添加 `cache_control` 标记：
+
+1. **System prompt**：最后一块 content block 标记 `cache_control: { type: "ephemeral" }`（最稳定，总是缓存）
+2. **最后一个用户消息之前的那条消息**：标记为缓存断点。断点之前（含断点）的所有内容被缓存，断点之后的当前用户消息不被缓存，每次重新计算
+
+这就是 Anthropic 的"缓存前缀"模式：系统 prompt + 历史对话被缓存，只有最新用户输入不被缓存。
+
+### 消息排序保证前缀一致
+
+- `generate()` 始终将 system prompt 放在 messages 数组最前面
+- messages 数组按时间顺序排列（旧 → 新），稳定内容在前，动态内容在后
+- 这与所有厂商的"前缀匹配"缓存机制一致
+
+### 配置方式
+
+在模型配置中通过 `cacheStrategy` 字段指定：
+
+```json
+{
+  "provider": "openai-compatible",
+  "model": "claude-sonnet-4-20250514",
+  "cacheStrategy": "body_cache_control"
+}
+```
+
+默认 `automatic`，对 OpenAI、DeepSeek 等自动缓存的厂商无需配置。
 - `read_file` 输出行号和 `<system>` 状态块，状态块包含 `Anchor`、截断信息和换行风格；`edit_file.anchor` 可防止基于过期读取结果改错位置，CRLF 文件按 LF 展示并在写回时保留 CRLF。
 - `grep_files` 支持 `output_mode`、`glob`、`-i`、`-A/-B/-C`、`offset + head_limit` 分页和 `multiline`；`glob_files` 按 mtime 新到旧排序，返回可直接给 `read_file` / `edit_file` 使用的相对路径。
 - `bash` 返回 stdout/stderr 原始字段和合并后的 `output` 字段；失败命令在 `output` 末尾追加 `Command failed with exit code: N`，便于模型判断。
-- `RealAgentSession` 会在写回多轮 runtime history 前执行轻量 micro-compaction：保留最近消息不动，旧的大型 tool result 会替换为短 marker，旧图片 content block 会替换为存在性 marker，再进入字符预算裁剪。不要把它改成 LLM 摘要式压缩，除非同步设计 FullCompaction 的触发、成本和恢复规则。
+- `RealAgentSession` 的上下文管理采用 **cache-first（缓存优先）** 策略，对齐 Claude Code 的 Session Memory 设计思路：
+  - **主策略 — 缓存优先丢弃**：当上下文紧张时，直接丢弃旧消息，依赖已注入 system prompt 的 Session Memory 摘要作为缓存。模型通过摘要理解会话状态，无需看到完整历史。这替代了传统的压缩式上下文管理（不再逐个 compact tool result 来节省 token）。
+  - **辅助策略 — micro-compaction**：每轮结束后仍对保留的消息执行 cache-aware micro-compaction（热/温/冷三区），清理大型 tool result 和图片，作为辅助优化。
+  - **上下文溢出恢复**：API 返回 context overflow 时，激进丢弃旧消息（仅保留最近 4 条），依赖 Session Memory 摘要作为上下文缓存，然后重试（最多 2 次）。
+- `RealAgentSession` 维护 `SessionMemory`（渐进式会话摘要缓存），每轮对话后增量更新，包含任务、关键文件、决策、错误和当前状态。系统 prompt 会注入此缓存摘要（`<session_memory>` 标签包裹），允许模型在上下文紧张时通过摘要理解会话状态，而非依赖完整历史。
+- `SessionMemory` 支持文件持久化：保存到 `.devtailor/session-memory.md`（YAML front matter + Markdown），会话启动时加载恢复。文件即为缓存，跨 Bridge 重启后仍可恢复上下文。
+- `RealAgentSession` 使用 `ContextBudgetTracker` 监控上下文 token 预算，支持多层阈值：warning（警告）→ auto_compact（触发缓存优先丢弃或压缩）→ error（返回错误）→ blocking（必须处理）。在 `generate()` 前主动检查预算，优先使用缓存丢弃策略。
+- `generate()` 在每步循环前检查上下文字符预算（150K 字符阈值），超限时返回 `context_overflow` finishReason，供 `RealAgentSession` 执行恢复重试。
 - `OpenAICompatibleProvider` 对上下文超限错误使用 `context_overflow` code；下游如果要自动压缩/重试，应基于该 code 增量接入，不要破坏现有 429/5xx 重试语义。
 - 后续 runtime 改造必须复用同一 `AgentSession` + tool runner 边界，不要恢复 ACP adapter。
 
@@ -58,7 +124,7 @@ Bridge 通过 `AgentSession` + `BrowserToolRunner` + `WorkspaceToolRunner` 连�
 
 - 使用 manifest 注入 vanilla JavaScript content scripts。
 - UI 放在 Shadow DOM 内，由 `content/modules/shadow-ui.js` 和拆分后的 chat 模块组合。
-- `chrome.sidePanel` 可承载后续 Chat 主体验；当前 sidePanel 仅是 shell/demo，content script 的 Shadow DOM 浮层仍负责页面标记、元素选择、overlay、browser action 命中辅助等贴近页面 DOM 的工具能力。
+- `chrome.sidePanel` 已承载真实 Chat 消息流、Markdown 和图片附件；content script 的 Shadow DOM 浮层仍负责页面标记、元素选择、overlay、browser action 命中辅助等贴近页面 DOM 的工具能力。
 - 不引入 React、Vue、Angular 或 SPA 构建链，除非产品范围发生明显变化。
 - DevTailor 自己的 UI 事件必须停在 Shadow DOM/自身浮层边界，不要触发页面外部点击导致页面弹窗关闭。
 - DevTailor UI 必须遵守“卡片隔离”规范：
@@ -107,6 +173,7 @@ Bridge 通过 `AgentSession` + `BrowserToolRunner` + `WorkspaceToolRunner` 连�
 - content script 不直接访问 Bridge，也不直接创建 `EventSource`；标准通道是 background service worker Bridge proxy。background 维护 SSE fetch stream 并通过 `chrome.tabs.sendMessage` 转发事件，普通 HTTP API 通过 `chrome.runtime.sendMessage` 代理，避免受宿主页面网络上下文限制。
 - `online`、`pageshow`、窗口 focus 和页面重新可见时要主动做轻量恢复探测，必要时通知 background 关闭旧 SSE proxy 并重建连接。
 - background proxy SSE 断开后，content 应快速重连，并在 proxy open 后主动拉 `/sessions/active` 发出 `session_snapshot(reason: "reconnect")`，用 Bridge 持久化消息补偿断线期间丢失的 stream/thinking/tool 事件；重连 snapshot 不应展示“会话已切换”提示。若重连 snapshot 尾部是 stream 消息，chat 层应把它恢复为 active stream，后续 delta 继续追加到同一条 assistant 消息。
+- sidePanel 不能依赖 content script 在内存中 `emit` 的重连快照；侧边栏首次打开、SSE 重连、active client 或 active session 变化时，必须自行请求 `/sessions/active`，否则中途打开只会看到后续工具与 AI 增量事件，丢失已持久化的用户消息。定时 `/health` 检查只在 client/session 变化时触发快照，不应周期性覆盖正在流式追加的消息。Bridge 持久化用户消息后还必须发出 `display_message`，让已打开的侧边栏实时接收从悬浮窗发送的文本或标记；侧边栏自身的乐观用户消息应用持久化 id 对齐，不能重复显示。
 - 刷新后的发送/停止按钮状态必须从 Bridge 的运行状态恢复：`/health` 和 `/sessions/active` 应暴露当前 client 是否正在处理请求，前端恢复 active session 或 reconnect snapshot 时同步 `requestInFlight`，不能只依赖 content script 内存或 `chrome.storage`。
 - Bridge 从未启动到启动完成的场景，应靠前端恢复探测和指数退避共同恢复，不要求用户刷新页面。
 - 刷新/重注入期间 `GET_TAB_ID` 可能短暂返回空；`clientId` 初始化必须 single-flight，优先保持真实 `tab_{id}`，临时 fallback id 只能兜底且要继续尝试升级回真实 tab id，避免刷新后 active tab 变成“待连接”。
@@ -280,6 +347,8 @@ npm run build
 规则：
 
 - 前端可有多个待发送图片，发送后展示在用户消息里。
+- 悬浮 Chat 和 sidePanel 必须共用 `chat-images.js` 的 data URL 校验与预览管理；sidePanel 的附件选择、粘贴、历史回显和 `/review` payload 不能分叉。
+- sidePanel 的待发送图片预览放在 composer 顶部，位于文本输入和工具栏之前，不要回退到输入区底部。
 - Bridge 转成 runtime content blocks 图片，不要把 base64 塞进 Markdown 文本。
 - 持久化展示历史时保留有限数量图片引用，避免无限膨胀。
 - `run_actions` 内截图默认外部化，避免 token 爆炸。
@@ -322,6 +391,7 @@ Assistant 消息使用 vendored `marked`：
 
 - `lib/marked.umd.js` 必须在 `chat-markdown.js` 之前加载。
 - `chat-markdown.js` 必须保留 sanitizer allowlist。
+- 悬浮 Chat 和 sidePanel 必须共用 `chat-markdown.js`，不能在 sidePanel 里退化成 HTML 转义加 `<br>` 的独立实现。
 - 允许段落、标题、列表、代码、表格、链接、引用、图片和基础强调。
 
 Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid` fenced code block，不要把 Mermaid 设为默认 Markdown 渲染。
@@ -347,7 +417,15 @@ Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid
 - `devtailor-bridge/src/ws-server.ts`：HTTP/SSE server、display sessions、element targets。
 - `devtailor-bridge/src/browser-action-router.ts`：Browser action request/response 路由。
 - `devtailor-bridge/src/agent-session.ts`：本地 agent session 边界。
+- `devtailor-bridge/src/real-agent-session.ts`：真实 AI runtime agent session，采用 cache-first 上下文管理策略（丢弃旧消息依赖 SessionMemory 摘要缓存），集成 SessionMemory 文件持久化、ContextBudgetTracker 预算监控和 overflow recovery。
 - `devtailor-bridge/src/local-agent-session.ts`：移除 ACP 后的过渡 runtime，已打通 AgentSession 到 browser tools 的调用链路。
+- `devtailor-bridge/src/session-memory.ts`：渐进式会话摘要缓存（cache-first 核心），支持 `.devtailor/session-memory.md` 文件持久化，跨重启恢复上下文。
+- `devtailor-bridge/src/runtime/micro-compaction.ts`：cache-aware 微压缩（热/温/冷三区），作为 cache-first 的辅助策略。
+- `devtailor-bridge/src/runtime/context-budget.ts`：多层上下文预算系统，触发缓存优先丢弃或压缩。
+- `devtailor-bridge/src/runtime/generate.ts`：核心 generate 循环，含上下文预算检查。
+- `devtailor-bridge/src/runtime/openai-compatible-provider.ts`：OpenAI 兼容 provider，含 `body_cache_control` cache_control 标记和 `routing_hint` 粘性路由 header。
+- `devtailor-bridge/src/runtime/provider.ts`：Provider 类型定义，含 `CacheStrategy` 五分类策略。
+- `devtailor-bridge/src/model-config.ts`：模型配置，含 `cacheStrategy` 字段。
 - `devtailor-bridge/src/session-store.ts`：SQLite 持久化和迁移。
 - `devtailor-bridge/src/prompt-builder.ts`：当前请求转 runtime content blocks。
 
