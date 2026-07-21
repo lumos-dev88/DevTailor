@@ -48,9 +48,20 @@ Bridge 通过 `AgentSession` + `BrowserToolRunner` + `WorkspaceToolRunner` 连�
 - Scream SDK 以 ESM bundle 形式在 `scream-code-main/runtime/node-sdk/dist/index.mjs` 就地载入，通过 CommonJS `import()` 动态导入（Node 22+ 支持从 CJS 模块动态 import ESM）。bridge `tsc` 构建和 `tsx` dev 运行均通过。
 - 配置映射：DevTailor `ModelConfig`（`baseUrl`, `apiKey`, `model`）→ Scream `ScreamConfigPatch`，provider type 设为 `'openai'`，provider 名称 `devtailor`，model alias `devtailor-model`，`maxContextSize` 默认 128000。
 - Scream home 作用域在 `{projectDir}/.devtailor/scream-home`，不污染用户的 `~/.scream` 目录。
-- Phase 1 限制：仅支持 text-only turn；`permission: 'yolo'` 自动批准所有工具；browser tools 忽略（Phase 2）；Scream 原生 workspace tools（bash/read/write/edit/grep）由 Scream 自身管理。
+- Phase 1 限制：仅支持 text-only turn；`permission: 'yolo'` 自动批准所有工具；Scream 原生 workspace tools（bash/read/write/edit/grep）由 Scream 自身管理。
 - 事件映射：`assistant.delta` → `onStream`，`thinking.delta` → `onThinking`，`tool.call.started` → `onToolCall`，`tool.progress` / `tool.result` → `onToolUpdate`，`turn.ended` → resolve/reject `sendReview` promise + `onDone`/`onError`，`session.meta.updated` → `onSessionInfoUpdate`。
 - 此 runtime 在同一 `AgentSession` 边界后面，不破坏现有 SSE、display session、cancel、queue 和 browser tool 路由逻辑。
+
+### Scream runtime（Phase 2：browser tools）
+
+Phase 2 让模型在 Scream turn 内调用 DevTailor 的 browser tools（`click_page`/`fill_text`/`get_page_snapshot` 等），并把调用路由回扩展。
+
+- Scream node-sdk 已 fork 扩展（改动仅限 `scream-code-main/runtime/node-sdk/src`，agent-core 未改）：`Session` 新增 `registerUserTool(decl)` / `unregisterUserTool(name)` / `setToolCallHandler(fn)`；`SDKRpcClient.toolCall` 的 stub 被替换为按 sessionId 分发的 handler map（镜像 `setApprovalHandler`/`requestApproval`）。改动后已重建 `runtime/node-sdk/dist/index.mjs`（bridge 就地导入的 bundle）。**修改 node-sdk 源码后必须重新 `pnpm --filter @scream-code/scream-code-sdk build`，否则 bridge 载入的 bundle 不会更新。**
+- `ScreamAgentSession.start()` 在 `createSession()` 之后，若构造参数带 `runBrowserTool`，则为 `createBrowserToolDefinitions()` 的每个定义调用 `registerUserTool`，再 `setToolCallHandler`。workspace tools 不注册（Scream 原生管理），`runWorkspaceTool` 仍忽略。
+- **toolCall 反向 RPC 不带 tool name**，只有 `toolCallId` + `args`。`ScreamAgentSession` 用实例字段 `toolNameById: Map<toolCallId, name>` 解决：在 `tool.call.started` 事件里写入映射（agent-core 保证该事件先于 `execute()`/toolCall handler 触发），在 `tool.result` 里清理。handler 用 `toolCallId` 反查 name，`isBrowserToolName` 校验后调用 `runBrowserTool(name, args)`。
+- 结果格式与 `RealAgentSession` 一致：`{ output: JSON.stringify(ok ? result ?? null : error ?? null), isError: !ok }`；未知 name 或 handler 抛错返回 `{ output: JSON.stringify({ error }), isError: true }`。
+- Phase 2 仍未做：截图等 image 类工具结果只按 JSON 字符串回传（不作为 image content part 供模型「看」）；approval/question 交互；history 迁移。
+- 防回归：Scream 的 browser tool call 与 `RealAgentSession` 共用同一个 `BrowserActionRouter` 出口，不要在 Scream 侧另起浏览器路由；不要给 Scream 注册 workspace tool 定义（会与原生工具重名冲突）。
 
 - 模型配置入口在扩展 popup 的「模型配置」区域，通过 Bridge `GET/POST /model-config` 读写当前项目 `.devtailor/sessions.db` 的 `settings.model_config`。配置完整时使用 `RealAgentSession` + `OpenAICompatibleProvider`（或 `ScreamAgentSession`，视 `DEVTAILOR_RUNTIME` 环境变量而定）。模型 browser tool call 会映射到 `BrowserActionRouter.run()`，再通过 SSE/HTTP 路由到当前已连接 tab；workspace tool call 会映射到 Bridge 进程内的 `WorkspaceToolService`（RealAgentSession）或 Scream 原生工具（ScreamAgentSession）。
 - `OpenAICompatibleProvider` 请求仍走 `/v1/chat/completions` 和 OpenAI-compatible body，但 HTTP headers 模拟 Claude Code 客户端：包含 `User-Agent: claude-code/2.1.195`、`anthropic-version: 2023-06-01`、`anthropic-beta: claude-code-20250219`、`x-api-key`，同时保留 `Authorization: Bearer ...` 以兼容 OpenAI 风格代理。

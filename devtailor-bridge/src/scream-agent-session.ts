@@ -1,14 +1,15 @@
 /**
  * ScreamAgentSession — AgentSession implementation backed by the Scream node-sdk.
  *
- * Phase 1 scope (text-only turns, native workspace tools):
+ * Capabilities:
  *   - Import the Scream ESM bundle in-process via dynamic import().
  *   - Map DevTailor ModelConfig → ScreamConfigPatch (openai-compatible provider).
  *   - Create a ScreamHarness scoped to {projectDir}/.devtailor/scream-home.
  *   - Create a Scream Session per AgentSession lifetime (permission: 'yolo').
  *   - Forward Scream events → AgentCallbacks.
- *   - BrowserToolRunner and WorkspaceToolRunner args are accepted and ignored —
- *     Scream handles workspace tools natively; browser tools come in Phase 2.
+ *   - When runBrowserTool is provided, registers browser tools with the Scream
+ *     session and routes model tool calls back to the extension via runBrowserTool.
+ *   - Scream handles workspace tools natively; runWorkspaceTool is ignored.
  */
 
 import { randomUUID } from 'crypto';
@@ -25,6 +26,7 @@ import { HistoryMessage } from './prompt-builder';
 import { ReviewPayload } from './types';
 import { WorkspaceToolRunner } from './workspace-tool-runner';
 import { ModelConfig, normalizeModelConfig } from './model-config';
+import { createBrowserToolDefinitions, isBrowserToolName } from './browser-tool-definitions';
 
 // ── Scream SDK types (loaded dynamically so CommonJS build works) ───────────
 
@@ -78,6 +80,9 @@ interface ScreamSession {
   cancel(): Promise<void>;
   onEvent(listener: (event: MinimalEvent) => void): Unsubscribe;
   close(opts?: { extractMemories?: boolean }): Promise<void>;
+  registerUserTool(tool: { name: string; description: string; parameters: Record<string, unknown> }): Promise<void>;
+  unregisterUserTool(name: string): Promise<void>;
+  setToolCallHandler(handler: (request: { turnId?: number; toolCallId: string; args: unknown }) => Promise<{ output: string | unknown[]; isError?: boolean }>): void;
 }
 
 interface ScreamHarness {
@@ -144,7 +149,7 @@ export interface ScreamAgentSessionOptions {
   modelConfig: ModelConfig;
   /** Project root directory — Scream home will be at {projectDir}/.devtailor/scream-home */
   projectDir: string;
-  /** Accepted for API compatibility; browser tools are Phase 2 — ignored here. */
+  /** When provided, browser tools are registered with the Scream session and routed to this runner. */
   runBrowserTool?: BrowserToolRunner;
   /** Accepted for API compatibility; Scream handles workspace tools natively. */
   runWorkspaceTool?: WorkspaceToolRunner;
@@ -160,6 +165,7 @@ export class ScreamAgentSession implements AgentSession {
   private harness: ScreamHarness | null = null;
   private screamSession: ScreamSession | null = null;
   private unsubscribeEvents: Unsubscribe | null = null;
+  private readonly toolNameById = new Map<string, string>();
 
   constructor(private readonly options: ScreamAgentSessionOptions) {}
 
@@ -187,6 +193,35 @@ export class ScreamAgentSession implements AgentSession {
         model: MODEL_ALIAS,
         permission: 'yolo',
       });
+
+      const runBrowserTool = this.options.runBrowserTool;
+      if (runBrowserTool) {
+        for (const def of createBrowserToolDefinitions()) {
+          await this.screamSession.registerUserTool(def);
+        }
+        this.screamSession.setToolCallHandler(async (request) => {
+          const name = this.toolNameById.get(request.toolCallId);
+          if (!name || !isBrowserToolName(name)) {
+            return {
+              output: JSON.stringify({ error: `Unknown tool: ${name ?? request.toolCallId}` }),
+              isError: true,
+            };
+          }
+          try {
+            const browserResult = await runBrowserTool(name, (request.args ?? {}) as Record<string, unknown>);
+            return {
+              output: JSON.stringify(browserResult.ok ? (browserResult.result ?? null) : (browserResult.error ?? null)),
+              isError: !browserResult.ok,
+            };
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              output: JSON.stringify({ error: message }),
+              isError: true,
+            };
+          }
+        });
+      }
 
       this.ready = true;
       this.starting = false;
@@ -334,6 +369,7 @@ export class ScreamAgentSession implements AgentSession {
         const toolCallId = String(event['toolCallId'] ?? '');
         const name = String(event['name'] ?? 'tool');
         const args = event['args'];
+        this.toolNameById.set(toolCallId, name);
         const info: ToolCallInfo = {
           toolCallId,
           title: name,
@@ -360,6 +396,7 @@ export class ScreamAgentSession implements AgentSession {
         const toolCallId = String(event['toolCallId'] ?? '');
         const isError = Boolean(event['isError']);
         const output = event['output'];
+        this.toolNameById.delete(toolCallId);
         const info: ToolUpdateInfo = {
           toolCallId,
           status: isError ? 'failed' : 'completed',

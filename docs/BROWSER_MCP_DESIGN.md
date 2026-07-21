@@ -214,6 +214,8 @@ content/modules/
   -> Bridge resolve MCP tool result
 ```
 
+> browser tool 出口（`BrowserActionRouter.run()` → SSE `browser_action` → 当前 tab）现有两个运行时消费者：`RealAgentSession`（OpenAI-compatible runtime，通过 `generate()` 的 `toolExecutor`）和 `ScreamAgentSession`（Scream runtime，通过 `Session.registerUserTool` + `setToolCallHandler`）。两者共用同一个 `BrowserActionRouter` 出口和同一份 `createBrowserToolDefinitions()` schema，不要为 Scream 另起浏览器路由。Scream 侧的 toolCall 反向 RPC 不带 tool name，靠 `tool.call.started` 事件建立的 `toolCallId → name` 映射反查。细节见 `docs/HANDOFF.md` 的「Scream runtime（Phase 2：browser tools）」。
+
 ### 当前 Tab 上下文
 
 Bridge 维护一个当前 browser context：
