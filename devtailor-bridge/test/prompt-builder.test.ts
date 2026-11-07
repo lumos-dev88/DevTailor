@@ -106,34 +106,10 @@ describe('prompt-builder', () => {
     assert.ok(text.includes('No additional description provided'));
   });
 
-  it('includes image block when screenshot is provided', () => {
-    const screenshot = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==';
-    const blocks = buildPrompt({ ...payload, screenshot });
-    assert.strictEqual(blocks.length, 2);
-    assert.strictEqual(blocks[1].type, 'image');
-    assert.strictEqual((blocks[1] as any).mimeType, 'image/jpeg');
-    assert.strictEqual((blocks[1] as any).data, '/9j/4AAQSkZJRgABAQ==');
-  });
-
-  it('includes png image block when screenshot is png', () => {
+  it('does not build image blocks', () => {
     const screenshot = 'data:image/png;base64,iVBORw0KGgo=';
-    const blocks = buildPrompt({ ...payload, screenshot });
-    assert.strictEqual(blocks.length, 2);
-    assert.strictEqual(blocks[1].type, 'image');
-    assert.strictEqual((blocks[1] as any).mimeType, 'image/png');
-    assert.strictEqual((blocks[1] as any).data, 'iVBORw0KGgo=');
-  });
-
-  it('includes one image block per screenshot', () => {
-    const screenshots = [
-      'data:image/png;base64,iVBORw0KGgo=',
-      'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==',
-    ];
-    const blocks = buildPrompt({ ...payload, screenshot: null, screenshots });
-    assert.strictEqual(blocks.length, 3);
-    assert.strictEqual(blocks[1].type, 'image');
-    assert.strictEqual(blocks[2].type, 'image');
-    assert.strictEqual((blocks[1] as any).mimeType, 'image/png');
-    assert.strictEqual((blocks[2] as any).mimeType, 'image/jpeg');
+    const blocks = buildPrompt({ ...payload, screenshot, screenshots: [screenshot] });
+    assert.strictEqual(blocks.length, 1);
+    assert.strictEqual(blocks[0].type, 'text');
   });
 });

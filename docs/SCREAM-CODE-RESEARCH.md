@@ -1,5 +1,7 @@
 # Scream Code 0.6.2 改造调研报告
 
+> **历史方案提示**：本文档基于 0.6.2，并以“移除 TUI、只保留 Web”为目标，不再代表当前“Web + TUI 共用后端”的合并方向。新的产品边界和验收标准见 [`SCREAM_DEVTAILOR_MERGED_USER_STORIES.md`](./SCREAM_DEVTAILOR_MERGED_USER_STORIES.md)。
+
 > **目标**：基于 scream-code 改造为纯后端 AI 引擎，去掉 TUI/Web 前端，由 DOM-Review 插件 UI 做交互层，去掉 ACP 协议，砍掉非必要功能。
 
 ---

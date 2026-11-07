@@ -7,27 +7,47 @@ import http, { IncomingMessage, ServerResponse } from 'http';
 import { createHash, randomUUID } from 'crypto';
 import { basename } from 'path';
 import { realpathSync } from 'fs';
-import { HistoryMessage } from './prompt-builder';
 import { WSMessage, ReviewPayload } from './types';
 import { BrowserActionRouter } from './browser-action-router';
+import { ApprovalRouter, ApprovalEvent } from './approval-router';
+import { QuestionRouter, QuestionEvent } from './question-router';
 import { BrowserActionEvent, BrowserActionName, BrowserActionResult } from './browser-action-types';
 import { SessionStore, StoredElementTarget } from './session-store';
-import { AgentSession, BrowserToolRunner } from './agent-session';
-import { LocalAgentSession } from './local-agent-session';
-import { WorkspaceToolRunner } from './workspace-tool-runner';
-import { ModelConfig, RuntimeConfig, normalizeModelConfig } from './model-config';
-import { OpenAICompatibleProvider } from './runtime';
-import { RealAgentSession } from './real-agent-session';
-import { ScreamAgentSession } from './scream-agent-session';
+import { AgentSession, BrowserToolRunner, STOP_REASON_PENDING } from './agent-session';
+import { PlaceholderAgentSession } from './placeholder-agent-session';
+import { log, logError } from './log';
 
-export type AgentSessionFactory = (
-  runner: BrowserToolRunner,
-  workspaceRunner: WorkspaceToolRunner,
-) => AgentSession;
+export type AgentSessionFactory = (runner: BrowserToolRunner) => AgentSession;
+
+/** Bumped when the extension <-> bridge HTTP/SSE contract changes incompatibly. */
+export const BRIDGE_PROTOCOL_VERSION = 1;
+
+/** Optional: pin the bridge to a single extension id (chrome-extension://<id>). */
+const EXTENSION_ID_ENV = 'DEVTAILOR_EXTENSION_ID';
+
+/** Lower-case header name the extension service worker sends (value: chrome.runtime.id). */
+export const EXTENSION_CLIENT_HEADER = 'x-devtailor-client';
 
 interface Client {
   id: string;
   res: ServerResponse;
+}
+
+/** State of the review turn currently being displayed for a client. */
+interface ActiveTurn {
+  canceled: boolean;
+  summary?: string;
+  /** An error was already reported to the UI for this turn. */
+  errored: boolean;
+  /** Settles when the agent reports done/error (async sessions) or the turn is canceled. */
+  completion: Promise<void>;
+  complete: () => void;
+}
+
+function createActiveTurn(): ActiveTurn {
+  let complete!: () => void;
+  const completion = new Promise<void>(resolve => { complete = resolve; });
+  return { canceled: false, errored: false, completion, complete };
 }
 
 interface PendingReview {
@@ -62,7 +82,12 @@ type ReviewSessionStart = {
 
 export class WSServer {
   private static readonly PROJECT_SESSION_SCOPE = 'project';
-  private static readonly CANCEL_FORCE_STOP_MS = 5000;
+  /**
+   * How long an active client may be offline before it loses browser-tool
+   * ownership. Covers page refreshes / service worker restarts, where the
+   * same clientId reconnects within moments. Mutable for tests.
+   */
+  static activeClientGraceMs = 3000;
   /** Maximum number of queued reviews per client. Beyond this limit, new reviews are rejected with 429. */
   private static readonly MAX_REVIEW_QUEUE_DEPTH = 10;
   private server: http.Server | null = null;
@@ -74,33 +99,32 @@ export class WSServer {
   private queues = new Map<string, PendingReview[]>();
   private processing = new Set<string>();
   private processingDisplaySessions = new Map<string, string>();
-  private pendingCancels = new Set<string>();
-  private forcedCancels = new Set<string>();
+  /** Per-client state of the review turn currently being displayed. */
+  private activeTurns = new Map<string, ActiveTurn>();
+  /** Origin accepted by the request guard, used to echo CORS headers. */
+  private allowedOrigins = new WeakMap<ServerResponse, string>();
   private lastActive = new Map<string, number>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
+  private releaseTimers = new Set<NodeJS.Timeout>();
   private projectInfo: { projectId: string; projectName: string; bridgeInstanceId: string; agentKey: string; agentLabel: string };
   private browserRouter: BrowserActionRouter;
+  private approvalRouter: ApprovalRouter;
+  private questionRouter: QuestionRouter;
   private store: SessionStore | null = null;
   private readonly idleTimeoutMs = 4 * 60 * 60 * 1000;
-  private readonly defaultRuntime: RuntimeConfig;
 
   constructor(
     private port: number,
     private cwd: string,
     private dataDir?: string,
-    agentKey = 'local',
-    agentLabel = 'Local Agent Runtime',
-    createAgentSession: AgentSessionFactory = runner => new LocalAgentSession(runner),
-    private runWorkspaceTool: WorkspaceToolRunner = async () => ({
-      ok: false,
-      error: { code: 'WORKSPACE_TOOLS_DISABLED', message: 'Workspace tools are not enabled.' },
-    }),
+    agentKey = 'claude',
+    agentLabel = 'Claude Code',
+    createAgentSession: AgentSessionFactory = () => new PlaceholderAgentSession(),
   ) {
     this.agentKey = agentKey;
     this.agentLabel = agentLabel;
     this.createAgentSession = createAgentSession;
-    this.defaultRuntime = { key: agentKey, label: agentLabel, createSession: createAgentSession };
     const realDir = realpathSync(cwd);
     this.projectInfo = {
       projectId: createHash('sha256').update(realDir).digest('hex').slice(0, 12),
@@ -111,6 +135,16 @@ export class WSServer {
     };
     this.browserRouter = new BrowserActionRouter((clientId, event) => this.sendBrowserAction(clientId, event));
     this.browserRouter.setLocalHandler((action, params) => this.handleLocalBrowserAction(action, params));
+    this.approvalRouter = new ApprovalRouter(
+      (clientId, event) => this.sendApproval(clientId, event),
+      (event) => this.broadcastApproval(event),
+      () => this.browserRouter.activeClientId,
+    );
+    this.questionRouter = new QuestionRouter(
+      (clientId, event) => this.sendQuestion(clientId, event),
+      (event) => this.broadcastQuestion(event),
+      () => this.browserRouter.activeClientId,
+    );
   }
 
   private agentKey: string;
@@ -121,98 +155,7 @@ export class WSServer {
   async init(): Promise<void> {
     if (!this.dataDir) return;
     this.store = await SessionStore.create(this.dataDir);
-    this.applyStoredModelConfig();
     this.loadPersistedSessions();
-  }
-
-  private applyStoredModelConfig(): void {
-    const stored = this.store?.getModelConfig() || this.envModelConfig();
-    if (stored && !this.store?.getModelConfig()) {
-      this.store?.saveModelConfig(stored);
-      this.store?.flush();
-    }
-    if (!stored) return;
-    this.applyRuntimeConfig(this.runtimeFromModelConfig(stored));
-  }
-
-  private envModelConfig(): ModelConfig | null {
-    const baseUrl = process.env.OPENAI_BASE_URL || '';
-    const apiKey = process.env.OPENAI_API_KEY || '';
-    const model = process.env.OPENAI_MODEL || process.env.DEVTAILOR_MODEL || '';
-    if (!baseUrl || !apiKey || !model) return null;
-    return normalizeModelConfig({
-      provider: 'openai-compatible',
-      enabled: true,
-      baseUrl,
-      apiKey,
-      model,
-      maxSteps: Number(process.env.DEVTAILOR_MAX_STEPS) || null,
-      updatedAt: Date.now(),
-    });
-  }
-
-  private runtimeFromModelConfig(config: ModelConfig): RuntimeConfig {
-    const normalized = normalizeModelConfig(config);
-    if (normalized.enabled && normalized.baseUrl && normalized.apiKey && normalized.model) {
-      return {
-        key: `openai-compatible:${normalized.model}`,
-        label: `OpenAI Compatible (${normalized.model})`,
-        createSession: this.createConfiguredSessionFactory(normalized),
-      };
-    }
-    return this.defaultRuntime;
-  }
-
-  private createConfiguredSessionFactory(_config: ModelConfig): AgentSessionFactory {
-    const config = normalizeModelConfig(_config);
-    const bridgeInstanceId = this.projectInfo.bridgeInstanceId;
-    const cwd = this.cwd;
-
-    // DEVTAILOR_RUNTIME=scream  → use ScreamAgentSession (new Scream-backed runtime)
-    // DEVTAILOR_RUNTIME=<other> or unset → use RealAgentSession (legacy OpenAI-compatible runtime)
-    const useScream = (process.env.DEVTAILOR_RUNTIME ?? 'scream') === 'scream';
-
-    if (useScream) {
-      return (runBrowserTool, runWorkspaceTool) => new ScreamAgentSession({
-        modelConfig: config,
-        projectDir: cwd,
-        runBrowserTool,
-        runWorkspaceTool,
-      });
-    }
-
-    return (runBrowserTool, runWorkspaceTool) => new RealAgentSession({
-      provider: new OpenAICompatibleProvider({
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        model: config.model,
-        cacheStrategy: config.cacheStrategy,
-        sessionId: bridgeInstanceId,
-      }),
-      runBrowserTool,
-      runWorkspaceTool,
-      maxSteps: config.maxSteps,
-      projectDir: cwd,
-    });
-  }
-
-  private applyRuntimeConfig(runtime: RuntimeConfig): void {
-    const previousActiveDisplayId = this.activeDisplaySessionId;
-    this.agentKey = runtime.key;
-    this.agentLabel = runtime.label;
-    this.createAgentSession = runtime.createSession || (runner => new LocalAgentSession(runner));
-    this.projectInfo.agentKey = this.agentKey;
-    this.projectInfo.agentLabel = this.agentLabel;
-    const previousActiveDisplay = previousActiveDisplayId
-      ? this.displaySessions.get(previousActiveDisplayId)
-      : null;
-    if (previousActiveDisplay?.agentKey === this.agentKey) {
-      this.activeDisplaySessionId = previousActiveDisplay.id;
-      return;
-    }
-    this.activeDisplaySessionId = [...this.displaySessions.values()]
-      .filter(session => session.agentKey === this.agentKey)
-      .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id || null;
   }
 
   /** Restore sessions from SQLite into memory on startup */
@@ -237,27 +180,45 @@ export class WSServer {
     for (const target of this.store.listElementTargets()) {
       this.elementTargets.set(target.id, target);
     }
-    console.log(`[Store] Restored ${this.displaySessions.size} session(s) from SQLite`);
+    log(`[Store] Restored ${this.displaySessions.size} session(s) from SQLite`);
   }
 
-  start(): void {
-    this.server = http.createServer((req, res) => {
+  /** Resolves once listening; rejects if binding fails (e.g. EADDRINUSE). */
+  start(): Promise<void> {
+    const server = http.createServer((req, res) => {
       this.handleRequest(req, res);
     });
+    this.server = server;
 
-    this.server.on('error', (err) => {
-      console.error('[SSE] Server error:', err.message);
+    const listening = new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      // Loopback only: never expose the bridge on other interfaces.
+      server.listen(this.port, '127.0.0.1', () => {
+        server.off('error', reject);
+        log(`[SSE] Server listening on http://127.0.0.1:${this.port}`);
+        resolve();
+      });
     });
-
-    this.server.listen(this.port, () => {
-      console.log(`[SSE] Server listening on http://localhost:${this.port}`);
+    // Keep logging runtime errors after startup; startup errors are surfaced via the promise.
+    server.on('error', (err) => {
+      logError('[SSE] Server error:', err.message);
     });
+    listening.catch(() => {});
 
     this.startHeartbeat();
     this.startIdleCleanup();
+    return listening;
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url || '/', `http://127.0.0.1:${this.port}`);
+    const guard = this.guardRequest(req, url);
+    if (!guard.allowed) {
+      this.rejectRequest(req, res, url, guard.reason);
+      return;
+    }
+    if (guard.origin) this.allowedOrigins.set(res, guard.origin);
+    res.setHeader('Vary', 'Origin');
     this.setCorsHeaders(res);
 
     if (req.method === 'OPTIONS') {
@@ -265,8 +226,6 @@ export class WSServer {
       res.end();
       return;
     }
-
-    const url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${this.port}`}`);
 
     if (req.method === 'GET' && url.pathname === '/events') {
       this.handleEvents(url, req, res);
@@ -288,38 +247,19 @@ export class WSServer {
       return;
     }
 
-    if (req.method === 'POST' && url.pathname === '/browser-tool') {
-      await this.handleBrowserTool(req, res);
+    if (req.method === 'POST' && url.pathname === '/approval-decision') {
+      await this.handleApprovalDecision(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/question-answer') {
+      await this.handleQuestionAnswer(req, res);
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      const activeDisplay = this.currentDisplaySession();
-      const clientId = url.searchParams.get('clientId') || '';
-      const activeSessionId = activeDisplay?.id || null;
-      this.sendJson(res, 200, {
-        ok: true,
-        ...this.projectInfo,
-        pid: process.pid,
-        activeClientId: this.browserRouter.activeClientId,
-        activeSessionId,
-        activeSessionTitle: activeDisplay?.title || null,
-        agentSessionId: this.activeAgentSessionId(),
-        isProcessing: clientId ? this.isClientProcessingSession(clientId, activeSessionId) : false,
-        processingSessionId: clientId ? this.processingDisplaySessions.get(clientId) || null : null,
-      });
+      this.handleHealth(url, res, guard.trusted);
       return;
-    }
-
-    if (url.pathname === '/model-config') {
-      if (req.method === 'GET') {
-        this.handleModelConfigGet(res);
-        return;
-      }
-      if (req.method === 'POST') {
-        await this.handleModelConfigSave(req, res);
-        return;
-      }
     }
 
     if (req.method === 'POST' && url.pathname === '/new-session') {
@@ -379,7 +319,6 @@ export class WSServer {
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-      'Access-Control-Allow-Origin': '*',
     });
     res.write(': connected\n\n');
 
@@ -388,7 +327,7 @@ export class WSServer {
 
     this.clients.set(clientId, { id: clientId, res });
     this.touch(clientId);
-    console.log(`[SSE] Client connected: ${clientId}`);
+    log(`[SSE] Client connected: ${clientId}`);
     const activeDisplay = this.currentDisplaySession();
     this.send(clientId, {
       type: 'connected',
@@ -405,9 +344,28 @@ export class WSServer {
       if (current?.res === res) {
         this.clients.delete(clientId);
         this.broadcastActiveClient();
-        console.log(`[SSE] Client disconnected: ${clientId}`);
+        log(`[SSE] Client disconnected: ${clientId}`);
+        this.scheduleActiveClientRelease(clientId);
       }
     });
+  }
+
+  /**
+   * Never keep routing browser actions to a client whose stream is gone. A short
+   * grace period lets a refreshed page reconnect and keep ownership.
+   */
+  private scheduleActiveClientRelease(clientId: string): void {
+    if (this.browserRouter.activeClientId !== clientId) return;
+    const timer = setTimeout(() => {
+      this.releaseTimers.delete(timer);
+      if (this.clients.has(clientId)) return;
+      if (this.browserRouter.activeClientId !== clientId) return;
+      this.browserRouter.deactivate(clientId);
+      this.broadcastActiveClient();
+      log(`[SSE] Active client released after disconnect: ${clientId}`);
+    }, WSServer.activeClientGraceMs);
+    timer.unref();
+    this.releaseTimers.add(timer);
   }
 
   private async handleReviewPost(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -461,6 +419,9 @@ export class WSServer {
       this.touch(clientId);
       this.browserRouter.activate(clientId, this.projectInfo.projectId, this.activeAgentSessionId());
       this.broadcastActiveClient();
+      // A newly active client is the turn-owner UI; recover any in-flight approvals/questions.
+      this.approvalRouter.resendPending(clientId);
+      this.questionRouter.resendPending(clientId);
       const activeDisplay = this.currentDisplaySession();
       this.sendJson(res, 200, {
         ok: true,
@@ -513,8 +474,7 @@ export class WSServer {
       }
     } finally {
       this.processingDisplaySessions.delete(clientId);
-      this.pendingCancels.delete(clientId);
-      this.forcedCancels.delete(clientId);
+      this.activeTurns.delete(clientId);
       this.processing.delete(clientId);
       const activeDisplay = this.currentDisplaySession();
       if (activeDisplay) {
@@ -536,54 +496,59 @@ export class WSServer {
       : this.getOrCreateDisplaySession();
     const session = this.getOrCreateSession(display.id, display.agentSessionId);
     const userMessage = this.appendUserMessage(display, payload);
+    const turn = createActiveTurn();
+    this.activeTurns.set(clientId, turn);
     this.sendRuntimeEvent(clientId, {
       type: 'display_message',
       tabId: clientId,
       sessionId: display.id,
       displayMessage: userMessage,
     });
-    this.attachSessionCallbacks(clientId, display, session);
+    this.attachSessionCallbacks(clientId, display, session, turn);
 
-    let startResult: ReviewSessionStart;
     try {
-      startResult = await this.startReviewSession(clientId, display, session);
+      await this.startReviewSession(clientId, display, session);
     } catch (err: any) {
-      console.error('[SSE] Failed to start session:', err.message);
-      this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: `Session start failed: ${err.message}` } as any);
+      logError('[SSE] Failed to start session:', err.message);
+      if (!turn.canceled) {
+        turn.errored = true;
+        this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: `Session start failed: ${err.message}` } as any);
+      }
       session.stop();
       this.sessions.delete(display.id);
       return;
     }
 
-    if (this.consumePendingCancel(clientId, display)) return;
+    if (turn.canceled) return;
 
     try {
-      const history = this.historyForPrompt(display, startResult.mode);
-      const stopReason = await session.sendReview(payload, history);
-      const wasCanceled = this.pendingCancels.delete(clientId) || this.forcedCancels.delete(clientId) || stopReason === 'cancelled';
-      if (stopReason === 'error') {
-        return;
+      let stopReason = await session.sendReview(payload, { clientId, displaySessionId: display.id });
+      // /cancel already told the UI the turn is over; late results are dropped.
+      if (turn.canceled) return;
+      if (stopReason === STOP_REASON_PENDING) {
+        // Async agent (Claude Code channel): the turn stays open until the
+        // agent calls onDone/onError, or the user cancels. The queue stays serial.
+        await turn.completion;
+        if (turn.canceled || turn.errored) return;
+        stopReason = 'end_turn';
       }
+      if (stopReason === 'error') return;
+      this.closeActiveThinking(display);
+      // The single place a normal `done` is emitted for a turn.
       this.sendRuntimeEvent(clientId, {
         type: 'done',
         tabId: clientId,
         sessionId: display.id,
-        summary: wasCanceled ? 'Cancelled' : 'Done',
-        reason: wasCanceled ? 'cancelled' : stopReason,
+        summary: stopReason === 'cancelled' ? 'Cancelled' : (turn.summary || 'Done'),
+        reason: stopReason,
       } as any);
     } catch (err: any) {
-      if (this.pendingCancels.delete(clientId) || this.forcedCancels.delete(clientId)) {
-        this.sendRuntimeEvent(clientId, {
-          type: 'done',
-          tabId: clientId,
-          sessionId: display.id,
-          summary: 'Cancelled',
-          reason: 'cancelled',
-        } as any);
-        return;
+      if (turn.canceled) return;
+      logError('[SSE] Failed to send review:', err.message);
+      // The session may already have reported this failure through onError.
+      if (!turn.errored) {
+        this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: err.message } as any);
       }
-      console.error('[SSE] Failed to send review:', err.message);
-      this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message: err.message } as any);
       session.stop();
       this.sessions.delete(display.id);
     }
@@ -598,7 +563,6 @@ export class WSServer {
       if (session) session.stop();
       session = this.createAgentSession(
         (action, params = {}) => this.browserRouter.run(action, params),
-        this.runWorkspaceTool,
       );
       this.sessions.set(displaySessionId, session);
     }
@@ -610,12 +574,7 @@ export class WSServer {
     display: DisplaySession,
     session: AgentSession,
   ): Promise<ReviewSessionStart> {
-    let result: { sessionId: string | null; mode: 'reused' | 'created' | 'resumed' };
-    try {
-      result = await session.start();
-    } catch (startErr: any) {
-      throw startErr;
-    }
+    const result = await session.start();
     const sid = result.sessionId || session.currentSessionId;
     if (sid) {
       display.agentSessionId = sid;
@@ -635,57 +594,55 @@ export class WSServer {
     return { sessionId: sid || null, mode: result.mode };
   }
 
-  private consumePendingCancel(clientId: string, display: DisplaySession): boolean {
-    if (!this.pendingCancels.delete(clientId)) return false;
-    this.closeActiveThinking(display);
-    this.sendRuntimeEvent(clientId, {
-      type: 'done',
-      tabId: clientId,
-      sessionId: display.id,
-      summary: 'Cancelled',
-      reason: 'cancelled',
-    } as any);
-    return true;
-  }
-
   private isClientProcessingSession(clientId: string, displaySessionId: string | null): boolean {
     if (!displaySessionId || !this.processing.has(clientId)) return false;
     return (this.processingDisplaySessions.get(clientId) || this.activeDisplaySessionId) === displaySessionId;
-  }
-
-  private historyForPrompt(display: DisplaySession, startMode: ReviewSessionStart['mode']): HistoryMessage[] | undefined {
-    if (startMode !== 'created') return undefined;
-    return display.messages
-      .slice(0, -1)
-      .map(m => ({ role: m.role, type: m.type, content: m.content }));
   }
 
   private attachSessionCallbacks(
     clientId: string,
     display: DisplaySession,
     session: AgentSession,
+    turn: ActiveTurn,
   ): void {
+    // After /cancel the UI has already received `done`; drop anything the agent still emits.
     session.setCallbacks({
       onStream: (delta) => {
+        if (turn.canceled) return;
         this.appendAssistantDelta(display, delta);
         this.sendRuntimeEvent(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta } as any);
       },
+      onNotice: (text) => {
+        // Live-only hint: sent as a stream event but never stored in the display history.
+        if (turn.canceled) return;
+        this.sendRuntimeEvent(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta: text } as any);
+      },
       onThinking: (delta) => {
+        if (turn.canceled) return;
         this.appendThinkingDelta(display, delta);
         this.sendRuntimeEvent(clientId, { type: 'thinking', tabId: clientId, sessionId: display.id, delta } as any);
       },
       onDone: (summary) => {
+        // `done` is emitted once by handleReview (after sendReview settles, or
+        // after the async completion this call resolves).
+        if (turn.canceled) return;
         this.closeActiveThinking(display);
-        this.sendRuntimeEvent(clientId, { type: 'done', tabId: clientId, sessionId: display.id, summary } as any);
+        if (summary) turn.summary = summary;
+        turn.complete();
       },
       onError: (message) => {
+        if (turn.canceled) return;
         this.closeActiveThinking(display);
+        turn.errored = true;
         this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message } as any);
+        turn.complete();
       },
       onSessionInfoUpdate: (info) => {
+        if (turn.canceled) return;
         this.updateDisplaySessionInfo(clientId, display, info);
       },
       onToolCall: (tool) => {
+        if (turn.canceled) return;
         this.addToolDisplayMessage(display, tool);
         this.sendRuntimeEvent(clientId, {
           type: 'tool_call',
@@ -700,6 +657,7 @@ export class WSServer {
         } as any);
       },
       onToolUpdate: (update) => {
+        if (turn.canceled) return;
         this.updateToolDisplayMessage(display, update);
         this.sendRuntimeEvent(clientId, {
           type: 'tool_update',
@@ -714,6 +672,23 @@ export class WSServer {
           toolLocations: update.locations ?? undefined,
           toolContent: update.content,
         } as any);
+      },
+      onApprovalRequest: async (request) => {
+        const result = await this.approvalRouter.request({
+          toolCallId: request.toolCallId,
+          toolName: request.toolName,
+          action: request.action,
+          risk: request.risk,
+          detail: request.detail,
+        });
+        return { decision: result.decision, feedback: result.feedback };
+      },
+      onQuestionRequest: async (request) => {
+        return this.questionRouter.request({
+          toolCallId: request.toolCallId,
+          turnId: request.turnId,
+          questions: request.questions,
+        });
       },
     });
   }
@@ -927,59 +902,6 @@ export class WSServer {
     };
   }
 
-  private publicModelConfig(config: ModelConfig | null): Record<string, unknown> {
-    const normalized = normalizeModelConfig(config || {});
-    return {
-      provider: normalized.provider,
-      enabled: normalized.enabled,
-      baseUrl: normalized.baseUrl,
-      model: normalized.model,
-      maxSteps: normalized.maxSteps,
-      hasApiKey: Boolean(normalized.apiKey),
-      updatedAt: normalized.updatedAt ? new Date(normalized.updatedAt).toISOString() : null,
-      activeAgentKey: this.agentKey,
-      activeAgentLabel: this.agentLabel,
-    };
-  }
-
-  private handleModelConfigGet(res: ServerResponse): void {
-    this.sendJson(res, 200, {
-      ok: true,
-      config: this.publicModelConfig(this.store?.getModelConfig() || null),
-    });
-  }
-
-  private async handleModelConfigSave(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      if ([...this.processing.values()].some(Boolean)) {
-        this.sendJson(res, 409, { ok: false, error: 'Cannot change model config while a request is running' });
-        return;
-      }
-      const body = await this.readJson(req) as Partial<ModelConfig> & { keepApiKey?: boolean };
-      const previous = this.store?.getModelConfig() || null;
-      const next = normalizeModelConfig({
-        ...body,
-        apiKey: body.keepApiKey ? (previous?.apiKey || '') : body.apiKey,
-        updatedAt: Date.now(),
-      });
-      this.store?.saveModelConfig(next);
-      this.store?.flush();
-      this.applyRuntimeConfig(this.runtimeFromModelConfig(next));
-      for (const session of this.sessions.values()) {
-        session.stop();
-      }
-      this.sessions.clear();
-      this.sendJson(res, 200, {
-        ok: true,
-        config: this.publicModelConfig(next),
-        agentKey: this.agentKey,
-        agentLabel: this.agentLabel,
-      });
-    } catch (err: any) {
-      this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid model config payload' });
-    }
-  }
-
   private async handleNewSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const msg = await this.readJson(req) as { clientId?: string; tabId?: string };
@@ -998,7 +920,7 @@ export class WSServer {
       this.sendJson(res, 200, { ok: true, reset: true, reused, sessionId: display.id, sessionTitle: display.title });
       this.send(clientId, { type: 'session_reset', tabId: clientId, reason: 'user_requested', sessionId: display.id });
       this.send(clientId, { type: 'session_info', tabId: clientId, sessionId: display.id, sessionTitle: display.title });
-      console.log(`[SSE] ${reused ? 'Reused empty' : 'New'} display session for ${clientId}: ${display.id}`);
+      log(`[SSE] ${reused ? 'Reused empty' : 'New'} display session for ${clientId}: ${display.id}`);
     } catch (err: any) {
       this.sendJson(res, 400, { error: err.message || 'Invalid request' });
     }
@@ -1189,7 +1111,7 @@ export class WSServer {
       this.store?.flush();
       this.sendJson(res, 200, { ok: true, deleted: id });
     } catch (err: any) {
-      console.error('[WSServer] handleElementTargetDelete failed:', err);
+      logError('[WSServer] handleElementTargetDelete failed:', err);
       this.sendJson(res, 500, { ok: false, error: err.message || 'Delete failed' });
     }
   }
@@ -1272,50 +1194,48 @@ export class WSServer {
     }
   }
 
+  /**
+   * Cancels the displayed turn: the UI gets `tool_status canceled` + `done`,
+   * late agent output for the turn is dropped and the queue is cleared. The
+   * agent session is NOT stopped; it is asked to cancel (for Claude Code this
+   * pushes a `kind=cancel` channel notification).
+   */
   private async handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const msg = await this.readJson(req) as { clientId?: string; tabId?: string };
       const clientId = msg.clientId || msg.tabId || 'default';
       const displayId = this.processingDisplaySessions.get(clientId) || this.activeDisplaySessionId;
-      const session = displayId ? this.sessions.get(displayId) : null;
       const queue = this.queues.get(clientId);
       if (queue) queue.length = 0;
       this.queues.delete(clientId);
 
-      if (!session || !this.processing.has(clientId)) {
+      const turn = this.activeTurns.get(clientId);
+      if (!turn || turn.canceled || !this.processing.has(clientId)) {
         this.sendJson(res, 200, { ok: true, canceled: false, reason: 'not_running' });
         return;
       }
 
-      const canceled = await session.cancelCurrentTurn();
-      if (!canceled && this.processing.has(clientId)) {
-        this.pendingCancels.add(clientId);
-        this.sendJson(res, 200, { ok: true, canceled: true, pending: true });
-        return;
-      }
-      this.pendingCancels.add(clientId);
-      this.scheduleForcedCancel(clientId, displayId, session);
-      this.sendJson(res, 200, { ok: true, canceled });
-      if (canceled) {
-        this.send(clientId, { type: 'tool_status', tabId: clientId, sessionId: displayId, toolStatus: 'canceled' } as any);
-      }
+      turn.canceled = true;
+      turn.complete();
+      const display = displayId ? this.displaySessions.get(displayId) : null;
+      if (display) this.closeActiveThinking(display);
+      // Tell the agent (Claude Code gets a kind=cancel channel notification).
+      const agentSession = displayId ? this.sessions.get(displayId) : undefined;
+      agentSession?.cancelCurrentTurn().catch(err => {
+        logError('[SSE] cancelCurrentTurn failed:', err?.message || err);
+      });
+      this.sendJson(res, 200, { ok: true, canceled: true });
+      this.send(clientId, { type: 'tool_status', tabId: clientId, sessionId: displayId, toolStatus: 'canceled' } as any);
+      this.sendRuntimeEvent(clientId, {
+        type: 'done',
+        tabId: clientId,
+        sessionId: displayId || undefined,
+        summary: 'Cancelled',
+        reason: 'cancelled',
+      } as any);
     } catch (err: any) {
       this.sendJson(res, 400, { error: err.message || 'Invalid request' });
     }
-  }
-
-  private scheduleForcedCancel(clientId: string, displayId: string | null, session: AgentSession): void {
-    if (!displayId) return;
-    setTimeout(() => {
-      if (!this.processing.has(clientId)) return;
-      if (this.processingDisplaySessions.get(clientId) !== displayId) return;
-      // 如果该 displaySession 已经被新 session 覆盖，不要误杀新 session
-      const currentSession = this.sessions.get(displayId);
-      if (currentSession !== session) return;
-      this.forcedCancels.add(clientId);
-      session.stop();
-      this.sessions.delete(displayId);
-    }, WSServer.CANCEL_FORCE_STOP_MS);
   }
 
   private async handleBrowserActionResult(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1329,22 +1249,6 @@ export class WSServer {
       this.sendJson(res, accepted ? 200 : 404, { ok: accepted });
     } catch (err: any) {
       this.sendJson(res, 400, { error: err.message || 'Invalid browser action result' });
-    }
-  }
-
-  private async handleBrowserTool(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const body = await this.readJson(req) as { action?: string; name?: string; params?: Record<string, unknown>; args?: Record<string, unknown> };
-      const action = String(body.action || body.name || '').trim() as BrowserActionName;
-      if (!isBrowserActionName(action)) {
-        this.sendJson(res, 400, { ok: false, error: `Unknown browser action: ${action || '(missing)'}` });
-        return;
-      }
-      const params = isRecord(body.params) ? body.params : isRecord(body.args) ? body.args : {};
-      const result = await this.browserRouter.run(action, params);
-      this.sendJson(res, result.ok ? 200 : 502, result);
-    } catch (err: any) {
-      this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid browser tool request' });
     }
   }
 
@@ -1374,6 +1278,77 @@ export class WSServer {
     if (!client || client.res.destroyed) return false;
     client.res.write(`data: ${JSON.stringify(event)}\n\n`);
     return true;
+  }
+
+  private sendApproval(clientId: string, event: ApprovalEvent): boolean {
+    const client = this.clients.get(clientId);
+    if (!client || client.res.destroyed) return false;
+    client.res.write(`data: ${JSON.stringify(event)}\n\n`);
+    return true;
+  }
+
+  private broadcastApproval(event: ApprovalEvent): void {
+    for (const clientId of this.clients.keys()) {
+      this.sendApproval(clientId, event);
+    }
+  }
+
+  private async handleApprovalDecision(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = await this.readJson(req) as {
+        approvalId?: string;
+        decision?: string;
+        feedback?: string;
+      };
+      const approvalId = typeof body.approvalId === 'string' ? body.approvalId : '';
+      const decision = body.decision === 'approved' ? 'approved'
+        : body.decision === 'rejected' ? 'rejected'
+        : null;
+      if (!approvalId || !decision) {
+        this.sendJson(res, 400, { ok: false, error: 'Missing approvalId or decision' });
+        return;
+      }
+      const accepted = this.approvalRouter.receiveDecision({
+        approvalId,
+        decision,
+        feedback: typeof body.feedback === 'string' ? body.feedback : undefined,
+      });
+      this.sendJson(res, accepted ? 200 : 409, { ok: accepted });
+    } catch (err: any) {
+      this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid approval decision' });
+    }
+  }
+
+  private sendQuestion(clientId: string, event: QuestionEvent): boolean {
+    const client = this.clients.get(clientId);
+    if (!client || client.res.destroyed) return false;
+    client.res.write(`data: ${JSON.stringify(event)}\n\n`);
+    return true;
+  }
+
+  private broadcastQuestion(event: QuestionEvent): void {
+    for (const clientId of this.clients.keys()) {
+      this.sendQuestion(clientId, event);
+    }
+  }
+
+  private async handleQuestionAnswer(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = await this.readJson(req) as {
+        questionId?: string;
+        answers?: Record<string, string | true> | null;
+      };
+      const questionId = typeof body.questionId === 'string' ? body.questionId : '';
+      if (!questionId) {
+        this.sendJson(res, 400, { ok: false, error: 'Missing questionId' });
+        return;
+      }
+      const answers = body.answers && typeof body.answers === 'object' ? body.answers : null;
+      const accepted = this.questionRouter.receiveAnswer({ questionId, answers });
+      this.sendJson(res, accepted ? 200 : 409, { ok: accepted });
+    } catch (err: any) {
+      this.sendJson(res, 400, { ok: false, error: err.message || 'Invalid question answer' });
+    }
   }
 
   private broadcastActiveClient(): void {
@@ -1412,9 +1387,109 @@ export class WSServer {
   }
 
   private setCorsHeaders(res: ServerResponse): void {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const origin = this.allowedOrigins.get(res);
+    if (!origin) return;
+    res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-DevTailor-Client');
+  }
+
+  /**
+   * Request guard, runs before routing.
+   * - Host must be the loopback address with our port (anti DNS rebinding).
+   * - Everything except GET /health requires an `Origin` of an extension
+   *   (`chrome-extension://<id>`, optionally pinned via DEVTAILOR_EXTENSION_ID).
+   *   Web pages cannot forge this Origin; requests without Origin are refused.
+   */
+  private guardRequest(
+    req: IncomingMessage,
+    url: URL,
+  ): { allowed: true; origin: string | null; trusted: boolean } | { allowed: false; reason: string } {
+    const host = String(req.headers.host || '').toLowerCase();
+    if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
+      return { allowed: false, reason: 'bad_host' };
+    }
+
+    const rawOrigin = req.headers.origin;
+    const origin = typeof rawOrigin === 'string' ? rawOrigin : null;
+    const isHealth = url.pathname === '/health' && (req.method === 'GET' || req.method === 'OPTIONS');
+
+    if (!origin) {
+      // Verified in real Chrome (scripts/e2e-extension.mjs): extension service-worker
+      // GET requests to a host-permitted URL carry NO Origin header, exactly like a
+      // page's no-cors GET. The extension therefore marks its requests with a custom
+      // header. A web page cannot send a custom header without a CORS preflight
+      // (OPTIONS carries the page's Origin and is refused below), and no-cors requests
+      // cannot carry custom headers, so only extension code can produce this request.
+      const clientError = this.validateExtensionClientHeader(req.headers[EXTENSION_CLIENT_HEADER]);
+      if (!clientError) return { allowed: true, origin: null, trusted: true };
+      return isHealth ? { allowed: true, origin: null, trusted: false } : { allowed: false, reason: 'missing_origin' };
+    }
+    const originError = this.validateExtensionOrigin(origin);
+    if (originError) {
+      // /health stays reachable for liveness checks, but without CORS access or details.
+      return isHealth ? { allowed: true, origin: null, trusted: false } : { allowed: false, reason: originError };
+    }
+    return { allowed: true, origin, trusted: true };
+  }
+
+  /** Header value is the extension id (`chrome.runtime.id`); DEVTAILOR_EXTENSION_ID pins it. */
+  private validateExtensionClientHeader(value: string | string[] | undefined): string | null {
+    if (typeof value !== 'string' || !/^[a-z0-9]+$/i.test(value)) return 'no_client_header';
+    const pinned = (process.env[EXTENSION_ID_ENV] || '').trim();
+    if (pinned && pinned !== value) return 'extension_id_mismatch';
+    return null;
+  }
+
+  private validateExtensionOrigin(origin: string): string | null {
+    const prefix = 'chrome-extension://';
+    if (!origin.startsWith(prefix)) return 'origin_not_extension';
+    const id = origin.slice(prefix.length);
+    if (!/^[a-z0-9]+$/i.test(id)) return 'origin_malformed';
+    const pinned = (process.env[EXTENSION_ID_ENV] || '').trim();
+    if (pinned && pinned !== id) return 'extension_id_mismatch';
+    return null;
+  }
+
+  private rejectRequest(req: IncomingMessage, res: ServerResponse, url: URL, reason: string): void {
+    let originDesc = '-';
+    if (typeof req.headers.origin === 'string') {
+      try {
+        const o = new URL(req.headers.origin);
+        originDesc = `${o.protocol}//${o.host}`;
+      } catch {
+        originDesc = '(unparseable)';
+      }
+    }
+    log(`[Guard] ${new Date().toISOString()} denied ${req.method} ${url.pathname} reason=${reason} origin=${originDesc}`);
+    res.writeHead(403, { 'Content-Type': 'application/json', Vary: 'Origin' });
+    res.end(JSON.stringify({ error: 'Forbidden', reason }));
+    // Do not keep reading a refused request body.
+    req.resume();
+  }
+
+  /**
+   * Public liveness check returns only `ok` and the protocol version. A verified
+   * extension Origin additionally gets the routing info the UI needs (no pid,
+   * no session titles).
+   */
+  private handleHealth(url: URL, res: ServerResponse, trusted: boolean): void {
+    if (!trusted) {
+      this.sendJson(res, 200, { ok: true, protocolVersion: BRIDGE_PROTOCOL_VERSION });
+      return;
+    }
+    const activeDisplay = this.currentDisplaySession();
+    const clientId = url.searchParams.get('clientId') || '';
+    const activeSessionId = activeDisplay?.id || null;
+    this.sendJson(res, 200, {
+      ok: true,
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      ...this.projectInfo,
+      activeClientId: this.browserRouter.activeClientId,
+      activeSessionId,
+      isProcessing: clientId ? this.isClientProcessingSession(clientId, activeSessionId) : false,
+      processingSessionId: clientId ? this.processingDisplaySessions.get(clientId) || null : null,
+    });
   }
 
   private sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -1445,10 +1520,19 @@ export class WSServer {
     });
   }
 
+  /** Runs a browser action through the active tab (used by the MCP tools). */
+  runBrowserAction(action: BrowserActionName, params: Record<string, unknown> = {}): Promise<BrowserActionResult> {
+    return this.browserRouter.run(action, params);
+  }
+
   stop(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    for (const timer of this.releaseTimers) clearTimeout(timer);
+    this.releaseTimers.clear();
     this.browserRouter.stop();
+    this.approvalRouter.stop();
+    this.questionRouter.stop();
     for (const session of this.sessions.values()) {
       session.stop();
     }
@@ -1460,33 +1544,4 @@ export class WSServer {
     this.server?.close();
     if (this.store) this.store.close();
   }
-}
-
-const BROWSER_ACTION_NAMES: ReadonlySet<string> = new Set([
-  'take_visible_screenshot',
-  'get_page_snapshot',
-  'get_console_logs',
-  'get_console_message',
-  'get_element_targets',
-  'save_element_target',
-  'delete_element_target',
-  'reload_page',
-  'click_page',
-  'type_text',
-  'fill_text',
-  'press_key',
-  'clear_state',
-  'wait_for_selector',
-  'wait_for_text',
-  'run_actions',
-  'request_user_assistance',
-  'run_js',
-]);
-
-function isBrowserActionName(value: string): value is BrowserActionName {
-  return BROWSER_ACTION_NAMES.has(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }

@@ -30,12 +30,13 @@ export interface ReviewPayload {
 }
 
 export interface WSMessage {
-  type: 'review' | 'ping' | 'pong' | 'connected' | 'stream' | 'thinking' | 'tool_call' | 'tool_update' | 'tool_status' | 'done' | 'error' | 'session_info' | 'session_reset' | 'session_snapshot';
+  type: 'review' | 'ping' | 'pong' | 'connected' | 'stream' | 'thinking' | 'tool_call' | 'tool_update' | 'tool_status' | 'done' | 'error' | 'display_message' | 'session_info' | 'session_reset' | 'session_snapshot';
   tabId?: string;
   payload?: ReviewPayload['payload'];
   delta?: string;
   summary?: string;
   message?: string;
+  displayMessage?: Record<string, unknown>;
   agentStatus?: string;
   projectId?: string;
   projectName?: string;

@@ -4,20 +4,27 @@
   "description": "Local bridge for the DevTailor Chrome extension",
   "main": "dist/index.js",
   "bin": {
-    "devtailor": "dist/index.js"
+    "devtailor": "dist/index.js",
+    "devtailor-mcp": "dist/mcp-main.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "test": "tsx --test test/*.test.ts"
+    "mcp": "node dist/mcp-main.js",
+    "mcp:dev": "tsx src/mcp-main.ts",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "smoke:plugin": "node scripts/smoke-plugin.mjs",
+    "test": "npm run build && tsx --test test/*.test.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/sql.js": "^1.4.11",
+    "esbuild": "^0.28.2",
     "tsx": "^4.0.0",
     "typescript": "^5.4.0"
   },

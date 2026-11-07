@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DevTailor",
   "version": "2.0.0",
-  "description": "Frontend development copilot panel — mark elements, capture context, and work with local AI agents",
+  "description": "Mark elements and capture page context, then let your local Claude Code session see, edit and verify the page",
   "permissions": ["activeTab", "storage", "scripting", "sidePanel"],
   "host_permissions": ["*://localhost/*", "*://127.0.0.1/*", "<all_urls>"],
   "commands": {

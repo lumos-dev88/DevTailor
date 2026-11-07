@@ -16,9 +16,9 @@
  */
 
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
-import { ModelConfig, normalizeModelConfig } from './model-config';
+import { log } from './log';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors ws-server.ts internal types)
@@ -94,6 +94,7 @@ export class SessionStore {
     }
 
     store.schema();
+    store.purgeLegacyRuntimeData(dataDir);
     return store;
   }
 
@@ -163,6 +164,31 @@ export class SessionStore {
       )
     `);
     this.flush();
+  }
+
+  /**
+   * The bridge no longer owns an AI runtime. Drop leftovers from older versions:
+   * the plaintext model_config setting (contains an API key), the Scream home
+   * directory (credentials) and the runtime session memory file.
+   */
+  private purgeLegacyRuntimeData(dataDir: string): void {
+    this.db.run(`DELETE FROM settings WHERE key = ?`, ['model_config']);
+    if (this.db.getRowsModified() > 0) {
+      this.markDirty();
+      this.flush();
+      log('[Store] Removed legacy model_config setting');
+    }
+    for (const name of ['scream-home', 'session-memory.md']) {
+      const target = join(dataDir, name);
+      if (existsSync(target)) {
+        try {
+          rmSync(target, { recursive: true, force: true });
+          log(`[Store] Removed legacy runtime data: ${name}`);
+        } catch (err: any) {
+          log(`[Store] Failed to remove legacy runtime data ${name}: ${err?.message || err}`);
+        }
+      }
+    }
   }
 
   private ensureSessionAgentKeyColumn(): void {
@@ -396,28 +422,6 @@ export class SessionStore {
   // ---------------------------------------------------------------------------
   // Settings operations
   // ---------------------------------------------------------------------------
-
-  getModelConfig(): ModelConfig | null {
-    const results = this.db.exec(
-      `SELECT value_json FROM settings WHERE key = ?`,
-      ['model_config'],
-    );
-    if (!results.length || !results[0].values.length) return null;
-    try {
-      return normalizeModelConfig(JSON.parse((results[0].values[0][0] as string) || '{}'));
-    } catch {
-      return null;
-    }
-  }
-
-  saveModelConfig(config: ModelConfig): void {
-    const normalized = normalizeModelConfig(config);
-    this.db.run(
-      `INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)`,
-      ['model_config', JSON.stringify(normalized), normalized.updatedAt || Date.now()],
-    );
-    this.markDirty();
-  }
 
   private queryImages(sessionId: string): Array<{ id: string; filename: string }> {
     const results = this.db.exec(

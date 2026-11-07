@@ -42,20 +42,33 @@ describe('SessionStore', () => {
     });
 
     it('should create settings table for project config', () => {
-      store.saveModelConfig({
-        provider: 'openai-compatible',
-        enabled: true,
-        baseUrl: 'http://example.test/v1/',
-        apiKey: 'test-key',
-        model: 'mimo-v2.5',
-        maxSteps: 12,
-      });
-      const config = store.getModelConfig();
-      assert.ok(config);
-      assert.equal(config!.baseUrl, 'http://example.test/v1');
-      assert.equal(config!.apiKey, 'test-key');
-      assert.equal(config!.model, 'mimo-v2.5');
-      assert.equal(config!.maxSteps, 12);
+      const results = (store as any).db.exec(`SELECT name FROM sqlite_master WHERE type='table' AND name='settings'`);
+      assert.equal(results[0]?.values.length, 1);
+    });
+
+    it('purges legacy model_config and scream-home on startup', async () => {
+      const dir = join(process.cwd(), '.test-tmp-session-store-purge');
+      if (existsSync(dir)) rmSync(dir, { recursive: true });
+      const first = await SessionStore.create(dir);
+      (first as any).db.run(
+        `INSERT INTO settings (key, value_json, updated_at) VALUES ('model_config', '{"apiKey":"secret"}', 1)`,
+      );
+      first.flush();
+      first.close();
+      mkdirSync(join(dir, 'scream-home'), { recursive: true });
+      writeFileSync(join(dir, 'scream-home', 'cred'), 'secret');
+      writeFileSync(join(dir, 'session-memory.md'), 'x');
+
+      const second = await SessionStore.create(dir);
+      try {
+        const rows = (second as any).db.exec(`SELECT key FROM settings WHERE key='model_config'`);
+        assert.equal(rows.length, 0);
+        assert.ok(!existsSync(join(dir, 'scream-home')));
+        assert.ok(!existsSync(join(dir, 'session-memory.md')));
+      } finally {
+        second.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('migrates legacy sessions without agent_key to claude', async () => {

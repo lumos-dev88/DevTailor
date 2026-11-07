@@ -72,37 +72,6 @@
     return value ? [value] : [];
   }
 
-  /**
-   * Build a plain-text prompt from marks + user text + images.
-   * Used as a fallback / export format. System instructions are
-   * handled by the bridge at session creation — this only
-   * assembles the user-level dynamic content.
-   */
-  function build(marks, userText, imagesInput) {
-    const images = normalizeImages(imagesInput);
-    const count = marks.length;
-    const intent = (userText || '').trim() || '(No additional description provided)';
-
-    let prompt = `## Current Page\nURL: ${location.href}\n\n`;
-    prompt += `## User Intent\n${intent}\n\n`;
-    prompt += `## Marked Elements (${count} total)\n\n`;
-
-    marks.forEach((mark, idx) => {
-      prompt += formatMark(mark, idx + 1) + '\n';
-    });
-
-    if (images.length) {
-      prompt += `## Screenshots (${images.length})\n`;
-      prompt += `The screenshots/images are attached as data URLs below:\n\n`;
-      images.forEach((image, idx) => {
-        prompt += `### Image ${idx + 1}\n`;
-        prompt += `\`\`\`text\n${image}\n\`\`\`\n\n`;
-      });
-    }
-
-    return prompt;
-  }
-
   function buildPayload(marks, userText, imagesInput) {
     const intent = (userText || '').trim() || '';
     const images = normalizeImages(imagesInput);
@@ -134,5 +103,5 @@
     };
   }
 
-  window.__domReview.promptBuilder = { build, buildPayload };
+  window.__domReview.promptBuilder = { buildPayload };
 })();

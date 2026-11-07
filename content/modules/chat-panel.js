@@ -177,7 +177,7 @@
     if (client.isActive?.()) return;
     const result = await client.activate?.();
     if (!result?.ok) {
-      showHint(result?.error || '连接接管失败，请确认 Bridge 已启动');
+      showHint(result?.error || '连接接管失败：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
     }
     refreshConnectionStatus();
   }
@@ -337,8 +337,8 @@
 
     if (status === 'disconnected') {
       return agentName
-        ? `等待连接到 ${agentName}…<br><br>请确保 DevTailor Bridge 已启动`
-        : `等待连接到 Bridge…<br><br>请确保 DevTailor Bridge 已启动`;
+        ? `等待连接到 ${agentName}…<br><br>Bridge 随 Claude Code 会话启动：请在项目目录运行 <code>scripts/claude-devtailor.sh</code>`
+        : `等待连接到 Bridge…<br><br>Bridge 随 Claude Code 会话启动：请在项目目录运行 <code>scripts/claude-devtailor.sh</code>`;
     }
     if (status === 'connecting') {
       return `连接中…`;

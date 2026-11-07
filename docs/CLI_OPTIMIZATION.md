@@ -30,42 +30,28 @@ status                  查看后台进程状态
 logs                    查看后台日志
 ```
 
-模型配置：
+模型与密钥：
 
-- 首选入口是 Chrome 扩展 popup 的「模型配置」，通过 Bridge `GET/POST /model-config` 保存到当前项目 `.devtailor/sessions.db`。
-- 下列环境变量只作为一次性迁移兜底：当项目还没有 UI 模型配置时，Bridge 启动会把完整环境变量写入项目配置。
+- Bridge 不再保存或读取任何模型配置；AI 由 Claude Code 担任（第二步接入）。`/model-config`、`OPENAI_*`、`DEVTAILOR_MODEL`、`DEVTAILOR_MAX_STEPS`、`DEVTAILOR_RUNTIME` 都已移除。
+- 可选环境变量：`DEVTAILOR_EXTENSION_ID`——设置后 Bridge 只接受 `chrome-extension://<该 ID>` 的请求（见 `docs/HANDOFF.md`「安全守卫」）。
 
-```text
-OPENAI_BASE_URL         OpenAI-compatible API base URL
-OPENAI_API_KEY          OpenAI-compatible API key
-OPENAI_MODEL            OpenAI-compatible model id
-DEVTAILOR_MODEL         OPENAI_MODEL 为空时的模型标识 fallback
-DEVTAILOR_MAX_STEPS     单次 provider/tool loop 最大步数，默认 8
-```
+输出约定：Bridge 所有日志和 CLI 提示（含 `--help`、`--version`）都写 stderr，stdout 保留给第二步的 MCP stdio 协议。
 
 ## 固定端口规则
 
-Bridge 固定运行在 `34781`，这是 Chrome 扩展侧的约定端口。
+Bridge 固定运行在 `127.0.0.1:34781`（只绑回环地址），这是 Chrome 扩展侧的约定端口。
 
-当前 CLI 不再提供 `--port`。如果端口上已有进程，启动前会先探测 `GET /health`：
+当前 CLI 不再提供 `--port`。启动时若端口已被占用：
 
-- 若响应包含 `projectId` 和 `pid`，确认是 DevTailor Bridge，向其发送 `SIGTERM` 并等待释放端口。
-- 若响应存在但不是 Bridge（缺少 `projectId`），报错退出，避免误杀其他服务。
-- 若端口无响应，继续启动；如绑定失败再由操作系统报错。
+- **不会杀掉占用者**，也不再读取别的进程的 pid。
+- 向 stderr 打印明确提示（占用者 PID 可得时附带；若占用者是另一个 DevTailor Bridge，提示「另一个 DevTailor 桥接正在运行，请关闭对应的 Claude Code 会话或进程」），并以退出码 1 退出。
+- 端口检查发生在打开 `.devtailor/sessions.db` 之前，第二个实例不会改写第一个实例的数据库。
 
 不要在文档或示例里继续推荐 `--port`，除非扩展侧也同步支持动态端口发现。
 
 ## Runtime 规则
 
-Bridge 不再支持 `--agent`、内置 Agent 预设或原始 ACP 命令。启动后使用本地后端 runtime：
-
-- 项目模型配置完整时启用 `RealAgentSession` + `OpenAICompatibleProvider`。
-- 项目模型配置缺失或禁用时 fallback 到 `LocalAgentSession` 过渡 runtime。
-- `RealAgentSession` 同时注入 `BrowserToolRunner` 和 `WorkspaceToolRunner`：browser tools 路由到当前接管 tab，workspace tools 在 Bridge `--dir` 项目根目录内执行。
-- workspace tools 对齐 scream-code 的工作区边界：`--dir` / `--cwd` 是唯一 workspace root；相对路径从该目录解析，绝对路径必须位于该目录内。
-- 当前 workspace tools 包括 `bash`、`read_file`、`write_file`、`edit_file`、`grep_files`、`glob_files`、`list_directory`。
-- workspace tools 的模型体验对齐 scream-code 常用约定：`read_file` 提供 Anchor 和换行状态，`edit_file` 可用 Anchor 做冲突检测并保留 CRLF，`grep_files` 支持上下文/分页，`bash` 提供合并输出和明确失败退出码。
-- 不恢复 ACP/MCP adapter。
+Bridge 不再支持 `--agent`、内置 Agent 预设或原始 ACP 命令，也不再带自有 AI runtime（Scream / RealAgentSession / LocalAgentSession / workspace tools 均已删除）。第一步完成后使用占位会话 `PlaceholderAgentSession`（所有 review 立即返回「Claude Code 通道尚未连接」）；第二步会接入 Claude Code 的 MCP/channel。
 
 ## 后台进程规则
 
@@ -78,8 +64,7 @@ devtailor --daemon --dir /path/to/project
 当前行为：
 
 - 使用 Node detached child process。
-- PID 文件路径为 `/tmp/devtailor-bridge.pid`。
-- `stop` 和 `status` 都读取该 PID 文件。
+- PID 文件路径为 `/tmp/devtailor-bridge.pid`，仅在成功绑定端口后写入、退出时仅当内容是自己的 PID 才删除；只有显式的 `stop` / `status` 命令会读取它。
 - 后台日志写入 `{dir}/.devtailor/bridge.log`。
 
 查看日志：
@@ -97,25 +82,13 @@ devtailor logs --dir /path  # 查看指定项目目录的日志
 
 ## 健康检查响应
 
-`GET /health` 现在额外返回：
+`GET /health` 不需要 Origin，无 Origin 时只返回：
 
 ```json
-{
-  "ok": true,
-  "projectId": "...",
-  "projectName": "...",
-  "bridgeInstanceId": "...",
-  "agentKey": "...",
-  "agentLabel": "...",
-  "pid": 12345,
-  "activeClientId": "...",
-  "activeSessionId": "...",
-  "activeSessionTitle": "...",
-  "agentSessionId": "..."
-}
+{ "ok": true, "protocolVersion": 1 }
 ```
 
-`pid` 用于 CLI 在端口冲突时安全地停止旧 Bridge 实例。
+带合法 `chrome-extension://` Origin 时（扩展使用）额外返回 `projectId`、`projectName`、`bridgeInstanceId`、`agentKey`、`agentLabel`、`activeClientId`、`activeSessionId`、`isProcessing`、`processingSessionId`。不再返回 `pid`、`activeSessionTitle`、`agentSessionId`。
 
 ## 错误处理规则
 

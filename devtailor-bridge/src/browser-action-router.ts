@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { log } from './log';
 import {
   BrowserActionEvent,
   BrowserActionName,
@@ -153,7 +154,7 @@ export class BrowserActionRouter {
   receiveResult(result: BrowserActionResult): boolean {
     const pending = this.pending.get(result.requestId);
     if (!pending) {
-      console.warn(
+      log(
         `[BrowserActionRouter] received result for unknown/late requestId=${result.requestId} ` +
         `(ok=${result.ok}, pending=${this.pending.size})`,
       );

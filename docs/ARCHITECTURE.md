@@ -23,14 +23,14 @@
                                 │
 ┌───────────────────────────────▼───────────────────────────────────┐
 │                       Bridge Server (Node.js)                     │
-│                      http://localhost:34781                       │
+│            http://127.0.0.1:34781 (loopback only)                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  HTTP/SSE Routes                                         │   │
-│  │  - GET  /health        (ProjectInfo)                     │   │
+│  │  Guard first: Host check + chrome-extension:// Origin    │   │
+│  │  - GET  /health        (minimal; details need Origin)    │   │
 │  │  - GET  /events        (SSE Stream)                      │   │
-│  │  - POST /browser-tool  (Local browser tool endpoint)     │   │
 │  │  - POST /review        (Send message)                    │   │
 │  │  - POST /activate      (Take over active tab)            │   │
 │  │  - POST /cancel        (Stop generation)                 │   │
@@ -58,13 +58,15 @@
 │                   Agent Runtime Boundary                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
-│  - LocalAgentSession fallback or RealAgentSession provider loop  │
-│  - Model config: project .devtailor settings via /model-config   │
-│  - Receives user messages + context (screenshots, marks, etc.)   │
+│  - The bridge ships no AI runtime; the AI is Claude Code         │
+│  - ClaudeChannelSession (MCP stdio server + claude/channel):     │
+│    review -> notifications/claude/channel, Claude -> `reply` tool│
+│  - index.ts debug mode: PlaceholderAgentSession                  │
+│  - 19 MCP tools: 18 browser tools (BrowserActionRouter) + reply  │
+│  - Receives user messages + context (marks, intent, page URL)    │
 │  - Browser tools: routed through BrowserActionRouter to active tab│
-│  - Workspace tools: bash/read/write/edit/grep/glob/list under dir │
-│  - Streams back: thinking, text, tool calls                      │
-│  - Emits: stream, thinking, tool_call, tool_update, done, error  │
+│  - Emits: stream, thinking, tool_call, tool_update, error;       │
+│    handleReview emits the single `done` per turn                 │
 │                                                                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -147,7 +149,9 @@ User types message
 │ Bridge: handleReview()                     │
 │ 1. Accept request into backend queue        │
 │ 2. Get/Create AgentSession when dequeued    │
-│ 3. session.sendReview(payload)              │
+│ 3. session.sendReview(payload, context)     │
+│    (channel: returns 'pending' once the     │
+│    notification is written)                 │
 │ 4. Pipe runtime events + processing state   │
 │    → SSE clients                            │
 └─────────┬──────────────────────────────────┘
@@ -155,10 +159,12 @@ User types message
           ▼
 ┌────────────────────────────────────────────┐
 │ Agent Runtime Boundary                     │
-│ 1. Process message + context               │
-│ 2. Optional provider loop                   │
-│ 3. Tool routing: browser tools or workspace │
-│    tools under Bridge --dir                 │
+│ 1. Claude Code receives <channel> event     │
+│    (turn_id, page_url, image paths in       │
+│    .devtailor/images) and answers via the   │
+│    MCP `reply` tool (final:true -> done)    │
+│ 2. Browser tool routing via                 │
+│    BrowserActionRouter                      │
 │ 4. Stream events:                          │
 │    - thinking { delta }                    │
 │    - stream { delta }                      │
@@ -643,3 +649,20 @@ npm run dev -- --dir /path/to/project
 - [STATE_ANALYSIS.md](./STATE_ANALYSIS.md) - 状态管理与时序问题详细分析
 - [HANDOFF.md](./HANDOFF.md) - 交接文档，设计边界和防回归规则
 - [devtailor-bridge/README.md](../devtailor-bridge/README.md) - Bridge 服务器文档
+
+---
+
+## 🔌 Claude Code 通道（MCP stdio）
+
+- `src/mcp-main.ts` 是 Claude Code 拉起的 stdio MCP server，同进程运行 `WSServer`（HTTP/SSE，`127.0.0.1:34781`）。`src/mcp-server.ts` 声明 `experimental['claude/channel']` + `tools` 与 `instructions`，提供 18 个浏览器工具和 `reply`。
+- `ClaudeChannelHub`（进程级）持有 turn 表、超时/无响应计时器、取消通知和图片落盘；`ClaudeChannelSession`（每个展示会话一个）是 `AgentSession` 的薄封装。
+- 数据流：`/review` → `sendReview` → `notifications/claude/channel`；Claude → `reply` → `onStream`/`onDone` → SSE `stream`/`done`。`done` 仍只由 `handleReview` 发送一次；异步会话（`sendReview` 返回 `'pending'`）下 `handleReview` 等待 `onDone`/`onError`/`/cancel`。
+- 浏览器工具 → `BrowserActionRouter.run` → SSE `browser_action` → 当前接管 tab；元素库三工具本地处理。
+- 细节、reply 语义、取消与超时见 `docs/HANDOFF.md`「Claude Code 通道」；协议依据见 `docs/CLAUDE_CHANNEL_PROTOCOL.md`。
+
+
+## Claude Code 插件与扩展通信（第三步）
+
+- Bridge 打包成 Claude Code 插件（`claude-plugin/`，MCP server = esbuild 单文件 `server/mcp-main.cjs`），由 `scripts/claude-devtailor.sh` 以 `--plugin-dir` + `--dangerously-load-development-channels plugin:devtailor@inline` 启动 Claude Code 会话；Bridge 随会话启动/退出。详见 `docs/HANDOFF.md`「Claude Code 通道」。
+- 扩展 → Bridge 的所有 HTTP/SSE 请求仍然只经 service worker（`fetchBridgeUrl`），并带 `X-DevTailor-Client: <extension id>`：真实 Chrome 里 SW 的 GET 不带 `Origin`，守卫靠这个头识别扩展（网页发该头需要预检，预检被守卫拒绝）。
+- `scripts/e2e-extension.mjs` 用真实 Chrome + 假 Claude（MCP 客户端）覆盖整条链路。

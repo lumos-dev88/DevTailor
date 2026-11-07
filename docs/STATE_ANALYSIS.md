@@ -32,7 +32,7 @@
 
 - 工具状态不再无条件标记完成。
 - 只在有活跃流输出或 done 收尾时按当前事件语义统一清理剩余工具状态。
-- `done.reason === "tool_calls"` 表示 runtime 达到显式步骤上限但仍有未执行工具调用，前端必须把剩余 pending/running 工具标为 skipped，而不是 completed；默认模型配置不设置工具轮次上限，由用户停止。
+- `done.reason === "tool_calls"` 表示 runtime 达到显式步骤上限但仍有未执行工具调用，前端必须把剩余 pending/running 工具标为 skipped，而不是 completed；工具轮次不设上限，由用户停止。
 - 规则：工具卡片 UI 是展示状态，不等同于工具真实业务断言；业务成功仍应看 tool result 或后续断言。
 
 ### 4. SSE 心跳机制

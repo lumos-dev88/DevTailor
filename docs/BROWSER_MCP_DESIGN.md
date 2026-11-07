@@ -1,6 +1,6 @@
 # DevTailor Browser Tool — 用户故事与历史设计
 
-> 当前实现已不再暴露 `/mcp` Browser MCP JSON-RPC endpoint，也不再通过 ACP 注册 MCP server。本文保留 browser 操作层的用户故事和工具边界作为设计参考；运行时入口已改为 Bridge 本地 `/browser-tool` + `BrowserActionRouter`。
+> 当前实现：Bridge 本身就是 Claude Code 的 MCP stdio server（`devtailor-bridge/src/mcp-main.ts`），browser tool 作为 **MCP 工具**直接暴露（`src/mcp-browser-tools.ts`，由 `createBrowserToolDefinitions()` 生成 18 个，外加 `reply`），调用经 `BrowserActionRouter.run()` → SSE `browser_action` → 当前接管 tab。不再有 `/mcp` HTTP endpoint、ACP 注册或 `/browser-tool` HTTP 路由（后者是无审批的 `run_js` 通道，已删除）。下文的用户故事和工具边界仍作设计参考，其中提到 ACP / `/browser-tool` / `browser-mcp-server.ts` / `acp-session.ts` 的地方是历史设计，以代码和 `docs/HANDOFF.md`「Claude Code 通道」为准。
 
 ## 一、定位
 
@@ -214,7 +214,7 @@ content/modules/
   -> Bridge resolve MCP tool result
 ```
 
-> browser tool 出口（`BrowserActionRouter.run()` → SSE `browser_action` → 当前 tab）现有两个运行时消费者：`RealAgentSession`（OpenAI-compatible runtime，通过 `generate()` 的 `toolExecutor`）和 `ScreamAgentSession`（Scream runtime，通过 `Session.registerUserTool` + `setToolCallHandler`）。两者共用同一个 `BrowserActionRouter` 出口和同一份 `createBrowserToolDefinitions()` schema，不要为 Scream 另起浏览器路由。Scream 侧的 toolCall 反向 RPC 不带 tool name，靠 `tool.call.started` 事件建立的 `toolCallId → name` 映射反查。细节见 `docs/HANDOFF.md` 的「Scream runtime（Phase 2：browser tools）」。
+> browser tool 出口（`BrowserActionRouter.run()` → SSE `browser_action` → 当前 tab）原有的两个运行时消费者（`RealAgentSession`、`ScreamAgentSession`）已随自带 AI runtime 一起删除；`POST /browser-tool` 也已删除（它是无审批的 `run_js` 通道）。现在 Claude Code 的 MCP 工具（`mcp-browser-tools.ts`）是唯一消费者，共用同一个 `BrowserActionRouter` 出口和 `createBrowserToolDefinitions()` schema，不要另起浏览器路由。截图类结果转为 MCP image content 并落盘 `.devtailor/images/shot-<ts>-<n>.<ext>`；错误统一 `isError: true`，`NO_ACTIVE_TAB` 提示用户先在扩展里“接管”页面。
 
 ### 当前 Tab 上下文
 

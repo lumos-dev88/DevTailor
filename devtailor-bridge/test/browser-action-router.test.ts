@@ -74,8 +74,8 @@ describe('BrowserActionRouter', () => {
     router.activate('client-1', null, null);
 
     const warnings: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (...args: unknown[]) => warnings.push(args.join(' '));
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => { warnings.push(String(chunk)); return true; }) as typeof process.stderr.write;
     try {
       const received = router.receiveResult({
         requestId: 'nonexistent-id',
@@ -86,7 +86,7 @@ describe('BrowserActionRouter', () => {
       assert.ok(warnings[0].includes('nonexistent-id'), 'warning should include the requestId');
       assert.ok(warnings[0].includes('unknown/late'), 'warning should mention unknown/late');
     } finally {
-      console.warn = origWarn;
+      process.stderr.write = origWrite;
     }
   });
 
@@ -110,15 +110,15 @@ describe('BrowserActionRouter', () => {
 
     // Second receive for the same requestId is late
     const warnings: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (...args: unknown[]) => warnings.push(args.join(' '));
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => { warnings.push(String(chunk)); return true; }) as typeof process.stderr.write;
     try {
       const received2 = router.receiveResult({ requestId: capturedEvent!.requestId, ok: true, result: {} });
       assert.equal(received2, false);
       assert.equal(warnings.length, 1);
       assert.ok(warnings[0].includes('late'), 'should flag as late');
     } finally {
-      console.warn = origWarn;
+      process.stderr.write = origWrite;
     }
   });
 

@@ -509,7 +509,7 @@
 
       const elementTargets = window.__domReview.elementTargets;
       if (!elementTargets?.saveFromReview || !elementTargets?.buildTargetPayload) {
-        window.__domReview.chatPanel?.showHint?.('元素库不可用，请确认 Bridge 已启动');
+        window.__domReview.chatPanel?.showHint?.('元素库不可用：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
         return;
       }
 
@@ -544,7 +544,7 @@
     if (!review) return;
     const elementTargets = window.__domReview.elementTargets;
     if (!elementTargets?.saveFromReview || !elementTargets?.buildTargetPayload) {
-      window.__domReview.chatPanel?.showHint?.('元素库不可用，请确认 Bridge 已启动');
+      window.__domReview.chatPanel?.showHint?.('元素库不可用：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
       return;
     }
     pendingReview = review;
@@ -606,7 +606,7 @@
   function showLibraryCard() {
     const elementTargets = window.__domReview.elementTargets;
     if (!elementTargets?.listAllTargets) {
-      window.__domReview.chatPanel?.showHint?.('元素库不可用，请确认 Bridge 已启动');
+      window.__domReview.chatPanel?.showHint?.('元素库不可用：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
       return;
     }
     closeSaveCard();

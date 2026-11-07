@@ -1,14 +1,19 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import http from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WSServer } from '../src/ws-server';
+import { AgentCallbacks, AgentSession } from '../src/agent-session';
+import { CHANNEL_NOT_CONNECTED_MESSAGE } from '../src/placeholder-agent-session';
+import { makeClient, sleep } from './helpers';
 
-describe('integration: local bridge runtime', () => {
+describe('integration: bridge with placeholder channel session', () => {
   const PORT = 17777;
-  const baseUrl = `http://localhost:${PORT}`;
+  const {
+    postJson, postRaw, getJson, deleteJson, activate, openSse,
+    collectUntilDone, waitForDoneCount, respondToBrowserActions,
+  } = makeClient(PORT);
   let server: WSServer;
 
   before(async () => {
@@ -29,104 +34,12 @@ describe('integration: local bridge runtime', () => {
     stream.close();
   });
 
-  it('saves model config and exposes redacted status', async () => {
-    const modelPort = 17778;
-    const modelBaseUrl = `http://localhost:${modelPort}`;
-    const modelRoot = await mkdtemp(join(tmpdir(), 'devtailor-model-config-'));
-    const modelServer = new WSServer(modelPort, modelRoot, join(modelRoot, '.devtailor'));
-    await modelServer.init();
-    modelServer.start();
-    await new Promise(r => setTimeout(r, 200));
-    try {
-      const saved = await postJson('/model-config', {
-        provider: 'openai-compatible',
-        enabled: true,
-        baseUrl: 'http://example.test/v1/',
-        apiKey: 'secret-key',
-        model: 'mimo-v2.5',
-        maxSteps: 5,
-      }, modelBaseUrl);
-      assert.strictEqual(saved.status, 200);
-      assert.strictEqual(saved.body.config.baseUrl, 'http://example.test/v1');
-      assert.strictEqual(saved.body.config.model, 'mimo-v2.5');
-      assert.strictEqual(saved.body.config.hasApiKey, true);
-      assert.strictEqual(saved.body.config.apiKey, undefined);
-
-      const loaded = await getJson('/model-config', modelBaseUrl);
-      assert.strictEqual(loaded.status, 200);
-      assert.strictEqual(loaded.body.config.hasApiKey, true);
-      assert.strictEqual(loaded.body.config.apiKey, undefined);
-
-      const health = await getJson('/health', modelBaseUrl);
-      assert.strictEqual(health.body.agentKey, 'openai-compatible:mimo-v2.5');
-      assert.strictEqual(health.body.agentLabel, 'OpenAI Compatible (mimo-v2.5)');
-    } finally {
-      modelServer.stop();
-      await rm(modelRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('keeps the active display session when model config changes within the same runtime key', async () => {
-    const modelPort = 17779;
-    const modelBaseUrl = `http://localhost:${modelPort}`;
-    const modelRoot = await mkdtemp(join(tmpdir(), 'devtailor-model-active-session-'));
-    const modelServer = new WSServer(modelPort, modelRoot, join(modelRoot, '.devtailor'));
-    await modelServer.init();
-    modelServer.start();
-    await new Promise(r => setTimeout(r, 200));
-    const stream = await openSse('tab-model-active-session', modelBaseUrl);
-    await stream.next();
-    try {
-      const created = await postJson('/new-session', {
-        clientId: 'tab-model-active-session',
-        tabId: 'tab-model-active-session',
-      }, modelBaseUrl);
-      assert.strictEqual(created.status, 200);
-      const sessionId = created.body.sessionId;
-      assert.ok(sessionId);
-
-      const firstSave = await postJson('/model-config', {
-        provider: 'openai-compatible',
-        enabled: true,
-        baseUrl: 'http://example.test/v1/',
-        apiKey: 'secret-key',
-        model: 'mimo-v2.5',
-        maxSteps: 5,
-      }, modelBaseUrl);
-      assert.strictEqual(firstSave.status, 200);
-
-      const activeAfterFirstSave = await getJson('/sessions/active?clientId=tab-model-active-session', modelBaseUrl);
-      assert.strictEqual(activeAfterFirstSave.status, 200);
-      const newRuntimeSessionId = activeAfterFirstSave.body.activeSessionId;
-      assert.ok(newRuntimeSessionId);
-
-      const secondSave = await postJson('/model-config', {
-        provider: 'openai-compatible',
-        enabled: true,
-        baseUrl: 'http://example.test/v1/',
-        apiKey: 'other-secret',
-        model: 'mimo-v2.5',
-        maxSteps: 7,
-      }, modelBaseUrl);
-      assert.strictEqual(secondSave.status, 200);
-
-      const activeAfterSecondSave = await getJson('/sessions/active?clientId=tab-model-active-session', modelBaseUrl);
-      assert.strictEqual(activeAfterSecondSave.status, 200);
-      assert.strictEqual(activeAfterSecondSave.body.activeSessionId, newRuntimeSessionId);
-    } finally {
-      stream.close();
-      modelServer.stop();
-      await rm(modelRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('sends review and receives local runtime stream + done', async () => {
+  it('echoes the user message and reports that the Claude channel is not connected', async () => {
     const stream = await openSse('tab-test-1');
     await stream.next();
     await activate('tab-test-1');
     const messages: Record<string, unknown>[] = [];
-    respondToBrowserActions(stream);
-    const done = collectUntilDone(stream, messages);
+    const finished = collectUntilDone(stream, messages);
 
     const response = await postJson('/review', {
       type: 'review',
@@ -153,26 +66,24 @@ describe('integration: local bridge runtime', () => {
     });
 
     assert.strictEqual(response.status, 202);
-    await done;
+    await finished;
 
-    const streams = messages.filter(m => m.type === 'stream');
-    const dones = messages.filter(m => m.type === 'done');
-
-    assert.ok(streams.length > 0, 'should receive stream messages');
-    assert.ok(dones.length > 0, 'should receive done message');
-
-    const fullText = streams.map(m => m.delta).join('');
-    assert.ok(fullText.includes('Bridge 已切换到本地 UI 调试后端通道'));
+    const errors = messages.filter(m => m.type === 'error');
+    assert.strictEqual(errors.length, 1);
+    assert.strictEqual(errors[0].message, CHANNEL_NOT_CONNECTED_MESSAGE);
+    assert.ok(messages.some(message => {
+      const displayMessage = message.displayMessage as Record<string, unknown> | undefined;
+      return message.type === 'display_message' && displayMessage?.role === 'user' && displayMessage.content === '测试意图';
+    }), 'should project the persisted user message to other chat surfaces');
     stream.close();
   });
 
-  it('sends review with screenshot and receives stream', async () => {
+  it('keeps screenshots on the displayed user message', async () => {
     const stream = await openSse('tab-test-screenshot');
     await stream.next();
     await activate('tab-test-screenshot');
     const messages: Record<string, unknown>[] = [];
-    respondToBrowserActions(stream);
-    const done = collectUntilDone(stream, messages);
+    const finished = collectUntilDone(stream, messages);
 
     const response = await postJson('/review', {
       type: 'review',
@@ -187,10 +98,10 @@ describe('integration: local bridge runtime', () => {
     });
 
     assert.strictEqual(response.status, 202);
-    await done;
+    await finished;
 
-    const fullText = messages.filter(m => m.type === 'stream').map(m => m.delta).join('');
-    assert.ok(fullText.includes('1 张图片'));
+    const display = messages.find(m => m.type === 'display_message') as any;
+    assert.deepStrictEqual(display.displayMessage.images, ['data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==']);
     stream.close();
   });
 
@@ -416,7 +327,7 @@ describe('integration: local bridge runtime', () => {
     const healthAfterActivation = await getJson('/health');
     assert.strictEqual(healthAfterActivation.status, 200);
     assert.strictEqual(healthAfterActivation.body.activeClientId, 'tab-refresh-stable');
-    assert.strictEqual(healthAfterActivation.body.activeSessionTitle, '刷新后应该显示会话名');
+    assert.strictEqual(healthAfterActivation.body.activeSessionTitle, undefined);
 
     firstStream.close();
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -429,58 +340,6 @@ describe('integration: local bridge runtime', () => {
     assert.strictEqual(connected.activeSessionTitle, '刷新后应该显示会话名');
 
     refreshedStream.close();
-  });
-
-  it('reuses the live local agent session across consecutive messages in one display session', async () => {
-    const stream = await openSse('tab-reuse-agent-session');
-    await stream.next();
-    await activate('tab-reuse-agent-session');
-    const created = await postJson('/new-session', {
-      clientId: 'tab-reuse-agent-session',
-      tabId: 'tab-reuse-agent-session',
-    });
-    assert.strictEqual(created.status, 200);
-
-    const firstMessages: Record<string, unknown>[] = [];
-    respondToBrowserActions(stream);
-    const firstDone = collectUntilDone(stream, firstMessages);
-    const first = await postJson('/review', {
-      type: 'review',
-      clientId: 'tab-reuse-agent-session',
-      tabId: 'tab-reuse-agent-session',
-      payload: {
-        pageUrl: 'http://localhost:3000',
-        userIntent: 'reuse-agent-session-first',
-        items: [],
-        screenshot: null,
-      },
-    });
-    assert.strictEqual(first.status, 202);
-    await firstDone;
-    const firstInfo = firstMessages.find(message => message.type === 'session_info' && message.agentSessionId);
-    assert.ok(firstInfo?.agentSessionId);
-
-    const secondMessages: Record<string, unknown>[] = [];
-    const secondDone = collectUntilDone(stream, secondMessages);
-    const second = await postJson('/review', {
-      type: 'review',
-      clientId: 'tab-reuse-agent-session',
-      tabId: 'tab-reuse-agent-session',
-      payload: {
-        pageUrl: 'http://localhost:3000',
-        userIntent: 'reuse-agent-session-second',
-        items: [],
-        screenshot: null,
-      },
-    });
-    assert.strictEqual(second.status, 202);
-    await secondDone;
-    const secondInfo = secondMessages.find(message => message.type === 'session_info' && message.agentSessionId);
-    if (secondInfo) {
-      assert.strictEqual(secondInfo.agentSessionId, firstInfo.agentSessionId);
-    }
-
-    stream.close();
   });
 
   it('accepts consecutive review posts and reports backend queue state', async () => {
@@ -518,106 +377,20 @@ describe('integration: local bridge runtime', () => {
     });
     assert.strictEqual(second.status, 202);
     assert.strictEqual(second.body.ok, true);
-    assert.strictEqual(second.body.queued, true);
-    assert.ok(second.body.queueDepth >= 1);
 
     await done;
     assert.ok(messages.some(message => message.type === 'queue_status' && message.isProcessing === true));
-    assert.ok(messages.some(message => message.type === 'stream' && message.isProcessing === true));
-    assert.strictEqual(messages.filter(message => message.type === 'done').length, 2);
+    assert.strictEqual(messages.filter(message => message.type === 'error').length, 2);
     stream.close();
   });
 
-  it('rejects review posts when per-client queue is full (429)', async () => {
-    const stream = await openSse('tab-queue-full');
-    await stream.next();
-    await activate('tab-queue-full');
-    // Do NOT resolve browser actions → reviews hang, queue fills up
-    const messages: Record<string, unknown>[] = [];
-    stream.onMessage(msg => messages.push(msg));
-
-    // Post enough reviews to saturate processing (1) + MAX_REVIEW_QUEUE_DEPTH (10) = 11 accepted
-    const payload = {
-      pageUrl: 'http://localhost:3000',
-      userIntent: 'queue-fill',
-      items: [],
-      screenshot: null,
-    };
-    for (let i = 0; i < 11; i++) {
-      const res = await postJson('/review', {
-        type: 'review',
-        clientId: 'tab-queue-full',
-        tabId: 'tab-queue-full',
-        payload,
-      });
-      assert.ok([202, 429].includes(res.status), `post ${i} got status ${res.status}`);
-      if (res.status === 202) {
-        assert.strictEqual(res.body.ok, true);
-      }
-    }
-
-    // The 12th post must be rejected with 429
-    const overflow = await postJson('/review', {
-      type: 'review',
-      clientId: 'tab-queue-full',
-      tabId: 'tab-queue-full',
-      payload,
-    });
-    assert.strictEqual(overflow.status, 429);
-    assert.strictEqual(overflow.body.ok, false);
-    assert.ok(typeof overflow.body.queueDepth === 'number');
-    assert.strictEqual(overflow.body.maxDepth, 10);
-    assert.ok(overflow.body.error.includes('queue full'));
-
-    stream.close();
-  });
-
-  it('lets the local runtime call browser tools during a review turn', async () => {
-    const stream = await openSse('tab-runtime-browser-tools');
-    await stream.next();
-    await activate('tab-runtime-browser-tools');
-    const messages: Record<string, unknown>[] = [];
-    respondToBrowserActions(stream);
-    const done = collectUntilDone(stream, messages);
-
-    const response = await postJson('/review', {
-      type: 'review',
-      clientId: 'tab-runtime-browser-tools',
-      tabId: 'tab-runtime-browser-tools',
-      payload: {
-        pageUrl: 'http://localhost:3000',
-        userIntent: '检查按钮间距',
-        items: [],
-        screenshot: null,
-      },
-    });
-
-    assert.strictEqual(response.status, 202);
-    await done;
-
-    const toolCalls = messages.filter(message => message.type === 'tool_call');
-    const toolUpdates = messages.filter(message => message.type === 'tool_update');
-    assert.ok(toolCalls.some(message => message.toolTitle === 'get_page_snapshot'));
-    assert.ok(toolUpdates.some(message => message.toolTitle === 'get_console_logs' && message.toolStatus === 'completed'));
-    const fullText = messages.filter(message => message.type === 'stream').map(message => message.delta).join('');
-    assert.match(fullText, /页面快照/);
-    assert.match(fullText, /元素库/);
-    stream.close();
-  });
-
-  it('exposes local browser tools without MCP', async () => {
+  it('no longer exposes the unapproved /browser-tool channel or MCP', async () => {
     const stream = await openSse('tab-browser-tool');
     await stream.next();
     await activate('tab-browser-tool');
 
-    const listed = await postJson('/browser-tool', {
-      action: 'get_element_targets',
-      params: {},
-    });
-
-    assert.strictEqual(listed.status, 200);
-    assert.strictEqual(listed.body.ok, true);
-    assert.ok(Array.isArray(listed.body.result.targets));
+    const removed = await postRaw('/browser-tool', { action: 'run_js', params: { code: '1' } });
+    assert.strictEqual(removed.status, 404);
 
     const unsupportedMcp = await postRaw('/mcp', {
       jsonrpc: '2.0',
@@ -650,157 +423,219 @@ describe('integration: local bridge runtime', () => {
     assert.strictEqual(deleted.status, 200);
     assert.strictEqual(deleted.body.deleted, saved.body.target.targetId);
   });
+});
 
-  async function postJson(path: string, body: unknown, base = baseUrl): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${base}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    return {
-      status: response.status,
-      body: await response.json(),
-    };
+/** Scriptable AgentSession so queue / cancel / done semantics can be tested. */
+class FakeAgentSession implements AgentSession {
+  static instances: FakeAgentSession[] = [];
+  callbacks!: AgentCallbacks;
+  stopped = false;
+  sent = 0;
+  /** When set, sendReview waits for it before returning. */
+  gate: Promise<void> | null = null;
+  constructor(private runner: (a: any, p?: any) => Promise<any>, private mode: 'stream' | 'block' | 'tools') {
+    FakeAgentSession.instances.push(this);
   }
-
-  async function postRaw(path: string, body: unknown, base = baseUrl): Promise<{ status: number; text: string }> {
-    const response = await fetch(`${base}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    return {
-      status: response.status,
-      text: await response.text(),
-    };
+  async start() { return { sessionId: 'fake-agent-session', mode: 'created' as const }; }
+  async sendReview() {
+    this.sent++;
+    if (this.mode === 'tools') {
+      const snapshot = await this.runner('get_page_snapshot', {});
+      this.callbacks.onToolCall?.({ toolCallId: 't1', title: 'get_page_snapshot', status: 'pending' });
+      this.callbacks.onStream(JSON.stringify(snapshot.result));
+      this.callbacks.onDone('tools done');
+      return 'end_turn';
+    }
+    if (this.mode === 'block') {
+      await new Promise<void>(resolve => { this.release = resolve; });
+      this.callbacks.onStream('late text');
+      this.callbacks.onDone('late done');
+      return 'end_turn';
+    }
+    this.callbacks.onStream('hello');
+    this.callbacks.onDone('all good');
+    return 'end_turn';
   }
+  release: () => void = () => {};
+  async cancelCurrentTurn() { return false; }
+  setCallbacks(cb: AgentCallbacks) { this.callbacks = cb; }
+  stop() { this.stopped = true; }
+  get isReady() { return !this.stopped; }
+  get isStarting() { return false; }
+  get currentSessionId() { return 'fake-agent-session'; }
+}
 
-  async function getJson(path: string, base = baseUrl): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${base}${path}`);
-    return {
-      status: response.status,
-      body: await response.json(),
-    };
-  }
+describe('integration: review lifecycle with a scripted agent session', () => {
+  const reviewPayload = (userIntent: string) => ({
+    pageUrl: 'http://localhost:3000',
+    userIntent,
+    items: [],
+    screenshot: null,
+  });
 
-  async function deleteJson(path: string, base = baseUrl): Promise<{ status: number; body: any }> {
-    const response = await fetch(`${base}${path}`, { method: 'DELETE' });
-    return {
-      status: response.status,
-      body: await response.json(),
-    };
-  }
-
-  async function activate(clientId: string): Promise<{ status: number; body: any }> {
-    return postJson('/activate', { clientId, tabId: clientId });
-  }
-
-  function collectUntilDone(
-    stream: Awaited<ReturnType<typeof openSse>>,
-    messages: Record<string, unknown>[],
+  async function withServer(
+    port: number,
+    mode: 'stream' | 'block' | 'tools',
+    fn: (ctx: ReturnType<typeof makeClient>) => Promise<void>,
   ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Timed out waiting for done')), 5000);
-      stream.onMessage((message) => {
-        messages.push(message);
-        if (message.type === 'done' || message.type === 'error') {
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-    });
+    FakeAgentSession.instances = [];
+    const root = await mkdtemp(join(tmpdir(), 'devtailor-lifecycle-'));
+    const server = new WSServer(port, root, undefined, 'fake', 'Fake', runner => new FakeAgentSession(runner, mode));
+    await server.start();
+    try {
+      await fn(makeClient(port));
+    } finally {
+      server.stop();
+      await rm(root, { recursive: true, force: true });
+    }
   }
 
-  function waitForDoneCount(
-    stream: Awaited<ReturnType<typeof openSse>>,
-    messages: Record<string, unknown>[],
-    count: number,
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      let doneCount = 0;
-      const timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${count} done events`)), 10000);
-      stream.onMessage((message) => {
-        messages.push(message);
-        if (message.type === 'done' || message.type === 'error') {
-          doneCount++;
-          if (doneCount >= count) {
-            clearTimeout(timeout);
-            resolve();
-          }
-        }
-      });
+  it('emits exactly one done per turn', async () => {
+    await withServer(17780, 'stream', async c => {
+      const stream = await c.openSse('tab-done-once');
+      await stream.next();
+      const messages: Record<string, unknown>[] = [];
+      const finished = c.collectUntilDone(stream, messages);
+      assert.strictEqual((await c.postJson('/review', { type: 'review', clientId: 'tab-done-once', payload: reviewPayload('hi') })).status, 202);
+      await finished;
+      await sleep(100);
+      const dones = messages.filter(m => m.type === 'done');
+      assert.strictEqual(dones.length, 1);
+      assert.strictEqual(dones[0].summary, 'all good');
+      assert.ok(messages.some(m => m.type === 'stream' && m.delta === 'hello'));
+      stream.close();
     });
-  }
+  });
 
-  function respondToBrowserActions(stream: Awaited<ReturnType<typeof openSse>>): void {
-    stream.onMessage(async message => {
-      if (message.type !== 'browser_action') return;
-      const action = String(message.action || '');
-      const requestId = String(message.requestId || '');
-      if (!requestId) return;
+  it('routes browser tool calls from the agent through the extension SSE channel', async () => {
+    await withServer(17781, 'tools', async c => {
+      const stream = await c.openSse('tab-tools');
+      await stream.next();
+      await c.activate('tab-tools');
+      c.respondToBrowserActions(stream);
+      const messages: Record<string, unknown>[] = [];
+      const finished = c.collectUntilDone(stream, messages);
+      await c.postJson('/review', { type: 'review', clientId: 'tab-tools', payload: reviewPayload('tools') });
+      await finished;
+      assert.ok(messages.some(m => m.type === 'browser_action' && m.action === 'get_page_snapshot'));
+      assert.ok(messages.some(m => m.type === 'stream' && String(m.delta).includes('DevTailor Test Page')));
+      stream.close();
+    });
+  });
 
-      let result: unknown = { ok: true };
-      if (action === 'get_page_snapshot') {
-        result = {
-          title: 'DevTailor Test Page',
-          url: 'http://localhost:3000',
-          elements: [
-            { elementId: 'el_button', role: 'button', label: '保存', rect: { x: 10, y: 20, w: 80, h: 32 } },
-          ],
-        };
-      } else if (action === 'get_console_logs') {
-        result = {
-          logs: [
-            { type: 'warn', text: 'layout shift warning' },
-          ],
-        };
+  it('reuses the live agent session for consecutive messages', async () => {
+    await withServer(17782, 'stream', async c => {
+      const stream = await c.openSse('tab-reuse');
+      await stream.next();
+      const messages: Record<string, unknown>[] = [];
+      const finished = c.waitForDoneCount(stream, messages, 2);
+      await c.postJson('/review', { type: 'review', clientId: 'tab-reuse', payload: reviewPayload('one') });
+      await c.postJson('/review', { type: 'review', clientId: 'tab-reuse', payload: reviewPayload('two') });
+      await finished;
+      assert.strictEqual(FakeAgentSession.instances.length, 1);
+      assert.strictEqual(FakeAgentSession.instances[0].sent, 2);
+      stream.close();
+    });
+  });
+
+  it('rejects review posts when the per-client queue is full (429)', async () => {
+    await withServer(17783, 'block', async c => {
+      const stream = await c.openSse('tab-queue-full');
+      await stream.next();
+      for (let i = 0; i < 11; i++) {
+        const res = await c.postJson('/review', { type: 'review', clientId: 'tab-queue-full', payload: reviewPayload('queue-fill') });
+        assert.strictEqual(res.status, 202, `post ${i}`);
       }
-
-      await postJson('/browser-action-result', {
-        requestId,
-        ok: true,
-        result,
-      });
+      const overflow = await c.postJson('/review', { type: 'review', clientId: 'tab-queue-full', payload: reviewPayload('queue-fill') });
+      assert.strictEqual(overflow.status, 429);
+      assert.strictEqual(overflow.body.ok, false);
+      assert.strictEqual(overflow.body.maxDepth, 10);
+      assert.ok(overflow.body.error.includes('queue full'));
+      stream.close();
     });
-  }
+  });
 
-  async function openSse(clientId: string, base = baseUrl): Promise<{
-    next: () => Promise<Record<string, any>>;
-    onMessage: (listener: (message: Record<string, any>) => void) => void;
-    close: () => void;
-  }> {
-    const req = http.get(`${base}/events?clientId=${encodeURIComponent(clientId)}`);
-    const queue: Record<string, any>[] = [];
-    const listeners: Array<(message: Record<string, any>) => void> = [];
-    const waiters: Array<(message: Record<string, any>) => void> = [];
-    let buffer = '';
+  it('cancel marks the displayed turn canceled without stopping the agent session', async () => {
+    await withServer(17784, 'block', async c => {
+      const stream = await c.openSse('tab-cancel');
+      await stream.next();
+      const messages: Record<string, unknown>[] = [];
+      stream.onMessage(m => messages.push(m));
+      await c.postJson('/review', { type: 'review', clientId: 'tab-cancel', payload: reviewPayload('long task') });
+      await sleep(100);
 
-    req.on('response', res => {
-      res.setEncoding('utf8');
-      res.on('data', chunk => {
-        buffer += chunk;
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() || '';
-        for (const part of parts) {
-          const line = part.split('\n').find(item => item.startsWith('data: '));
-          if (!line) continue;
-          const msg = JSON.parse(line.slice('data: '.length));
-          for (const listener of listeners) listener(msg);
-          const waiter = waiters.shift();
-          if (waiter) waiter(msg);
-          else queue.push(msg);
-        }
-      });
+      const cancel = await c.postJson('/cancel', { clientId: 'tab-cancel' });
+      assert.strictEqual(cancel.status, 200);
+      assert.strictEqual(cancel.body.canceled, true);
+      await sleep(50);
+      assert.ok(messages.some(m => m.type === 'tool_status' && m.toolStatus === 'canceled'));
+      const donesAfterCancel = messages.filter(m => m.type === 'done');
+      assert.strictEqual(donesAfterCancel.length, 1);
+      assert.strictEqual(donesAfterCancel[0].reason, 'cancelled');
+
+      // The agent finishes later: its output is dropped and no second done is emitted.
+      FakeAgentSession.instances[0].release();
+      await sleep(150);
+      assert.strictEqual(FakeAgentSession.instances[0].stopped, false);
+      assert.strictEqual(messages.filter(m => m.type === 'done').length, 1);
+      assert.ok(!messages.some(m => m.type === 'stream' && m.delta === 'late text'));
+
+      const again = await c.postJson('/cancel', { clientId: 'tab-cancel' });
+      assert.strictEqual(again.body.canceled, false);
+      stream.close();
     });
+  });
 
-    return {
-      next: () => new Promise(resolve => {
-        const msg = queue.shift();
-        if (msg) resolve(msg);
-        else waiters.push(resolve);
-      }),
-      onMessage: listener => listeners.push(listener),
-      close: () => req.destroy(),
-    };
-  }
+  it('reports queued state for a review posted while another is running', async () => {
+    await withServer(17786, 'block', async c => {
+      const stream = await c.openSse('tab-queued');
+      await stream.next();
+      const first = await c.postJson('/review', { type: 'review', clientId: 'tab-queued', payload: reviewPayload('a') });
+      assert.strictEqual(first.body.queued, false);
+      await sleep(50);
+      const second = await c.postJson('/review', { type: 'review', clientId: 'tab-queued', payload: reviewPayload('b') });
+      assert.strictEqual(second.body.queued, true);
+      assert.ok(second.body.queueDepth >= 1);
+      stream.close();
+    });
+  });
+
+  it('releases the active browser client after its SSE stream stays disconnected', async () => {
+    const previousGrace = WSServer.activeClientGraceMs;
+    WSServer.activeClientGraceMs = 100;
+    try {
+      await withServer(17785, 'stream', async c => {
+        const stream = await c.openSse('tab-disconnect');
+        await stream.next();
+        await c.activate('tab-disconnect');
+        assert.strictEqual((await c.getJson('/health')).body.activeClientId, 'tab-disconnect');
+        stream.close();
+        await sleep(300);
+        assert.strictEqual((await c.getJson('/health')).body.activeClientId, null);
+      });
+    } finally {
+      WSServer.activeClientGraceMs = previousGrace;
+    }
+  });
+
+  it('keeps the active client when the same clientId reconnects within the grace period', async () => {
+    const previousGrace = WSServer.activeClientGraceMs;
+    WSServer.activeClientGraceMs = 300;
+    try {
+      await withServer(17787, 'stream', async c => {
+        const first = await c.openSse('tab-flap');
+        await first.next();
+        await c.activate('tab-flap');
+        first.close();
+        await sleep(50);
+        const second = await c.openSse('tab-flap');
+        await second.next();
+        await sleep(450);
+        assert.strictEqual((await c.getJson('/health')).body.activeClientId, 'tab-flap');
+        second.close();
+      });
+    } finally {
+      WSServer.activeClientGraceMs = previousGrace;
+    }
+  });
 });

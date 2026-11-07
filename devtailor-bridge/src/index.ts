@@ -9,19 +9,19 @@
  *   npx devtailor status
  */
 
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import { existsSync, mkdirSync, openSync, closeSync } from 'fs';
 import { resolve, join } from 'path';
+import { connect } from 'net';
 import { WSServer } from './ws-server';
-import { WorkspaceToolService } from './workspace-tool-runner';
-import { RuntimeConfig } from './model-config';
+import { log, logError } from './log';
 
 const VERSION = '0.1.0';
 const DEFAULT_PORT = 34781;
 const PID_FILE = '/tmp/devtailor-bridge.pid';
 
 function printHelp(): void {
-  console.log(`
+  log(`
 DevTailor Bridge v${VERSION}
 
 Usage:
@@ -52,14 +52,14 @@ Examples:
   devtailor stop                         # stop daemon
 
 Note:
-  Configure the model from the DevTailor extension popup. Environment variables
-  are only used once as a migration fallback when no project config exists.
-  Bridge runs on fixed port ${DEFAULT_PORT} (required by extension)
+  The AI is Claude Code; the bridge only relays between the extension and Claude.
+  Bridge listens on 127.0.0.1:${DEFAULT_PORT} (fixed, required by extension).
+  Set DEVTAILOR_EXTENSION_ID to accept requests from a single extension id only.
   `);
 }
 
 function printVersion(): void {
-  console.log(VERSION);
+  log(VERSION);
 }
 
 function parseArgs(): { dir: string; daemon: boolean; command: string; follow: boolean } {
@@ -93,8 +93,8 @@ function parseArgs(): { dir: string; daemon: boolean; command: string; follow: b
       case '--dir':
       case '--cwd':
         if (!args[i + 1]) {
-          console.error('Error: --dir requires a value');
-          console.log('Run with --help for usage information');
+          logError('Error: --dir requires a value');
+          log('Run with --help for usage information');
           process.exit(1);
         }
         dir = resolve(args[++i]);
@@ -117,8 +117,8 @@ function parseArgs(): { dir: string; daemon: boolean; command: string; follow: b
         break;
 
       default:
-        console.error(`Error: unknown option '${arg}'`);
-        console.log('Run with --help for usage information');
+        logError(`Error: unknown option '${arg}'`);
+        log('Run with --help for usage information');
         process.exit(1);
     }
   }
@@ -130,7 +130,7 @@ function startDaemon(dir: string): void {
   try {
     mkdirSync(dataDir, { recursive: true });
   } catch (err) {
-    console.error(`[DevTailor] Failed to create data directory ${dataDir}:`, err);
+    logError(`[DevTailor] Failed to create data directory ${dataDir}:`, err);
     process.exit(1);
   }
   const logPath = join(dataDir, 'bridge.log');
@@ -138,7 +138,7 @@ function startDaemon(dir: string): void {
   try {
     logFd = openSync(logPath, 'a');
   } catch (err) {
-    console.error(`[DevTailor] Failed to open log file ${logPath}:`, err);
+    logError(`[DevTailor] Failed to open log file ${logPath}:`, err);
     process.exit(1);
   }
   const child = spawn(process.execPath, [__filename, '--dir', dir], {
@@ -151,36 +151,36 @@ function startDaemon(dir: string): void {
     // Ignore close errors; the child holds its own descriptor.
   }
   child.unref();
-  console.log(`[DevTailor] Daemon started (PID: ${child.pid})`);
-  console.log(`[DevTailor] Logs: ${logPath}`);
+  log(`[DevTailor] Daemon started (PID: ${child.pid})`);
+  log(`[DevTailor] Logs: ${logPath}`);
 }
 
 function tailBridgeLog(dir: string, follow: boolean): void {
   const logPath = join(dir, '.devtailor', 'bridge.log');
   if (!existsSync(logPath)) {
-    console.log('[DevTailor] No log file found');
+    log('[DevTailor] No log file found');
     return;
   }
   if (follow) {
     const tail = spawn('tail', ['-f', '-n', '100', logPath], { stdio: 'inherit' });
     tail.on('error', (err) => {
-      console.error(`[DevTailor] Failed to follow log: ${err.message}`);
+      logError(`[DevTailor] Failed to follow log: ${err.message}`);
     });
     return;
   }
   const { readFileSync } = require('fs');
   const content = readFileSync(logPath, 'utf8');
   const lines = content.split('\n');
-  console.log(lines.slice(-100).join('\n'));
+  log(lines.slice(-100).join('\n'));
 }
 
 function stopDaemon(): void {
   try {
     const pid = parseInt(require('fs').readFileSync(PID_FILE, 'utf8').trim(), 10);
     process.kill(pid, 'SIGTERM');
-    console.log('[DevTailor] Daemon stopped');
+    log('[DevTailor] Daemon stopped');
   } catch {
-    console.error('[DevTailor] No running daemon found');
+    logError('[DevTailor] No running daemon found');
   }
 }
 
@@ -188,36 +188,50 @@ function checkStatus(): void {
   try {
     const pid = parseInt(require('fs').readFileSync(PID_FILE, 'utf8').trim(), 10);
     process.kill(pid, 0);
-    console.log(`[DevTailor] Daemon is running (PID: ${pid})`);
+    log(`[DevTailor] Daemon is running (PID: ${pid})`);
   } catch {
-    console.log('[DevTailor] Daemon is not running');
+    log('[DevTailor] Daemon is not running');
   }
 }
 
-async function stopExistingBridgeIfOnPort(port: number): Promise<void> {
-  try {
-    const res = await fetch(`http://localhost:${port}/health`, {
-      signal: AbortSignal.timeout(3000),
+function findPortOwnerPid(port: number): Promise<number | null> {
+  return new Promise(resolve => {
+    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { timeout: 3000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const pid = parseInt(String(stdout).split('\n')[0].trim(), 10);
+      resolve(Number.isFinite(pid) ? pid : null);
     });
-    if (!res.ok) return;
-    const info = (await res.json().catch(() => null)) as { projectId?: string; pid?: number } | null;
-    if (!info || typeof info.projectId !== 'string') {
-      console.error(`[DevTailor] Port ${port} is occupied by a non-DevTailor process. Please free the port and try again.`);
-      process.exit(1);
-    }
-    const pid = typeof info.pid === 'number' ? info.pid : null;
-    if (pid && pid !== process.pid) {
-      console.log(`[DevTailor] Stopping existing bridge on port ${port} (PID: ${pid})`);
-      try {
-        process.kill(pid, 'SIGTERM');
-      } catch {
-        // Ignore kill errors; bind will fail later if process is still there.
-      }
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
+  });
+}
+
+function isPortAccepting(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = connect({ host: '127.0.0.1', port });
+    socket.setTimeout(1000);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('timeout', () => { socket.destroy(); resolve(false); });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+/** Never kill another process: report who holds the port and exit non-zero. */
+async function exitBecausePortInUse(port: number): Promise<never> {
+  const pid = await findPortOwnerPid(port);
+  let isBridge = false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
+    const info = (await res.json().catch(() => null)) as { ok?: boolean; protocolVersion?: number } | null;
+    isBridge = Boolean(info && info.ok === true && typeof info.protocolVersion === 'number');
   } catch {
-    // No responding process on the port; proceed and let bind fail if it is occupied.
+    // Not answering as a bridge.
   }
+  const owner = pid ? ` (PID: ${pid})` : '';
+  if (isBridge) {
+    logError(`[DevTailor] Port ${port} is in use${owner}: 另一个 DevTailor 桥接正在运行，请关闭对应的 Claude Code 会话或进程后重试。`);
+  } else {
+    logError(`[DevTailor] Port ${port} is in use${owner} by another process. Free the port and try again.`);
+  }
+  process.exit(1);
 }
 
 async function main(): Promise<void> {
@@ -239,8 +253,8 @@ async function main(): Promise<void> {
   }
 
   if (!existsSync(dir)) {
-    console.error(`Error: directory does not exist: ${dir}`);
-    console.log('Run with --help for usage information');
+    logError(`Error: directory does not exist: ${dir}`);
+    log('Run with --help for usage information');
     process.exit(1);
   }
 
@@ -249,32 +263,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  await stopExistingBridgeIfOnPort(DEFAULT_PORT);
+  // Check before touching the session store so a second instance never rewrites its database.
+  if (await isPortAccepting(DEFAULT_PORT)) await exitBecausePortInUse(DEFAULT_PORT);
 
   const dataDir = join(dir, '.devtailor');
-  const workspaceTools = new WorkspaceToolService(dir);
-  const runtime = createRuntimeConfig();
 
-  console.log(`[DevTailor] Starting bridge...`);
-  console.log(`  Runtime: ${runtime.label}`);
-  console.log(`  Dir:   ${dir}`);
-  console.log(`  Port:  ${DEFAULT_PORT}`);
+  log(`[DevTailor] Starting bridge...`);
+  log(`  Dir:   ${dir}`);
+  log(`  Port:  127.0.0.1:${DEFAULT_PORT}`);
 
-  const server = new WSServer(
-    DEFAULT_PORT,
-    dir,
-    dataDir,
-    runtime.key,
-    runtime.label,
-    runtime.createSession,
-    (tool, params, signal) => workspaceTools.run(tool, params, signal),
-  );
+  const server = new WSServer(DEFAULT_PORT, dir, dataDir);
   await server.init();
-  server.start();
+  try {
+    await server.start();
+  } catch (err: any) {
+    server.stop();
+    if (err?.code === 'EADDRINUSE') await exitBecausePortInUse(DEFAULT_PORT);
+    logError(`[DevTailor] Failed to start bridge: ${err?.message || err}`);
+    process.exit(1);
+  }
 
-  console.log(`[DevTailor] Session store: ${join(dataDir, 'sessions.db')}`);
+  log(`[DevTailor] Session store: ${join(dataDir, 'sessions.db')}`);
 
-  // Write PID file for status/stop commands
+  // PID file is only for `devtailor status|stop`; written after the port is ours.
   try {
     require('fs').writeFileSync(PID_FILE, String(process.pid));
   } catch {
@@ -282,10 +293,11 @@ async function main(): Promise<void> {
   }
 
   function shutdown(signal: string) {
-    console.log(`\n[DevTailor] ${signal} received, shutting down...`);
+    log(`\n[DevTailor] ${signal} received, shutting down...`);
     server.stop();
     try {
-      require('fs').unlinkSync(PID_FILE);
+      const fs = require('fs');
+      if (parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10) === process.pid) fs.unlinkSync(PID_FILE);
     } catch {}
     process.exit(0);
   }
@@ -295,11 +307,3 @@ async function main(): Promise<void> {
 }
 
 main();
-
-function createRuntimeConfig(): RuntimeConfig {
-  return {
-    key: 'local',
-    label: 'Local Agent Runtime',
-    createSession: undefined,
-  };
-}

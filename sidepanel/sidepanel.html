@@ -36,7 +36,7 @@
       <!-- Welcome state (hidden once messages exist) -->
       <div class="welcome" id="welcome">
         <h2 class="welcome__title">你好，开发助手</h2>
-        <p class="welcome__sub">指出页面问题，附上元素上下文，再让 Agent 定位和修复。</p>
+        <p class="welcome__sub">指出页面问题，附上元素上下文，再让 Claude Code 定位和修复。</p>
         <div class="welcome__suggestions" id="welcome-suggestions">
           <button class="chip" data-q="检查这个页面的可访问性问题">检查可访问性</button>
           <button class="chip" data-q="这个布局在移动端有什么问题？">移动端适配</button>
@@ -61,10 +61,11 @@
     <!-- Composer -->
     <form class="composer" id="composer">
       <div class="composer__input-wrap">
+        <div class="dt-screenshot-preview" id="screenshot-preview" aria-live="polite"></div>
         <textarea id="prompt" rows="1" placeholder="输入消息…" aria-label="消息输入"></textarea>
         <div class="composer__toolbar">
           <div class="composer__actions">
-            <button type="button" class="icon-btn" title="附件" aria-label="添加附件" disabled>
+            <button type="button" class="icon-btn" id="btn-attach" title="添加图片" aria-label="添加图片">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M5.2 8.5L8.7 5C9.6 4.1 11 4.1 11.9 5C12.8 5.9 12.8 7.3 11.9 8.2L7.4 12.7C6 14.1 3.8 14.1 2.4 12.7C1 11.3 1 9.1 2.4 7.7L7.3 2.8C9.2 0.9 12.2 0.9 14.1 2.8C16 4.7 16 7.7 14.1 9.6L10.2 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
@@ -76,6 +77,7 @@
               </svg>
             </button>
           </div>
+          <input id="image-file-input" type="file" accept="image/*" multiple hidden>
           <button type="submit" class="send-btn" id="send-btn" title="发送" aria-label="发送" disabled>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M8 3.2V12.8M8 3.2L4.4 6.8M8 3.2L11.6 6.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
@@ -86,6 +88,14 @@
     </form>
   </div>
 
+  <div class="dt-image-lightbox" id="image-lightbox" hidden aria-hidden="true">
+    <button type="button" class="dt-image-lightbox__close" id="image-lightbox-close" aria-label="关闭图片预览">×</button>
+    <img class="dt-image-lightbox__img" id="image-lightbox-img" alt="图片预览">
+  </div>
+
+  <script src="../lib/marked.umd.js"></script>
+  <script src="../content/modules/chat-markdown.js"></script>
+  <script src="../content/modules/chat-images.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

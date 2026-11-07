@@ -426,8 +426,16 @@ function bridgeProxyKey(tabId, clientId) {
 
 function sendBridgeProxyEvent(tabId, payload) {
   if (!tabId) return;
-  chrome.tabs.sendMessage(tabId, {
+  const message = {
     type: 'DEVTAILOR_BRIDGE_PROXY_EVENT',
+    ...payload,
+  };
+  chrome.tabs.sendMessage(tabId, message).catch(() => {});
+
+  // Also forward to sidePanel so it can piggyback on the active tab's SSE stream.
+  chrome.runtime.sendMessage({
+    type: 'DEVTAILOR_SIDEPANEL_PROXY_EVENT',
+    tabId,
     ...payload,
   }).catch(() => {});
 }
@@ -463,8 +471,12 @@ async function fetchBridgeUrl(bridgeUrl, path, options = {}) {
   }
 
   try {
+    // Extension service-worker GETs carry no Origin header, so the bridge guard
+    // identifies the extension by this custom header (pages cannot send it without
+    // a CORS preflight that the guard refuses). Do not drop it.
     return await fetch(`${bridgeUrl}${path}`, {
       ...options,
+      headers: { ...(options.headers || {}), 'X-DevTailor-Client': chrome.runtime.id },
       signal: controller.signal,
     });
   } finally {

@@ -937,8 +937,8 @@
           throw actionableError('No visible page element at requested point', 'POINT_NOT_ACTIONABLE', elAtPoint, explicitPoint);
         }
         const finishObserver = startChangeObserver();
+        // dispatchMouseSequence already dispatches the `click` event; calling el.click() as well would fire it twice.
         dispatchMouseSequence(elAtPoint, explicitPoint);
-        if (typeof elAtPoint.click === 'function') elAtPoint.click();
         const effects = await finishObserver(params.settleAfterMs);
         return {
           clicked: true,
@@ -968,8 +968,8 @@
     return withDevTailorUiHidden(async () => {
       const { point, hit, stableRect } = await waitForActionable(el, params);
       const finishObserver = startChangeObserver();
+      // dispatchMouseSequence already dispatches the `click` event; calling el.click() as well would fire it twice.
       dispatchMouseSequence(hit || el, point);
-      if (typeof el.click === 'function') el.click();
       const effects = await finishObserver(params.settleAfterMs);
       return {
         clicked: true,

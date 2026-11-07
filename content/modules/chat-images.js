@@ -2,6 +2,7 @@
  * DevTailor — Chat Image Manager
  *
  * Owns pending screenshot/pasted images and thumbnail preview rendering.
+ * No client-side compression — Sharp on the Bridge handles it losslessly.
  *
  * Registers: window.__domReview.chatImages
  */
