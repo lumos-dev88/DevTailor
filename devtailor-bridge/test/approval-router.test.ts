@@ -99,11 +99,23 @@ describe('ApprovalRouter', () => {
     router.stop();
   });
 
+  it('accepts an explicit targetClientId when no client is active (permission relay)', async () => {
+    const { router, sent, broadcast } = makeRouter({ activeClientId: null, timeoutMs: 5000 });
+    const promise = router.request(payload, { targetClientId: 'client-C' });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].clientId, 'client-C');
+    assert.equal((broadcast.find(e => e.type === 'approval_pending') as any).targetClientId, 'client-C');
+    assert.equal(router.receiveDecision({ approvalId: (sent[0].event as any).approvalId, decision: 'rejected' }), true);
+    assert.equal((await promise).decision, 'rejected');
+  });
+
   it('stop() resolves pending approvals as rejected', async () => {
     const { router } = makeRouter({ activeClientId: 'client-A', timeoutMs: 5000 });
     const promise = router.request(payload);
     router.stop();
     const result = await promise;
     assert.equal(result.decision, 'rejected');
+    assert.equal(result.cancelled, true);
+    assert.equal(result.reason, 'stopped');
   });
 });

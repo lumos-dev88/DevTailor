@@ -9,7 +9,7 @@ import { WSServer } from '../src/ws-server';
 import { makeRig, Rig, TINY_PNG_DATA_URL } from './channel-helpers';
 
 const EXPECTED_ACTIONS: BrowserActionName[] = [
-  'take_visible_screenshot', 'get_page_snapshot', 'get_console_logs', 'get_console_message',
+  'take_visible_screenshot', 'get_page_snapshot', 'find_elements', 'get_console_logs', 'get_console_message',
   'get_element_targets', 'save_element_target', 'delete_element_target', 'reload_page',
   'click_page', 'type_text', 'fill_text', 'press_key', 'clear_state', 'wait_for_selector',
   'wait_for_text', 'run_actions', 'request_user_assistance', 'run_js',
@@ -22,15 +22,15 @@ describe('mcp browser tools', () => {
     rig = null;
   });
 
-  it('registers all 18 browser tools plus reply, with schemas taken from the definitions', async () => {
+  it('registers all 19 browser tools plus reply, with schemas taken from the definitions', async () => {
     rig = await makeRig();
     const { tools } = await rig.client.listTools();
     const names = tools.map(t => t.name).sort();
     assert.deepStrictEqual(names, [...EXPECTED_ACTIONS, 'reply'].sort());
-    assert.strictEqual(tools.length, 19);
+    assert.strictEqual(tools.length, 20);
 
     const definitions = createBrowserToolDefinitions();
-    assert.strictEqual(definitions.length, 18);
+    assert.strictEqual(definitions.length, 19);
     for (const def of definitions) {
       const tool = tools.find(t => t.name === def.name)!;
       assert.strictEqual(tool.description, def.description);
@@ -38,7 +38,7 @@ describe('mcp browser tools', () => {
       assert.strictEqual(tool.inputSchema.type, 'object');
       assert.strictEqual((tool.inputSchema as any).additionalProperties, false, def.name);
     }
-    assert.strictEqual(listBrowserMcpTools().length, 18);
+    assert.strictEqual(listBrowserMcpTools().length, 19);
     // Prefixes are added by Claude Code; descriptions must not hard-code them.
     assert.ok(!tools.some(t => String(t.description).includes('mcp__')));
   });

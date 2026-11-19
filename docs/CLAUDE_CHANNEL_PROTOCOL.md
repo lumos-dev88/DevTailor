@@ -24,7 +24,7 @@ new Server({ name, version }, {
 })
 ```
 
-- `experimental['claude/channel/permission']` 是 permission relay 的可选 capability（`{}` 声明；`false`/省略 = 不声明；v2.1.234 之前 `false` 也算声明）。**本步不声明**（见第 7 节）。
+- `experimental['claude/channel/permission']` 是 permission relay 的可选 capability（`{}` 声明；`false`/省略 = 不声明；v2.1.234 之前 `false` 也算声明）。**DevTailor 现在声明它**（见第 7 节），要求 Claude Code ≥ 2.1.81。
 - fakechat 的写法一致：`capabilities: { tools: {}, experimental: { 'claude/channel': {} } }`。
 
 ## 2. 推送通知
@@ -75,21 +75,40 @@ fakechat 的 `reply` 返回 `{ content: [{ type: 'text', text: 'sent' }] }`，�
 - Claude Code 给 stdio server 的环境里设置 `CLAUDE_PROJECT_DIR`（项目根）。官方文档**没有**写 stdio server 的 cwd 一定是项目目录（只有 headersHelper 等的工作目录有说明：项目 `.mcp.json` 声明的 server 在项目目录）。所以项目目录解析顺序：`DEVTAILOR_PROJECT_DIR` → `CLAUDE_PROJECT_DIR` → `process.cwd()`。
 - 工具在 Claude 里的名字带 `mcp__<server>__` 前缀，工具描述里不要硬写。
 
-## 7. Permission relay（本步不做）
+## 7. Permission relay（已实现）
 
-- `notifications/claude/channel/permission_request`（Claude Code → server）：`request_id`（5 个小写字母，去掉 `l`）、`tool_name`、`description`、`input_preview`。
-- `notifications/claude/channel/permission`（server → Claude Code）：`request_id`、`behavior: 'allow'|'deny'`。
-- 终端对话框保持打开，先到先得；ID 不匹配/重复则静默丢弃。relay 只覆盖 Bash/Write/Edit 等工具使用审批；项目信任与 MCP server consent 对话框不会 relay。
-- 声明该 capability 前必须能认证发送方（任何能通过 channel 回复的人都能批准工具调用）。`ApprovalRouter`/`QuestionRouter` 保留但本步无调用方。
+要求 Claude Code **≥ 2.1.81**（更低版本不认这个 capability，通知被忽略）。
+
+**声明**：`capabilities.experimental` 同时写 `'claude/channel': {}` 与 `'claude/channel/permission': {}`（`tools: {}` 不变）。声明前必须能认证发送方——这里只有本机 Browser 侧边栏能答复（HTTP 守卫 + 本机 SSE），任何能通过 channel 回复的人也能批准工具调用。
+
+**事件流**：
+
+1. Claude Code → server（notification）：`notifications/claude/channel/permission_request`，params `{ request_id, tool_name, description, input_preview }`。`request_id` 是 5 个小写字母、不含 `l`。server 用 `server.setNotificationHandler(z.object({ method: z.literal(...), params: z.object({...}) }), handler)` 接收（zod 见 `devtailor-bridge/src/mcp-server.ts`）。
+2. Bridge → 侧边栏（SSE `approval_request`）：`{ approvalId, toolCallId: request_id, toolName: tool_name, action: description, risk: 'medium', detail: input_preview }`。卡片用默认的「允许 / 拒绝」两个按钮（request 没有选项列表）。其他已连接 UI 收到 `approval_pending`。权限请求针对的是工具调用而不是页面，所以没有接管任何标签时也会投递给某个已连接 UI（优先 active client）。
+3. 用户在侧边栏点按钮 → `POST /approval-decision { approvalId, decision: 'approved'|'rejected' }` → `approval_resolved` 广播。
+4. server → Claude Code（notification）：`notifications/claude/channel/permission`，params `{ request_id, behavior: 'allow'|'deny' }`，用 `server.notification({ method, params })` 发送。
+
+**语义（关键）**：
+
+- 只有用户**明确点了**允许/拒绝才发裁决。
+- 侧边栏**没有在线客户端**（没有任何 SSE 连接）→ **不发任何裁决，也不自动拒绝**，直接返回，让终端本地对话框接管。
+- 审批**超时**（`ApprovalRouter` 默认 5 分钟，`reason: 'timeout'`）→ **不发裁决**（终端对话框可能还开着）。被取消 / Bridge 停止同理不发裁决。
+- 处理过程**异常** → 发 `deny`。
+- 同一个 `request_id` 正在处理中重复到来 → 忽略（去重），不重复弹卡、不重复裁决。
+- 终端对话框与侧边栏**先到先得**：终端先批准时 Claude Code 会丢弃迟到的裁决。但协议**没有「终端已答复」的撤销信号**，所以侧边栏上那张卡片会一直留到 5 分钟超时才变「已超时」。
+- relay 只覆盖 Bash/Write/Edit 等**工具使用审批**；项目信任与 MCP server consent 对话框不会 relay。
+
+**代码位置**：`src/mcp-server.ts`（`onPermissionRequest` 回调 + 裁决通知）、`src/ws-server.ts`（`requestChannelPermission`）、`src/mcp-main.ts`（接线）、扩展 `content/modules/bridge-core.js`（审批状态机）与 `content/modules/chat-render.js`（允许 / 拒绝按钮）。
 
 ## 8. 已知限制（对 DevTailor 的影响）
 
 1. channel 是 research preview，需要开发 flag + 交互式会话；协议可能变化。
-2. 通知无确认；没加载为 channel 时静默丢弃 → Bridge 用 30 秒“等待响应”提示 + 10 分钟无回复兜底（见 `HANDOFF.md`）。
+2. 通知无确认；没加载为 channel 时静默丢弃 → Bridge 已不再提供“等待响应”提示和无回复兜底，需要用开发参数启动并自行确认终端状态（见 `HANDOFF.md`）。
 3. 同时到达的多条通知会合并成一次处理，所以 Bridge 用 `turn_id` 标识每条，reply 显式回传。
 4. 没有 cancel/clear 能力：取消只能再推一条 `kind=cancel` 通知“请求”Claude 停止；`/new-session` 只能重置展示层。
 5. 图片：channel `content` 是文本，**不使用 MCP image content 作入站**。DevTailor 的决定：入站截图落盘到 `<project>/.devtailor/images/<turn_id>-<n>.<ext>`（单张 ≤ 8MB，仅 png/jpeg/webp/gif，文件名只含 `[A-Za-z0-9_-]`），在 content 与 `meta.image_paths` 里写绝对路径并提示用 Read 查看——Read 看图是 Claude Code 里最稳妥的方式。出站（工具返回的截图）既返回 MCP image content，也落盘一份并在文本里附路径作备用。
 6. 单会话单 channel 流：并发独立事件流需要多会话。
+7. permission relay（第 7 节）：协议没有「终端已答复」的撤销信号，侧边栏卡片在终端先批准后仍会留到 5 分钟超时才消失；relay 只覆盖工具使用审批，项目信任/MCP consent 对话框不参与。
 
 ## 9. 插件打包（第三步依赖的结论）
 

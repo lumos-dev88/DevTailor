@@ -1,10 +1,11 @@
 /**
- * DevTailor — Sidebar State Module
+ * DevTailor — Page highlights for marks
  *
- * Keeps the sidebar summary and batch actions in sync. Page-level mark editing
- * lives in badges.js; the sidebar only shows aggregate context for AI.
+ * Draws the persistent dashed outline around every marked element and offers the batch actions
+ * (undo last, discard all). Mark editing lives in badges.js and the toolbar drawer (toolbar.js);
+ * the name `sidebar` is historical.
  *
- * Depends on: ui (shadow-ui.js), store (review-store.js), badges (badges.js)
+ * Depends on: store (review-store.js), badges (badges.js), hitTest
  * Registers: window.__domReview.sidebar
  */
 (() => {
@@ -101,21 +102,7 @@
   }
 
   function render() {
-    const marks = getMarks();
-    const ui = window.__domReview.ui;
-    const summary = ui && ui.getContextSummary && ui.getContextSummary();
-    const count = marks.length;
-    const commented = marks.filter(mark => (mark.comment || '').trim()).length;
-
-    if (summary) {
-      summary.textContent = count === 0
-        ? '0 个标记'
-        : `${count} 个标记，${commented} 条说明`;
-    }
-
-    if (ui && ui.updateBatchBar) {
-      ui.updateBatchBar(count);
-    }
+    // The toolbar re-renders itself from store changes; nothing to do here.
   }
 
   function updatePersistentHighlights() {
@@ -187,12 +174,6 @@
     updatePersistentHighlights();
   }
 
-  function focusAiWorkspace() {
-    if (!window.__domReview.ui) return;
-    window.__domReview.ui.showSidebar();
-    window.__domReview.ui.focusChatInput();
-  }
-
   function syncCommentsFromUI() {
     window.__domReview.badges?.syncSelectedComment?.();
   }
@@ -215,10 +196,6 @@
     updatePersistentHighlights,
     syncCommentsFromUI,
     undoLast,
-    focusAiWorkspace,
-    show() {
-      window.__domReview.ui.showSidebar();
-    },
     discardBatch: clearMarks,
     getMarkCount() {
       return getMarks().length;

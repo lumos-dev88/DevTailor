@@ -53,6 +53,8 @@ Examples:
 
 Note:
   The AI is Claude Code; the bridge only relays between the extension and Claude.
+  真实使用请在项目目录运行 scripts/claude-devtailor.sh，由 Claude Code 拉起 Bridge
+  (running this CLI standalone only serves the placeholder debug session).
   Bridge listens on 127.0.0.1:${DEFAULT_PORT} (fixed, required by extension).
   Set DEVTAILOR_EXTENSION_ID to accept requests from a single extension id only.
   `);
@@ -272,6 +274,9 @@ async function main(): Promise<void> {
   log(`  Dir:   ${dir}`);
   log(`  Port:  127.0.0.1:${DEFAULT_PORT}`);
 
+  log('[DevTailor] 真实使用请在项目目录运行 scripts/claude-devtailor.sh，由 Claude Code 拉起 Bridge；');
+  log('[DevTailor] 本进程独立运行时只提供 placeholder 调试会话。');
+
   const server = new WSServer(DEFAULT_PORT, dir, dataDir);
   await server.init();
   try {
@@ -292,18 +297,24 @@ async function main(): Promise<void> {
     // Ignore PID file errors
   }
 
+  let shuttingDown = false;
   function shutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log(`\n[DevTailor] ${signal} received, shutting down...`);
-    server.stop();
     try {
       const fs = require('fs');
       if (parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10) === process.pid) fs.unlinkSync(PID_FILE);
     } catch {}
-    process.exit(0);
+    server.shutdown().finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
   }
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('unhandledRejection', reason => {
+    logError('[DevTailor] unhandledRejection:', reason instanceof Error ? reason.message : reason);
+  });
 }
 
 main();

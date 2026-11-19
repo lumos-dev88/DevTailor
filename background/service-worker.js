@@ -8,13 +8,22 @@
  * - Message relay between popup and content scripts
  */
 
+// Pure logic module (no chrome API): builds the X-DevTailor-Project header value.
+// Relative to this worker script (background/), like every other module here.
+importScripts('project-header.js');
+
 const STORAGE_KEY = 'dr_custom_patterns';
 const ENABLED_KEY = 'dr_enabled';
 const BRIDGE_URLS = ['http://localhost:34781', 'http://127.0.0.1:34781'];
 const BRIDGE_CONNECT_TIMEOUT_MS = 1500;
 const pendingBrowserActions = new Map();
 const bridgeSseProxies = new Map();
+let sidePanelFocusRequestedAt = 0;
 let preferredBridgeUrlIndex = 0;
+// Project the bridge currently serves (learned from /health). Attached to every
+// Bridge/Hub request as X-DevTailor-Project so a Hub can route to the right project.
+let currentProjectId = '';
+const projectHeader = self.__domReview.projectHeader;
 
 const MAIN_WORLD_START_SCRIPTS = [
   'content/modules/browser-console-bridge.js'
@@ -22,9 +31,11 @@ const MAIN_WORLD_START_SCRIPTS = [
 const MAIN_WORLD_SCRIPTS = [
   'content/modules/framework-bridge.js'
 ];
+// Keep in sync with the isolated-world content_scripts list in manifest.json (order matters).
 const ISOLATED_WORLD_SCRIPTS = [
-  'lib/marked.umd.js',
   'content/modules/review-store.js',
+  'content/modules/marks-core.js',
+  'content/modules/toolbar-core.js',
   'content/modules/element-targets.js',
   'content/modules/selector-generator.js',
   'content/modules/framework-detector.js',
@@ -34,23 +45,16 @@ const ISOLATED_WORLD_SCRIPTS = [
   'content/modules/element-saver.js',
   'content/modules/badges.js',
   'content/modules/sidebar.js',
-  'content/modules/chat-markdown.js',
-  'content/modules/chat-tools.js',
-  'content/modules/chat-scroll.js',
-  'content/modules/chat-images.js',
-  'content/modules/message-store.js',
-  'content/modules/chat-persistence.js',
-  'content/modules/chat-preview-editor.js',
-  'content/modules/chat-bridge-events.js',
-  'content/modules/chat-send.js',
-  'content/modules/chat-panel.js',
+  'content/modules/bridge-core.js',
   'content/modules/prompt-builder.js',
   'content/modules/browser-console.js',
   'content/modules/browser-action-dom.js',
   'content/modules/browser-actions.js',
   'content/modules/ws-client.js',
+  'content/modules/marks-sync.js',
   'content/modules/screenshot.js',
   'content/modules/selector-mode.js',
+  'content/modules/toolbar.js',
   'content/modules/export-import.js',
   'content/content-script.js'
 ];
@@ -207,7 +211,7 @@ if (chrome.sidePanel?.setPanelBehavior) {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 }
 
-// --- Keyboard shortcut: toggle sidebar ---
+// --- Keyboard shortcut: toggle the marks toolbar drawer ---
 
 async function toggleSidebar(tabId) {
   const injection = await injectDevTailorIntoTab(tabId);
@@ -215,12 +219,11 @@ async function toggleSidebar(tabId) {
   return chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
-      if (window.__domReview && window.__domReview.ui) {
-        window.__domReview.wsClient?.connect?.();
-        window.__domReview.ui.toggleSidebar();
-        return window.__domReview.ui.isSidebarVisible();
-      }
-      return false;
+      const toolbar = window.__domReview && window.__domReview.toolbar;
+      if (!toolbar) return false;
+      window.__domReview.wsClient?.connect?.();
+      if (toolbar.isOpen()) toolbar.close(); else toolbar.open(false);
+      return toolbar.isOpen();
     }
   }).catch(() => {});
 }
@@ -371,7 +374,7 @@ async function updateActionState(tabId, url) {
   const isAllowed = allPatterns.some(p => urlMatchesPattern(url, p));
 
   if (isAllowed) {
-    chrome.action.setTitle({ tabId, title: 'DevTailor — Toggle sidebar' });
+    chrome.action.setTitle({ tabId, title: 'DevTailor — marks toolbar on this page' });
     chrome.action.setBadgeText({ tabId, text: '' });
   } else {
     chrome.action.setTitle({ tabId, title: 'DevTailor — site not allowed' });
@@ -460,6 +463,24 @@ function rememberBridgeUrl(bridgeUrl) {
   if (index >= 0) preferredBridgeUrlIndex = index;
 }
 
+/**
+ * MV3 recycles the worker, which drops currentProjectId. The /health bodies the
+ * worker proxies carry the project, so re-learn it from there (content scripts
+ * heartbeat /health every 30s and the side panel polls it). Only a parseable,
+ * header-safe id is adopted: a details-less /health (untrusted caller) must not
+ * wipe a project we already know.
+ */
+function rememberProjectFromHealth(path, bodyText) {
+  if (!/^\/health(?:[/?#]|$)/.test(path)) return;
+  try {
+    const info = JSON.parse(bodyText);
+    const projectId = projectHeader.normalizeProjectId(info?.projectId || '');
+    if (projectId) currentProjectId = projectId;
+  } catch {
+    // Not JSON (or truncated) — keep the project we already know.
+  }
+}
+
 async function fetchBridgeUrl(bridgeUrl, path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BRIDGE_CONNECT_TIMEOUT_MS);
@@ -474,16 +495,25 @@ async function fetchBridgeUrl(bridgeUrl, path, options = {}) {
     // Extension service-worker GETs carry no Origin header, so the bridge guard
     // identifies the extension by this custom header (pages cannot send it without
     // a CORS preflight that the guard refuses). Do not drop it.
+    // X-DevTailor-Project rides along (only when a project id is known) so the Hub
+    // can tell which project this client belongs to; both the plain proxy requests
+    // and the SSE /events stream go through here.
+    // The external abort listener stays attached after the response arrives: for a
+    // streaming response (SSE) the caller aborts later to close the connection.
     return await fetch(`${bridgeUrl}${path}`, {
       ...options,
-      headers: { ...(options.headers || {}), 'X-DevTailor-Client': chrome.runtime.id },
+      headers: {
+        ...(options.headers || {}),
+        ...projectHeader.buildProjectHeaders(currentProjectId),
+        'X-DevTailor-Client': chrome.runtime.id,
+      },
       signal: controller.signal,
     });
+  } catch (err) {
+    if (externalSignal) externalSignal.removeEventListener('abort', abortFromExternal);
+    throw err;
   } finally {
     clearTimeout(timeout);
-    if (externalSignal) {
-      externalSignal.removeEventListener('abort', abortFromExternal);
-    }
   }
 }
 
@@ -639,6 +669,7 @@ async function bridgeProxyRequest(message) {
         });
         const text = await response.text();
         rememberBridgeUrl(bridgeUrl);
+        rememberProjectFromHealth(path, text);
         return {
           ok: response.ok,
           status: response.status,
@@ -682,7 +713,17 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
+// Content scripts mirror marks + screenshots here so they survive a page reload (see marks-sync.js).
+// storage.session is trusted-contexts-only by default; content scripts need it opened up.
+try {
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+} catch (err) {
+  console.warn('[DevTailor] storage.session access level not set:', err && err.message);
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // A closed tab can never come back: drop its saved marks and screenshots.
+  try { chrome.storage.session.remove(`dt_state_${tabId}`); } catch {}
   for (const [key, proxy] of bridgeSseProxies) {
     if (!key.startsWith(`${tabId}:`)) continue;
     bridgeSseProxies.delete(key);
@@ -698,16 +739,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'DT_MARKS_CHANGED') {
+    // Page marks changed: relay a minimal snapshot to the side panel, tagged with the sender tab.
+    const tabId = sender.tab?.id ?? null;
+    if (tabId != null) {
+      const { type: _type, ...snapshot } = message;
+      chrome.runtime.sendMessage({ type: 'DT_MARKS_UPDATED', tabId, ...snapshot }).catch(() => {});
+    }
+    return false;
+  }
+
+  if (message.type === 'DT_SIDEPANEL_READY') {
+    sendResponse({ focusInput: Date.now() - sidePanelFocusRequestedAt < 5000 });
+    return false;
+  }
+
   if (message.type === 'OPEN_SIDE_PANEL') {
     (async () => {
       const tabId = message.tabId || sender.tab?.id || null;
       const windowId = message.windowId || sender.tab?.windowId || null;
+      // sidePanel.open must run inside the user gesture that triggered this message: no awaits before it.
+      if (message.focusInput) sidePanelFocusRequestedAt = Date.now();
       if (tabId) {
         await chrome.sidePanel.open({ tabId });
       } else if (windowId) {
         await chrome.sidePanel.open({ windowId });
       } else {
         throw new Error('No active tab or window for side panel');
+      }
+      if (message.focusInput) {
+        // An already-open panel hears this; a panel that is still loading asks DT_SIDEPANEL_READY.
+        setTimeout(() => chrome.runtime.sendMessage({ type: 'DT_SIDEPANEL_FOCUS_INPUT' }).catch(() => {}), 300);
       }
       sendResponse({ ok: true });
     })().catch(err => {
@@ -772,6 +834,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'DEVTAILOR_BRIDGE_PROXY_REQUEST') {
     bridgeProxyRequest(message).then(sendResponse);
     return true;
+  }
+
+  if (message.type === 'SET_PROJECT_ID') {
+    // Content scripts and the side panel report the project they read from /health.
+    // Only a header-safe id is kept ([A-Za-z0-9_-]); anything else means "no project"
+    // and drops the header (see background/project-header.js).
+    currentProjectId = projectHeader.normalizeProjectId(message.projectId || '');
+    sendResponse({ ok: true, projectId: currentProjectId });
+    return false;
   }
 
   if (message.type === 'GET_ENABLED') {

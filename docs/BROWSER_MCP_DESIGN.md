@@ -1,6 +1,6 @@
 # DevTailor Browser Tool — 用户故事与历史设计
 
-> 当前实现：Bridge 本身就是 Claude Code 的 MCP stdio server（`devtailor-bridge/src/mcp-main.ts`），browser tool 作为 **MCP 工具**直接暴露（`src/mcp-browser-tools.ts`，由 `createBrowserToolDefinitions()` 生成 18 个，外加 `reply`），调用经 `BrowserActionRouter.run()` → SSE `browser_action` → 当前接管 tab。不再有 `/mcp` HTTP endpoint、ACP 注册或 `/browser-tool` HTTP 路由（后者是无审批的 `run_js` 通道，已删除）。下文的用户故事和工具边界仍作设计参考，其中提到 ACP / `/browser-tool` / `browser-mcp-server.ts` / `acp-session.ts` 的地方是历史设计，以代码和 `docs/HANDOFF.md`「Claude Code 通道」为准。
+> 当前实现：Bridge 本身就是 Claude Code 的 MCP stdio server（`devtailor-bridge/src/mcp-main.ts`），browser tool 作为 **MCP 工具**直接暴露（`src/mcp-browser-tools.ts`，由 `createBrowserToolDefinitions()` 生成 18 个，外加 `reply`），调用经 `BrowserActionRouter.run()` → SSE `browser_action` → 当前接管 tab。没有 MCP 的 HTTP endpoint，也没有 `/browser-tool` HTTP 路由（后者是无审批的 `run_js` 通道，已删除）。下文的「会话」一律指「Claude Code 通道」的展示会话语义（一个 Claude 会话 → 一个展示会话 → 一个当前接管 tab），以代码和 `docs/HANDOFF.md`「Claude Code 通道」为准。
 
 ## 一、定位
 
@@ -123,7 +123,7 @@ Claude Code ──MCP──> Bridge ──SSE──> Extension ──> 当前 ta
 **Pros:**
 - 不需要额外 MCP 包或 Chrome 远程调试端口。
 - 直接使用用户正在看的 tab，符合 DevTailor 的"当前页面标记"模型。
-- 复用现有 `clientId -> ACP session` 绑定，不需要重新设计页面身份。
+- 复用现有 `clientId -> 当前接管 tab` 绑定（Claude Code 经 MCP 工具调用，由 `BrowserActionRouter` 路由到 `activeClientId`），不需要重新设计页面身份。
 - 能力足够覆盖开发调试常见闭环，不需要用户反复手动恢复页面状态。
 
 **Cons:**
@@ -133,7 +133,7 @@ Claude Code ──MCP──> Bridge ──SSE──> Extension ──> 当前 ta
 
 ### 方案 B: 使用 chrome-devtools-mcp
 
-Bridge 在 ACP session 中注册外部 `chrome-devtools-mcp`，让 agent 通过 CDP 操作浏览器。
+Bridge 在 Claude Code 会话（channel 后端）里注册外部 `chrome-devtools-mcp`，让 agent 通过 CDP 操作浏览器。
 
 **Pros:**
 - DevTools 能力完整，console/network/storage/performance 都可读。
@@ -166,7 +166,7 @@ Bridge 在 ACP session 中注册外部 `chrome-devtools-mcp`，让 agent 通过 
 
 1. **贴合当前主轴**：DevTailor 的核心仍是"标记/截图/描述 -> AI 修改代码"，browser tool 负责把当前开发页面恢复到可验证状态并反馈结果。
 2. **最少用户负担**：不引入远程调试端口、额外 MCP 包、额外浏览器启动方式。
-3. **会话边界清晰**：沿用现有 `clientId` 和 ACP session 绑定，避免操作错 tab。
+3. **会话边界清晰**：沿用现有 `clientId` 和「Claude Code 通道的展示会话 → 当前接管 tab」绑定，避免操作错 tab。
 4. **渐进增强**：先做截图和只读状态，再加入点击、输入、console、reload 等开发调试高频能力。
 
 ---
@@ -183,10 +183,11 @@ Bridge 在 ACP session 中注册外部 `chrome-devtools-mcp`，让 agent 通过 
 devtailor-bridge/src/
   index.ts
   ws-server.ts
-  acp-session.ts
+  mcp-main.ts                 # Claude Code 拉起的 stdio MCP server + channel
+  claude-channel-session.ts   # channel turn 表 / reply / 超时 / 取消
   prompt-builder.ts
   types.ts
-  browser-mcp-server.ts       # MCP tool 定义、initialize/list/call
+  mcp-browser-tools.ts        # browser tool → MCP 工具定义（19 个）
   browser-action-router.ts    # tool call -> 当前 client SSE action
   browser-action-types.ts     # browser action request/result 类型
 
@@ -259,11 +260,11 @@ click_page({ clientId: "tab_123", pageUrl: "http://localhost:5173", text: "登�
 
 | 模块 | 职责 |
 |---|---|
-| `browser-mcp-server.ts` | 对 ACP/Claude Code 暴露 browser tools，做参数校验、超时、结果包装 |
+| `mcp-browser-tools.ts` | 把 browser tool 定义为 Claude Code 可调用的 MCP 工具，做参数校验、超时、结果包装 |
 | `browser-action-router.ts` | 找到当前 active client，通过 SSE 下发 `browser_action`，等待 result |
 | `browser-action-types.ts` | 共享 action/result 类型，避免散落字符串 |
 | `ws-server.ts` | 复用现有 SSE 连接，增加 `browser_action_result` 接收入口 |
-| `acp-session.ts` | session 创建时注册 Browser MCP；不把 frontend history 当上下文 |
+| `claude-channel-session.ts` | channel 会话（turn 表 / `reply` / 超时）；不把 frontend history 当上下文 |
 | `background/service-worker.js` | 通过 `chrome.scripting.executeScript` 在当前 sender tab 执行 `run_js`，保持 Claude in Chrome 式真实浏览器执行路径 |
 
 ### Extension 模块职责
@@ -320,7 +321,9 @@ type BrowserActionResult = {
 
 - 当前 URL、title、viewport。
 - 最近 console 状态，至少包含 error/warn 计数。
-- 可交互元素列表：`elementId`、locator recipes、role、accessible name、label、placeholder、testId、text、selector、rect、visible、disabled。
+- 可交互元素列表：`elementId`、locator recipes、role、accessible name、label、placeholder、testId、text、selector、rect、visible、inViewport、disabled。
+  - `label` 是单一无障碍名称：按 aria-labelledby → aria-label → `<label>` → placeholder → title → name 取第一个非空来源，不拼接、**不含元素 id**。
+  - `visible` 只表示已渲染（尺寸/display/visibility/opacity），点击前会 scrollIntoView，语义不变；`inViewport` 额外判断是否与视口及所有 overflow 裁剪祖先（跨 shadow host）有交集，横向滚动标签栏中被裁掉的元素为 `false`。
 - 可见 portal surface：dialog、menu、listbox、tooltip、popover、Radix/Headless UI portal wrapper 等摘要，帮助 AI 在打开弹层后发现浮层上下文。
 - 表单关系：label -> input、button type、form action/method、必填字段。
 - 元素数量有上限，优先返回视口内、带 testId、具备 role/label 的可交互元素。
@@ -380,6 +383,8 @@ AI -> Browser MCP run_js -> Bridge -> 当前 tab content script
 - 默认 `world: "MAIN"`，用于读取页面运行时全局变量、框架 store、页面侧函数等。
 - 可选 `world: "ISOLATED"`，更适合只读 DOM、localStorage、sessionStorage、computed style 这类不需要页面 JS globals 的场景。
 - `run_js` 仍然不是 DevTools Protocol。严格 CSP / unsafe-eval 页面可能影响 MAIN world 下的动态函数执行；如果要获得 DevTools console 等级的任意 JS 能力，应作为未来可选 CDP 后端，而不是默认架构。
+- `run_js` 的 `code` 是**函数表达式**（如 `() => { ...; return v }`，可 `async`），会被 `(0, eval)("(" + code + ")")` 后调用；裸语句或顶层 `return` 会 SyntaxError。
+- 被接管的 tab 在后台（`document.visibilityState === 'hidden'`）时 `requestAnimationFrame` 暂停、页面不渲染，动画/布局/闪烁类采样没有意义。`get_page_snapshot` 返回 `page: { visibilityState, hasFocus }`，`run_js` 的结果带同样的 `page`；hidden 时额外带 `warning`（snapshot 里是 `warnings[]`），提示用户把该 tab 切到前台或重新接管正在看的 tab。接管的是哪个 tab 只取决于最后一次点“接管”，切标签/切窗口不会改变它。
 - 结构化页面验证优先使用 `get_page_snapshot`、`click_page`、`fill_text`、`type_text`、`press_key`、`wait_for_selector`、`wait_for_text`、`get_console_logs` 和 `run_actions`，`run_js` 只作为调试兜底。
 
 ### Prompt 规则
@@ -392,6 +397,8 @@ Browser tools 对 AI 暴露时，需要明确：
 - 你正在操作当前 DevTailor 页面，不需要传 tab、URL、clientId。
 - 需要点击或输入且页面结构不明确时，用 `get_page_snapshot` 获取页面结构；如果已有稳定 selector、testId、role/label 或明确 mark，就不必为了例行流程先 snapshot。动态列表重排后重新 snapshot，或者使用 testId、role/label、nearText、fresh elementId 这类稳定 locator。
 - `elementId` 是 snapshot 产生的稳定 locator handle，不是永久 DOM id；reload 或大规模 DOM 变化后应重新 snapshot。
+- **Label 定位匹配所有来源**：`label` locator 对 `labelSources(el)` 的每一项以及它们的空格拼接（兼容旧快照输出的拼接 label）逐个匹配，任一命中即可；所以传 aria-label 或 placeholder 文本都能定位到同一个输入框，但传元素 id 不会命中。
+- `assert_text` 通过时结果不含 `actual`（避免整页文本占上下文），失败时 `actual` 截断到 500 字符。
 - **Label 匹配增强**：`label` 参数会统一常见中文/英文标点、全角/半角空格和零宽字符，并在非精确匹配时移除标点降级重试。`fill_text` / `type_text` 的 `text` 是写入内容，不参与 locator 匹配；如需按现有文本定位，应使用 `label`、`role`、`testId`、`nearText` 或 selector 等 locator 字段。
 - 当需要在当前页面执行多个操作（恢复状态、验证表单、批量验证）时，可以使用 `run_actions` 一次性执行；简单单步操作或即时检查不要硬凑批量流程。
 - `run_actions` 中 `click`、`type`、`fill`、`assert_element` step 必须显式传 locator。`click` / `assert_element` 可用 selector、elementId、markId、text、role、label、testId、nearText 或 point；`type` / `fill` 的 `text` 是写入内容，不是 locator，需另传 label、role、testId、nearText、selector、elementId、targetId 或 targetName。
@@ -429,6 +436,8 @@ interface DevTailorBrowserTools {
       level?: 'summary' | 'interactive-only' | 'full'
       maxElements?: number
       roles?: string[]
+      scope?: string
+      viewportOnly?: boolean
       visibleOnly?: boolean
     }
     returns: {
@@ -454,6 +463,28 @@ interface DevTailorBrowserTools {
         disabled: boolean
         rect: { x: number; y: number; width: number; height: number }
       }>
+    }
+  }
+
+  find_elements: {
+    params: {
+      query: string
+      role?: string
+      maxResults?: number
+    }
+    returns: {
+      query: string
+      matches: Array<{
+        elementId: string
+        role: string
+        tag: string
+        text: string
+        label: string
+        rect: { x: number; y: number; width: number; height: number }
+        inViewport: boolean
+      }>
+      totalMatches: number
+      truncated: boolean
     }
   }
 
@@ -737,9 +768,9 @@ interface DevTailorBrowserToolsP1 {
 
 - content script 从 background 获取 Chrome `tabId`。
 - frontend 生成 `clientId = tab_{tabId}`。
-- Bridge 维护 `clientId -> ACP session`。
+- Bridge 维护 `clientId -> 展示会话（Claude Code 通道里的一轮 turn）`。
 
-Browser tool 调用时，Bridge 必须知道当前 ACP session 对应的 active `clientId`，然后只向这个 `clientId` 的 SSE 连接下发 browser action。这个绑定是 bridge 内部状态，不暴露给 AI。
+Browser tool 调用时，Bridge 必须知道当前展示会话对应的 active `clientId`（即 `BrowserActionRouter` 的 `activeClientId`），然后只向这个 `clientId` 的 SSE 连接下发 browser action；MCP 工具结果原路返回给 Claude。这个绑定是 bridge 内部状态，不暴露给 AI。
 
 不推荐：
 

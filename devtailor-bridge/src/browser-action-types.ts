@@ -1,6 +1,7 @@
 export type BrowserActionName =
   | 'take_visible_screenshot'
   | 'get_page_snapshot'
+  | 'find_elements'
   | 'get_console_logs'
   | 'get_console_message'
   | 'get_element_targets'

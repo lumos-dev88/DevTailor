@@ -2,7 +2,9 @@
  * DevTailor — SSE Client Module
  *
  * Receives Bridge events through the extension background proxy.
- * Kept as window.__domReview.wsClient to avoid touching the chat panel API.
+ * Kept as window.__domReview.wsClient. The page no longer renders chat: this client owns the
+ * tab's takeover (activate), executes `browser_action` requests, and feeds the toolbar (status dot,
+ * pending-approval red dot).
  *
  * Registers: window.__domReview.wsClient
  */
@@ -31,6 +33,7 @@
   let projectListeners = [];
   let sessionListeners = [];
   let projectInfo = null;
+  let lastSentProjectId = null;
   let sessionId = null;
   let sessionTitle = null;
   let activeClientId = null;
@@ -38,6 +41,9 @@
   let currentBridgeUrl = null;
   let connecting = false;
   let recoveryTimer = null;
+  let everConnected = false;
+  let backend = null;
+  let disconnectedAt = 0;
 
   function getBridgeUrl() {
     return currentBridgeUrl;
@@ -86,12 +92,34 @@
     return responseFromProxy(result);
   }
 
+  /**
+   * JSON call through the service-worker proxy, parsed with bridgeCore:
+   * { ok, status, reachable, data, code, message }. Never throws.
+   */
+  async function call(path, options = {}) {
+    const core = window.__domReview.bridgeCore;
+    try {
+      const result = await runtimeMessage({
+        type: 'DEVTAILOR_BRIDGE_PROXY_REQUEST',
+        path,
+        method: options.method || 'GET',
+        headers: options.body !== undefined ? { 'Content-Type': 'application/json' } : {},
+        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      });
+      if (result.bridgeUrl) setBridgeUrl(result.bridgeUrl);
+      return core.parseProxyResponse(result);
+    } catch (err) {
+      return core.parseProxyResponse({ ok: false, status: 0, error: err?.message || String(err) });
+    }
+  }
+
   function isExtensionContextInvalidated(error) {
     return /Extension context invalidated/i.test(error?.message || String(error || ''));
   }
 
   function setStatus(newStatus) {
     if (status === newStatus) return;
+    if (status === 'connected') disconnectedAt = Date.now();
     status = newStatus;
     statusListeners.forEach(fn => {
       try { fn(status); } catch (e) { if (!isExtensionContextInvalidated(e)) console.warn('[DevTailor] SSE status listener error:', e); }
@@ -132,8 +160,35 @@
     return /^tab_\d+$/.test(String(id || ''));
   }
 
+  /**
+   * Bridge/Hub requests must carry the project they belong to (X-DevTailor-Project).
+   * The service worker owns the header; we only tell it which project /health reported,
+   * and only when that id changes. Failures stay silent: the header is an optimization
+   * for a Hub fronting several projects, never a reason to break the page.
+   */
+  function syncProjectIdToBackground(info) {
+    const projectId = typeof info?.projectId === 'string' ? info.projectId : '';
+    // A Hub serving several projects with no single top-level project: stay header-less
+    // and let the Hub apply its own fallback rules.
+    if (!projectId && Array.isArray(info?.projects) && info.projects.length > 1) return;
+    if (projectId === lastSentProjectId) return;
+    // Nothing learned yet and nothing to report (a bridge that answers /health without
+    // details): no point in a message, the header stays off.
+    if (!projectId && lastSentProjectId === null) return;
+    lastSentProjectId = projectId;
+    try {
+      chrome.runtime.sendMessage({ type: 'SET_PROJECT_ID', projectId }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      // Extension context invalidated (page reload/extension update) — ignore.
+    }
+  }
+
   function setProjectInfo(info) {
-    if (!info || !info.projectId) return;
+    if (!info) return;
+    syncProjectIdToBackground(info);
+    if (!info.projectId) return;
     const next = {
       projectId: info.projectId,
       projectName: info.projectName || 'project',
@@ -219,25 +274,16 @@
     }
   }
 
-  async function syncActiveSessionSnapshot(reason = 'reconnect') {
-    try {
-      const url = `/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`;
-      const response = await bridgeFetch(url);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body?.ok || !body.activeSessionId) return;
-      setSessionInfo(body.activeSessionId, body.session?.title || null);
-      emit({
-        type: 'session_snapshot',
-        tabId: clientId,
-        sessionId: body.activeSessionId,
-        sessionTitle: body.session?.title || null,
-        messages: Array.isArray(body.messages) ? body.messages : [],
-        isProcessing: Boolean(body.isProcessing),
-        reason,
-      });
-    } catch (err) {
-      console.warn('[DevTailor] Failed to resync active session snapshot:', err.message || err);
+  /** Ask the bridge which session is current and tell the chat layer. */
+  async function syncActiveSession(reason = 'reconnect', extra = {}) {
+    const res = await call(`/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`);
+    if (!res.ok || !res.data) {
+      emit({ type: 'active_session_sync', ok: false, reason, failure: window.__domReview.bridgeCore.failureInfo(res), ...extra });
+      return;
     }
+    const body = res.data;
+    setSessionInfo(body.activeSessionId || null, body.session?.title || null);
+    emit({ type: 'active_session_sync', ok: true, reason, body, backend, ...extra });
   }
 
   async function connectViaProxy() {
@@ -365,54 +411,28 @@
   async function send(payload, options = {}) {
     if (status !== 'connected') {
       connect();
-      return { ok: false, queued: false, status };
+      return { ok: false, queued: false, status, code: 'bridge_offline', error: window.__domReview.bridgeCore.errorInfo('bridge_offline').text };
     }
     const body = typeof payload === 'string' ? JSON.parse(payload) : payload;
-    try {
-      const response = await bridgeFetch('/review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...body,
-          clientId,
-          tabId: clientId,
-        }),
-      });
-      if (!response.ok) {
-        const message = await response.text();
-        emit({ type: 'error', message: message || `HTTP ${response.status}` });
-        return { ok: false, queued: false, status, error: message || `HTTP ${response.status}` };
-      }
-      return { ok: true, queued: false };
-    } catch (err) {
-      emit({ type: 'error', message: err.message || 'Failed to send request to DevTailor Bridge' });
-      if (options.reconnectOnError !== false) reconnectSoon();
-      return { ok: false, queued: false, status, error: err.message || 'Failed to send request to DevTailor Bridge' };
+    const res = await call('/review', { method: 'POST', body: { ...body, clientId, tabId: clientId } });
+    if (!res.ok) {
+      const info = window.__domReview.bridgeCore.failureInfo(res);
+      if (!res.reachable && options.reconnectOnError !== false) reconnectSoon();
+      return { ok: false, queued: false, status, code: info.code, error: info.text };
     }
+    return { ok: true, queued: Boolean(res.data?.queued), queueDepth: res.data?.queueDepth || 0 };
   }
 
   async function cancel() {
     if (status !== 'connected') {
       return { ok: false, status };
     }
-
-    try {
-      const response = await bridgeFetch('/cancel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, tabId: clientId }),
-      });
-      if (!response.ok) {
-        const message = await response.text();
-        emit({ type: 'error', message: message || `HTTP ${response.status}` });
-        return { ok: false, error: message };
-      }
-      return await response.json();
-    } catch (err) {
-      const message = err.message || 'Failed to cancel current task';
-      emit({ type: 'error', message });
-      return { ok: false, error: message };
+    const res = await call('/cancel', { method: 'POST', body: { clientId, tabId: clientId } });
+    if (!res.ok) {
+      const info = window.__domReview.bridgeCore.failureInfo(res);
+      return { ok: false, code: info.code, error: info.text };
     }
+    return { ok: true, canceled: Boolean(res.data?.canceled), reason: res.data?.reason };
   }
 
   async function activate() {
@@ -420,134 +440,35 @@
       connect();
       return { ok: false, status };
     }
-
-    try {
-      const response = await bridgeFetch('/activate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, tabId: clientId }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = body.error || `HTTP ${response.status}`;
-        emit({ type: 'error', message });
-        return { ok: false, error: message };
-      }
-      setActiveClient(body.activeClientId || clientId);
-      if (body.activeSessionId || body.activeSessionTitle) {
-        setSessionInfo(body.activeSessionId || null, body.activeSessionTitle || null);
-      }
-      return body;
-    } catch (err) {
-      const message = err.message || 'Failed to activate current tab';
-      emit({ type: 'error', message });
-      return { ok: false, error: message };
+    const res = await call('/activate', { method: 'POST', body: { clientId, tabId: clientId } });
+    if (!res.ok) {
+      return { ok: false, error: window.__domReview.bridgeCore.failureInfo(res).text };
     }
+    const body = res.data || {};
+    setActiveClient(body.activeClientId || clientId);
+    if (body.activeSessionId || body.activeSessionTitle) {
+      setSessionInfo(body.activeSessionId || null, body.activeSessionTitle || null);
+    }
+    return body;
   }
 
-  function newSession() {
+  /** POST /new-session { clientId } — starts a fresh conversation for this tab. */
+  async function newSession() {
     if (status !== 'connected') {
-      return Promise.resolve({ ok: false, status });
+      return { ok: false, status, error: window.__domReview.bridgeCore.errorInfo('bridge_offline').text };
     }
-    return bridgeFetch('/new-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, tabId: clientId }),
-    }).then(async response => {
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = body.error || `HTTP ${response.status}`;
-        return { ok: false, error: message };
-      }
-      if (body.sessionId) setSessionInfo(body.sessionId, body.sessionTitle || '新会话');
-      else setSessionInfo(null, null);
-      return { ok: true, ...body };
-    }).catch(err => {
-      emit({ type: 'error', message: err.message || 'Failed to reset session' });
-      return { ok: false, error: err.message };
-    });
+    const res = await call('/new-session', { method: 'POST', body: { clientId, tabId: clientId } });
+    if (!res.ok) {
+      const info = window.__domReview.bridgeCore.failureInfo(res);
+      return { ok: false, code: info.code, error: info.text };
+    }
+    const body = res.data || {};
+    if (body.sessionId) setSessionInfo(body.sessionId, body.title || null);
+    return { ok: true, ...body };
   }
 
-  async function listSessions() {
-    if (status !== 'connected') {
-      return { ok: false, status };
-    }
-    try {
-      const url = `/sessions?clientId=${encodeURIComponent(clientId || 'default')}`;
-      const response = await bridgeFetch(url);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        return { ok: false, error: body.error || `HTTP ${response.status}` };
-      }
-      return body;
-    } catch (err) {
-      return { ok: false, error: err.message || 'Failed to list sessions' };
-    }
-  }
-
-  async function getActiveSession() {
-    if (status !== 'connected') {
-      return { ok: false, status };
-    }
-    try {
-      const url = `/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`;
-      const response = await bridgeFetch(url);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        return { ok: false, error: body.error || `HTTP ${response.status}` };
-      }
-      return body;
-    } catch (err) {
-      return { ok: false, error: err.message || 'Failed to get active session' };
-    }
-  }
-
-  async function loadSession(targetSessionId) {
-    if (status !== 'connected') {
-      return { ok: false, status };
-    }
-    try {
-      const response = await bridgeFetch('/sessions/load', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, tabId: clientId, sessionId: targetSessionId }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = body.error || `HTTP ${response.status}`;
-        emit({ type: 'error', message });
-        return { ok: false, error: message };
-      }
-      setSessionInfo(targetSessionId, body.sessionTitle || body.session?.title || null);
-      return body;
-    } catch (err) {
-      emit({ type: 'error', message: err.message || 'Failed to load session' });
-      return { ok: false, error: err.message };
-    }
-  }
-
-  async function deleteSession(targetSessionId) {
-    if (status !== 'connected') {
-      return { ok: false, status };
-    }
-    try {
-      const response = await bridgeFetch('/sessions/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, tabId: clientId, sessionId: targetSessionId }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = body.error || `HTTP ${response.status}`;
-        emit({ type: 'error', message });
-        return { ok: false, error: message };
-      }
-      if (body.activeSessionId) setSessionInfo(body.activeSessionId, body.activeSessionTitle || body.sessionTitle || null);
-      return body;
-    } catch (err) {
-      emit({ type: 'error', message: err.message || 'Failed to delete session' });
-      return { ok: false, error: err.message };
-    }
+  function getActiveSession() {
+    return call(`/sessions/active?clientId=${encodeURIComponent(clientId || 'default')}`);
   }
 
   async function handleBrowserAction(action) {
@@ -705,6 +626,9 @@
       });
       connecting = false;
       reconnectAttempts = 0;
+      const reconnect = everConnected;
+      const disconnectedMs = reconnect && disconnectedAt ? Date.now() - disconnectedAt : 0;
+      everConnected = true;
       setStatus('connected');
       lastHeartbeatTime = Date.now();
       startHeartbeat();
@@ -712,8 +636,11 @@
         .then(async response => {
           if (!response.ok) return;
           const info = await response.json();
+          // setProjectInfo forwards the project id to the background (header) even when
+          // /health carries no top-level projectId.
+          setProjectInfo(info);
           if (info?.projectId) {
-            setProjectInfo(info);
+            backend = typeof info.backend === 'string' ? info.backend : backend;
             if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
               setActiveClient(info.activeClientId || null);
             }
@@ -721,7 +648,7 @@
               setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
             }
           }
-          await syncActiveSessionSnapshot('reconnect');
+          await syncActiveSession(reconnect ? 'reconnect' : 'initial', { reconnect, disconnectedMs });
         })
         .catch(err => console.warn('[DevTailor] Proxy health check failed:', err.message || err));
       return false;
@@ -754,11 +681,11 @@
     send,
     cancel,
     newSession,
-    listSessions,
     getActiveSession,
-    loadSession,
-    deleteSession,
+    call,
     getStatus,
+    getReconnectAttempts: () => reconnectAttempts,
+    getBackend: () => backend,
     getBridgeUrl,
     request: bridgeFetch,
     isActive: () => isActiveClient,

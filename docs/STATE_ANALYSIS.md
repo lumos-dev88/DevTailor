@@ -30,10 +30,10 @@
 
 ### 3. 工具状态标记
 
-- 工具状态不再无条件标记完成。
-- 只在有活跃流输出或 done 收尾时按当前事件语义统一清理剩余工具状态。
-- `done.reason === "tool_calls"` 表示 runtime 达到显式步骤上限但仍有未执行工具调用，前端必须把剩余 pending/running 工具标为 skipped，而不是 completed；工具轮次不设上限，由用户停止。
-- 规则：工具卡片 UI 是展示状态，不等同于工具真实业务断言；业务成功仍应看 tool result 或后续断言。
+- 已移除：Claude 通道（以及 Placeholder 会话）不产生 `thinking` / `tool_call` / `tool_update`，Bridge 的 onThinking/onToolCall/onToolUpdate 回调、侧边栏 thinking 块与工具卡片（含 `chat-tools.js`）已整体删除。
+- 仍保留：取消时的 `tool_status { toolStatus: 'canceled' }`，前端只把它当作“本轮已取消”的收尾信号，不依赖任何 tool 消息。
+- 旧会话兼容：`ws-server.loadPersistedSessions()` 恢复 SQLite 历史时过滤掉 `type` 为 `thinking` / `tool` 的消息。
+- AI 实时状态（`agent_status` 的 `thinking/tool/waiting`）来自 hook 状态机，是另一条链路，不受影响。
 
 ### 4. SSE 心跳机制
 

@@ -84,7 +84,6 @@ export function recorder(): AgentCallbacks & { events: Array<[string, unknown?]>
     streamed: '',
     onStream(delta: string) { events.push(['stream', delta]); rec.streamed += delta; },
     onNotice(text: string) { events.push(['notice', text]); },
-    onThinking(delta: string) { events.push(['thinking', delta]); },
     onDone(summary?: string) { events.push(['done', summary]); },
     onError(message: string) { events.push(['error', message]); },
   };

@@ -42,8 +42,13 @@ async function main(): Promise<void> {
 
   // The hub's writer is bound once the MCP server exists.
   let writer: ReturnType<typeof channelNotifier> | null = null;
+  let webRef: WSServer | null = null;
   const hub = new ClaudeChannelHub({
     projectDir: dir,
+    getDesignDocPaths: () => webRef?.designDocPaths() ?? [],
+    // Turn boundaries feed the "what is the AI doing" badge over the same
+    // callback indirection, so the hub stays free of HTTP/SSE knowledge.
+    onAgentStatus: kind => webRef?.notifyAgentTurn(kind),
     notify: async params => {
       if (!writer) throw new Error('MCP server is not connected');
       await writer(params);
@@ -51,6 +56,7 @@ async function main(): Promise<void> {
   });
 
   const web = new WSServer(PORT, dir, dataDir, 'claude', 'Claude Code', () => new ClaudeChannelSession(hub));
+  webRef = web;
   await web.init();
   try {
     await web.start();
@@ -69,6 +75,9 @@ async function main(): Promise<void> {
     runBrowserAction: (action, params) => web.runBrowserAction(action, params),
     projectDir: dir,
     version: VERSION,
+    // Tool-use permission prompts (Bash/Write/Edit/MCP tools) are relayed to
+    // the browser side panel; `null` = no answer there, terminal dialog decides.
+    onPermissionRequest: req => web.requestChannelPermission(req),
   });
   writer = channelNotifier(server);
 

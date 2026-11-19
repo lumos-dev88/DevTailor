@@ -8,11 +8,13 @@
  * in the local bridge runtime. This module only
  * handles user-level dynamic data.
  *
- * Registers: window.__domReview.promptBuilder
+ * The side panel asks the content script for `buildParts` (the page-owned part of a /review
+ * payload: { pageUrl, items, screenshots }) and adds the user's text itself.
+ *
+ * Browser: window.__domReview.promptBuilder. Node (tests): module.exports.
  */
 (() => {
   'use strict';
-  window.__domReview = window.__domReview || {};
 
   const MAX_OUTER_HTML = 2000;
   const MAX_TEXT = 200;
@@ -72,14 +74,17 @@
     return value ? [value] : [];
   }
 
-  function buildPayload(marks, userText, imagesInput) {
-    const intent = (userText || '').trim() || '';
-    const images = normalizeImages(imagesInput);
+  function currentHref() {
+    return typeof location !== 'undefined' ? location.href : '';
+  }
 
-    const items = marks.map((mark, idx) => {
+  /** Page-owned part of a review payload. `index` is the mark's badge number on the page. */
+  function buildParts(marks, imagesInput, options = {}) {
+    const images = normalizeImages(imagesInput);
+    const items = (Array.isArray(marks) ? marks : []).map((mark, idx) => {
       const ctx = mark.context || {};
       return {
-        index: idx + 1,
+        index: mark.index || idx + 1,
         selector: mark.selector,
         xpath: mark.xpath || '',
         outerHTML: truncate(ctx.outerHTML || '', MAX_OUTER_HTML),
@@ -90,18 +95,29 @@
         framework: ctx.framework || null,
       };
     });
+    return { pageUrl: options.pageUrl || currentHref(), items, screenshots: images };
+  }
 
+  function buildPayload(marks, userText, imagesInput) {
+    const intent = (userText || '').trim() || '';
+    const parts = buildParts(marks, imagesInput);
     return {
       type: 'review',
       payload: {
-        pageUrl: location.href,
+        pageUrl: parts.pageUrl,
         userIntent: intent,
-        items,
-        screenshots: images,
-        screenshot: images[0] || null,
+        items: parts.items,
+        screenshots: parts.screenshots,
+        screenshot: parts.screenshots[0] || null,
       }
     };
   }
 
-  window.__domReview.promptBuilder = { buildPayload };
+  const api = { buildParts, buildPayload, formatMark };
+
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (typeof window !== 'undefined') {
+    window.__domReview = window.__domReview || {};
+    window.__domReview.promptBuilder = api;
+  }
 })();

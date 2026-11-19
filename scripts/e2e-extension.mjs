@@ -314,7 +314,7 @@ async function main() {
     if (!(await panel.center('#dt-chat-input'))) await panel.click('#dt-fab');
     await waitFor(() => panel.center('#dt-chat-input'), { what: 'panel visible' });
 
-    await waitFor(async () => /已连接|已接管/.test(await panel.text('#dt-status-text')), { what: 'panel connected', timeout: 20000 });
+    await waitFor(async () => /已连接|已接管|未接管/.test(await panel.text('#dt-status-text')), { what: 'panel connected', timeout: 20000 });
     record('in-page panel: shows connected to bridge', true, await panel.text('#dt-status-text'));
     await panel.click('#dt-btn-activate-tab');
     await waitFor(async () => /已接管/.test(await panel.text('#dt-status-text')), { what: 'takeover', timeout: 10000 });

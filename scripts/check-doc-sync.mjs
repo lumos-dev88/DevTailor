@@ -80,7 +80,6 @@ const rules = [
     implementation: [
       /^devtailor-bridge\/src\/index\.ts$/,
       /^devtailor-bridge\/src\/mcp-main\.ts$/,
-      /^devtailor-bridge\/src\/agent-presets\.ts$/,
       /^devtailor-bridge\/package\.json$/,
     ],
     docs: [

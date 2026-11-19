@@ -15,8 +15,7 @@
       </button>
       <span class="topbar__project" id="project-name" title="项目">-</span>
       <div class="topbar__actions">
-        <button class="topbar-btn" id="btn-new-session" type="button" title="新建会话">新建</button>
-        <button class="topbar-btn" id="btn-history" type="button" title="历史会话">历史</button>
+        <button class="topbar-btn" id="btn-new-session" type="button" title="新建会话">新会话</button>
       </div>
     </div>
 
@@ -30,6 +29,37 @@
         <span class="meta-strip__value" id="active-tab">-</span>
       </div>
     </div>
+
+    <!-- Current session title -->
+    <div class="session-bar" id="session-bar">
+      <span class="session-bar__title" id="session-title" title="">未选择会话</span>
+      <!-- 最近一次工具调用的极简状态（工具名 + 状态；不是聊天消息，默认隐藏） -->
+      <span id="tool-status" class="tool-status" role="status" aria-live="polite" hidden>
+        <span class="tool-status__dot" aria-hidden="true"></span>
+        <span class="tool-status__text" id="tool-status-text"></span>
+      </span>
+      <span class="prompt-ctx" id="prompt-ctx" hidden></span>
+    </div>
+
+    <!-- Design spec (DESIGN.md) manager, collapsed by default -->
+    <section class="design-docs" id="design-docs" aria-label="设计规范">
+      <button class="design-docs__head" id="design-docs-toggle" type="button" aria-expanded="false" aria-controls="design-docs-body">
+        <span class="design-docs__chev" aria-hidden="true"></span>
+        <span class="design-docs__title">设计规范</span>
+        <span class="design-docs__summary" id="design-docs-summary">未添加</span>
+      </button>
+      <div class="design-docs__body" id="design-docs-body" hidden>
+        <ul class="dd-list" id="design-docs-list"></ul>
+        <div class="dd-error" id="design-docs-error" role="alert" hidden></div>
+        <div class="dd-actions">
+          <button class="topbar-btn" id="design-docs-upload" type="button">上传 .md</button>
+          <input id="design-docs-file" type="file" accept=".md,.markdown,.txt" multiple hidden>
+          <span class="dd-hint">启用的文件只把路径交给 AI，由它自行读取并遵守；单文件 ≤256KB，最多 10 个。</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="status-banner" id="status-banner" role="status" hidden></div>
 
     <!-- Message stream -->
     <main class="stream" id="stream">
@@ -47,16 +77,22 @@
 
       <!-- Messages rendered here -->
       <div class="messages" id="messages"></div>
-
-      <!-- Thinking indicator -->
-      <div class="thinking" id="thinking" hidden>
-        <span class="thinking__dot"></span>
-        <span class="thinking__dot"></span>
-        <span class="thinking__dot"></span>
-      </div>
     </main>
 
+    <button class="chat-jump" id="chat-jump" type="button">回到底部</button>
     <div class="sidepanel-hint" id="sidepanel-hint">标记和截图会作为 AI 上下文附加到下一条消息</div>
+
+    <!-- Mark tray: page marks + screenshots that ride along with the next message (hidden when empty) -->
+    <section class="mark-tray" id="mark-tray" hidden aria-label="待发送的页面标记">
+      <div class="mark-tray__head">
+        <button type="button" class="mark-tray__toggle" id="mark-tray-toggle" aria-expanded="true" aria-controls="mark-tray-body">
+          <span class="mark-tray__chev" aria-hidden="true"></span>
+          <span id="mark-tray-title">页面标记</span>
+        </button>
+        <button type="button" class="mark-tray__link" id="mark-tray-clear-sent" hidden>清除已发送</button>
+      </div>
+      <div class="mark-tray__body" id="mark-tray-body"></div>
+    </section>
 
     <!-- Composer -->
     <form class="composer" id="composer">
@@ -96,6 +132,16 @@
   <script src="../lib/marked.umd.js"></script>
   <script src="../content/modules/chat-markdown.js"></script>
   <script src="../content/modules/chat-images.js"></script>
+  <script src="../content/modules/chat-scroll.js"></script>
+  <script src="../content/modules/message-store.js"></script>
+  <script src="../content/modules/bridge-core.js"></script>
+  <script src="../content/modules/marks-core.js"></script>
+  <script src="../content/modules/chat-render.js"></script>
+  <script src="../content/modules/chat-styles.js"></script>
+  <script src="../content/modules/chat-conversation.js"></script>
+  <script src="mark-tray.js"></script>
+  <script src="design-docs.js"></script>
+  <script src="tool-status.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

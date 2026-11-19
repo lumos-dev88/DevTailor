@@ -1,17 +1,59 @@
 /**
  * MCP server definition for the Claude Code channel: capabilities,
- * instructions, and the tool list (18 browser tools + `reply`).
+ * instructions, and the tool list (19 browser tools + `reply`).
  * Transport-agnostic; mcp-main.ts connects it to stdio.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { BrowserToolRunner } from './agent-session';
 import { ClaudeChannelHub, CHANNEL_NOTIFICATION_METHOD } from './claude-channel-session';
-import { createBrowserMcpTools, McpToolResult } from './mcp-browser-tools';
+import { createBrowserToolsServer, MCP_SERVER_NAME } from './mcp-browser-tools';
 import { log } from './log';
 
-export const MCP_SERVER_NAME = 'devtailor';
+export { MCP_SERVER_NAME };
+
+/** Claude Code -> channel server: a tool call needs the user's permission. */
+export const PERMISSION_REQUEST_METHOD = 'notifications/claude/channel/permission_request';
+/** Channel server -> Claude Code: the user's verdict for one permission request. */
+export const PERMISSION_DECISION_METHOD = 'notifications/claude/channel/permission';
+
+/** `notifications/claude/channel/permission_request` params (request_id: 5 lowercase letters, no `l`). */
+export const PermissionRequestNotificationSchema = z.object({
+  method: z.literal(PERMISSION_REQUEST_METHOD),
+  params: z.object({
+    request_id: z.string(),
+    // Tolerate missing display fields: only the id is needed to answer.
+    tool_name: z.string().default('tool'),
+    description: z.string().default(''),
+    input_preview: z.string().default(''),
+  }),
+});
+
+export interface ChannelPermissionRequest {
+  requestId: string;
+  toolName: string;
+  description: string;
+  inputPreview: string;
+}
+
+/**
+ * `'allow'` / `'deny'` relay a verdict to Claude Code; `null` relays nothing so
+ * the terminal's own permission dialog stays in charge.
+ */
+export type ChannelPermissionVerdict = 'allow' | 'deny' | null;
+
+/** Writes one permission verdict over the server's transport. */
+export async function sendPermissionDecision(
+  server: Server,
+  requestId: string,
+  behavior: 'allow' | 'deny',
+): Promise<void> {
+  await server.notification({
+    method: PERMISSION_DECISION_METHOD,
+    params: { request_id: requestId, behavior },
+  });
+}
 
 export const CHANNEL_INSTRUCTIONS = [
   '浏览器里的 DevTailor 侧边栏消息以 <channel source="..."> 到达，meta 含 turn_id、page_url、client_id、kind（review 或 cancel）。',
@@ -43,39 +85,71 @@ export interface ChannelMcpServerOptions {
   runBrowserAction: BrowserToolRunner;
   projectDir: string;
   version?: string;
+  /**
+   * Relays a Claude Code permission request to a browser UI. Resolves with the
+   * user's verdict, or `null` when no UI could answer (nothing is relayed then,
+   * so the terminal's dialog keeps control). Throw to deny.
+   */
+  onPermissionRequest?: (req: ChannelPermissionRequest) => Promise<ChannelPermissionVerdict>;
 }
 
 export function createChannelMcpServer(options: ChannelMcpServerOptions): Server {
   const { hub, runBrowserAction, projectDir } = options;
-  const server = new Server(
-    { name: MCP_SERVER_NAME, version: options.version || '0.1.0' },
-    {
-      capabilities: {
-        experimental: { 'claude/channel': {} },
-        tools: {},
-      },
-      instructions: CHANNEL_INSTRUCTIONS,
-    },
-  );
-
-  const browserTools = createBrowserMcpTools({
+  const server = createBrowserToolsServer({
     run: runBrowserAction,
     projectDir,
-    onActivity: () => hub.noteActivity(),
+    version: options.version,
+    instructions: CHANNEL_INSTRUCTIONS,
+    capabilities: {
+      experimental: {
+        'claude/channel': {},
+        'claude/channel/permission': {},
+      },
+    },
+    extraTools: [REPLY_TOOL],
+    handleExtraCall: (name, args) => {
+      if (name !== REPLY_TOOL.name) return undefined;
+      const result = hub.handleReply(args as Parameters<typeof hub.handleReply>[0]);
+      return { isError: !result.ok, content: [{ type: 'text', text: result.message }] };
+    },
   });
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...browserTools.list(), REPLY_TOOL],
-  }));
+  /** request_ids currently being relayed: duplicates are dropped, not re-asked. */
+  const inFlight = new Set<string>();
 
-  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<McpToolResult> => {
-    const { name } = req.params;
-    const args = req.params.arguments ?? {};
-    if (name === REPLY_TOOL.name) {
-      const result = hub.handleReply(args);
-      return { isError: !result.ok, content: [{ type: 'text', text: result.message }] };
+  server.setNotificationHandler(PermissionRequestNotificationSchema, async notification => {
+    const { request_id: requestId, tool_name: toolName, description, input_preview: inputPreview } = notification.params;
+    const relay = options.onPermissionRequest;
+    if (!relay) return;
+    if (!requestId) {
+      log('[MCP] permission_request without request_id; ignored');
+      return;
     }
-    return browserTools.call(name, args);
+    if (inFlight.has(requestId)) {
+      log(`[MCP] permission_request ${requestId} already in flight; ignored`);
+      return;
+    }
+    inFlight.add(requestId);
+    try {
+      const verdict = await relay({ requestId, toolName, description, inputPreview });
+      // null = nobody answered (no browser UI / approval timed out or was
+      // cancelled): say nothing and let the terminal's permission dialog decide.
+      if (verdict === 'allow' || verdict === 'deny') {
+        await sendPermissionDecision(server, requestId, verdict);
+        log(`[MCP] permission ${requestId} tool=${toolName} -> ${verdict}`);
+      } else {
+        log(`[MCP] permission ${requestId} tool=${toolName} -> no verdict relayed`);
+      }
+    } catch (err: any) {
+      log(`[MCP] permission ${requestId} relay failed (${err?.message || err}); denying`);
+      try {
+        await sendPermissionDecision(server, requestId, 'deny');
+      } catch (sendErr: any) {
+        log(`[MCP] permission ${requestId} deny could not be sent: ${sendErr?.message || sendErr}`);
+      }
+    } finally {
+      inFlight.delete(requestId);
+    }
   });
 
   server.oninitialized = () => {

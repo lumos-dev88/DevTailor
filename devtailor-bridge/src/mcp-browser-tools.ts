@@ -7,6 +7,8 @@
  * handler, so they need no special casing here.
  */
 
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { BrowserToolRunner } from './agent-session';
 import { BrowserActionResult } from './browser-action-types';
 import { createBrowserToolDefinitions, isBrowserToolName } from './browser-tool-definitions';
@@ -44,18 +46,15 @@ export function listBrowserMcpTools(): McpToolDescriptor[] {
 export interface BrowserMcpToolsOptions {
   run: BrowserToolRunner;
   projectDir: string;
-  /** Called on every tool call (proof that Claude is alive). */
-  onActivity?: () => void;
 }
 
 export function createBrowserMcpTools(options: BrowserMcpToolsOptions) {
-  const { run, projectDir, onActivity } = options;
+  const { run, projectDir } = options;
 
   async function call(name: string, args: unknown): Promise<McpToolResult> {
     if (!isBrowserToolName(name)) {
       return { isError: true, content: [{ type: 'text', text: `Unknown browser tool: ${name}` }] };
     }
-    onActivity?.();
     const params = args && typeof args === 'object' && !Array.isArray(args)
       ? args as Record<string, unknown>
       : {};
@@ -68,7 +67,6 @@ export function createBrowserMcpTools(options: BrowserMcpToolsOptions) {
         content: [{ type: 'text', text: JSON.stringify({ ok: false, error: { code: 'ACTION_FAILED', message: err?.message || String(err) } }) }],
       };
     }
-    onActivity?.();
     return toMcpResult(name, result);
   }
 
@@ -133,4 +131,48 @@ async function extractImages(
   }
 
   return walk(value, 0);
+}
+
+export const MCP_SERVER_NAME = 'devtailor';
+
+export interface BrowserToolsServerOptions {
+  run: BrowserToolRunner;
+  projectDir: string;
+  version?: string;
+  instructions: string;
+  /** Extra server capabilities besides `tools` (e.g. the channel's `experimental`). */
+  capabilities?: Record<string, unknown>;
+  /** Additional tools (the channel's `reply`) listed after the browser tools. */
+  extraTools?: Array<Record<string, unknown>>;
+  /** Handles calls for `extraTools`; return undefined to fall through to browser tools. */
+  handleExtraCall?: (name: string, args: unknown) => McpToolResult | undefined;
+}
+
+/**
+ * Builds the MCP server that exposes the browser tools. Shared by the stdio
+ * channel entry (plus `reply`); Claude Code connects to it over the channel's
+ * stdio MCP transport.
+ */
+export function createBrowserToolsServer(options: BrowserToolsServerOptions): Server {
+  const server = new Server(
+    { name: MCP_SERVER_NAME, version: options.version || '0.1.0' },
+    { capabilities: { ...(options.capabilities ?? {}), tools: {} }, instructions: options.instructions },
+  );
+  const browserTools = createBrowserMcpTools({
+    run: options.run,
+    projectDir: options.projectDir,
+  });
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [...browserTools.list(), ...(options.extraTools ?? [])] as any,
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<McpToolResult> => {
+    const { name } = req.params;
+    const args = req.params.arguments ?? {};
+    const extra = options.handleExtraCall?.(name, args);
+    if (extra) return extra;
+    return browserTools.call(name, args);
+  });
+  return server;
 }

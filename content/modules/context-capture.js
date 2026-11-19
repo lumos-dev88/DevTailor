@@ -22,6 +22,20 @@
     };
   }
 
+  function interactionState(element) {
+    const states = [];
+    try {
+      if (element.matches(':hover')) states.push('hover');
+      if (element.matches(':focus-visible')) states.push('focus-visible');
+      if (element.matches(':active')) states.push('active');
+    } catch (_err) {
+      // 旧内核不支持某个伪类时忽略
+    }
+    return states.length
+      ? { capturedWhile: `${states.join('+')} (colors may reflect this state, not the resting state)` }
+      : {};
+  }
+
   function capture(element) {
     if (!element) return fallback();
 
@@ -52,7 +66,9 @@
           position: computed.position,
           border: computed.border,
           borderRadius: computed.borderRadius,
-          opacity: computed.opacity
+          opacity: computed.opacity,
+          // 标注时指针还停在元素上，上面的颜色是 :hover 态而不是静止态；写明，避免被当成基础样式
+          ...interactionState(element)
         },
         a11y: {
           role: element.getAttribute('role') || element.tagName.toLowerCase(),

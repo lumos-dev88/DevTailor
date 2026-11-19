@@ -24,6 +24,13 @@
     originY: 0,
   };
 
+  /** User-facing notices go through the toolbar's toast. */
+  function showHint(message) {
+    const toolbar = window.__domReview.toolbar;
+    if (toolbar && toolbar.toast) toolbar.toast(message);
+    else console.info('[DevTailor]', message);
+  }
+
   function init() {
     createHighlightBox();
   }
@@ -398,8 +405,6 @@
     document.addEventListener('keydown', handleKeyDown, true);
     document.body.style.cursor = 'crosshair';
 
-    // Update UI button state
-    window.__domReview.ui?.setSaveElementActive?.(true);
   }
 
   function disable() {
@@ -411,9 +416,6 @@
     document.body.style.cursor = '';
     hideHighlight();
     hoveredElement = null;
-
-    // Update UI button state
-    window.__domReview.ui?.setSaveElementActive?.(false);
   }
 
   function closeSaveCard() {
@@ -498,7 +500,7 @@
       // Generate selector
       const selectorData = window.__domReview.selectorGen?.generate(element);
       if (!selectorData) {
-        window.__domReview.chatPanel?.showHint?.('无法生成选择器');
+        showHint('无法生成选择器');
         return;
       }
 
@@ -509,7 +511,7 @@
 
       const elementTargets = window.__domReview.elementTargets;
       if (!elementTargets?.saveFromReview || !elementTargets?.buildTargetPayload) {
-        window.__domReview.chatPanel?.showHint?.('元素库不可用：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
+        showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || '桥接服务未连接'}`);
         return;
       }
 
@@ -523,7 +525,7 @@
 
     } catch (err) {
       console.error('[ElementSaver] Save failed:', err);
-      window.__domReview.chatPanel?.showHint?.(`保存失败: ${err.message || '未知错误'}`);
+      showHint(`保存失败: ${err.message || '未知错误'}`);
     }
   }
 
@@ -544,7 +546,7 @@
     if (!review) return;
     const elementTargets = window.__domReview.elementTargets;
     if (!elementTargets?.saveFromReview || !elementTargets?.buildTargetPayload) {
-      window.__domReview.chatPanel?.showHint?.('元素库不可用：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
+      showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || '桥接服务未连接'}`);
       return;
     }
     pendingReview = review;
@@ -606,7 +608,7 @@
   function showLibraryCard() {
     const elementTargets = window.__domReview.elementTargets;
     if (!elementTargets?.listAllTargets) {
-      window.__domReview.chatPanel?.showHint?.('元素库不可用：Bridge 未连接，请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动');
+      showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || '桥接服务未连接'}`);
       return;
     }
     closeSaveCard();
@@ -829,11 +831,11 @@
         btn.textContent = '删除中…';
       }
       await window.__domReview.elementTargets.deleteTarget(id);
-      window.__domReview.chatPanel?.showHint?.('已删除元素');
+      showHint('已删除元素');
       await loadElementLibrary();
     } catch (err) {
       console.error('[ElementSaver] Delete failed:', err);
-      window.__domReview.chatPanel?.showHint?.(`删除失败: ${err.message || '未知错误'}`);
+      showHint(`删除失败: ${err.message || '未知错误'}`);
       if (btn) {
         btn.disabled = false;
         btn.textContent = '删除';
@@ -848,7 +850,7 @@
     const description = saveCard.querySelector('[data-field="description"]')?.value?.trim() || '';
     const pagePattern = saveCard.querySelector('[data-field="pagePattern"]')?.value?.trim() || undefined;
     if (!name) {
-      window.__domReview.chatPanel?.showHint?.('请填写元素名称');
+      showHint('请填写元素名称');
       saveCard.querySelector('[data-field="name"]')?.focus();
       return;
     }
@@ -863,10 +865,10 @@
         pagePattern,
       });
       closeSaveCard();
-      window.__domReview.chatPanel?.showHint?.(`已保存元素：${name}`);
+      showHint(`已保存元素：${name}`);
     } catch (err) {
       console.error('[ElementSaver] Save failed:', err);
-      window.__domReview.chatPanel?.showHint?.(`保存失败: ${err.message || '未知错误'}`);
+      showHint(`保存失败: ${err.message || '未知错误'}`);
       if (saveBtn) {
         saveBtn.disabled = false;
         saveBtn.textContent = '保存';

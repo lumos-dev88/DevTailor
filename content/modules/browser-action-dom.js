@@ -44,6 +44,11 @@
   ].join(',');
   const MAX_INTERACTIVE_ELEMENTS = 100;
   const MAX_PORTAL_SURFACES = 20;
+  // viewportOnly 过滤时给视口留的边距，避免把紧贴边缘的元素误判为不在视口内。
+  const VIEWPORT_MARGIN = 200;
+  const RECIPE_TEXT_MAX = 120;
+  // 快照序列化后的字符预算；超出时从低优先级（列表尾部）开始丢元素。
+  const SNAPSHOT_CHAR_BUDGET = 40000;
   const interactiveCache = new Map();
   const TEXT_INPUT_TYPES = new Set([
     '', 'text', 'search', 'email', 'url', 'tel', 'password', 'number',
@@ -232,26 +237,36 @@
     }
   }
 
-  function accessibleLabel(el) {
-    const direct = [
-      el.getAttribute('aria-label'),
-      el.getAttribute('placeholder'),
-      el.getAttribute('title'),
-      el.getAttribute('name'),
-      el.getAttribute('id'),
-    ];
+  // 无障碍名称来源按优先级收集（去重、非空、空白折叠 trim；绝不使用 id，id 不是无障碍名称）。
+  // 优先级：aria-labelledby 引用文本 → aria-label → 关联 <label> 文本 → placeholder → title → name。
+  // accessibleLabel 取第一个来源做快照展示；label 定位匹配则允许命中任意来源（含旧快照的拼接形式）。
+  function labelSources(el) {
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const sources = [];
+    const push = (value) => {
+      const cleaned = clean(value);
+      if (cleaned && !sources.includes(cleaned)) sources.push(cleaned);
+    };
     const labelledBy = el.getAttribute('aria-labelledby');
-    let referenced = '';
     if (labelledBy) {
-      referenced = labelledBy.split(/\s+/)
+      push(labelledBy.split(/\s+/)
         .map(id => document.getElementById(id)?.textContent || '')
-        .join(' ');
+        .join(' '));
     }
-    let labels = '';
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-      labels = Array.from(el.labels || []).map(label => label.textContent || '').join(' ');
+    push(el.getAttribute('aria-label'));
+    if (typeof HTMLInputElement === 'function' &&
+        (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
+      push(Array.from(el.labels || []).map(label => label.textContent || '').join(' '));
     }
-    return [...direct, referenced, labels].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    for (const source of ['placeholder', 'title', 'name']) {
+      push(el.getAttribute(source));
+    }
+    return sources;
+  }
+
+  // 无障碍名称按优先级取第一个非空来源（不拼接，避免重复）。
+  function accessibleLabel(el) {
+    return labelSources(el)[0] || '';
   }
 
   function testIdOf(el) {
@@ -287,6 +302,7 @@
       selectorHint: selectorHint(el),
       rect: rectOf(el),
       visible: isVisible(el),
+      inViewport: isInViewport(el),
     };
   }
 
@@ -332,8 +348,10 @@
     const recipes = [];
     const testId = testIdOf(el);
     const role = elementRole(el);
-    const label = accessibleLabel(el);
-    const text = elementText(el);
+    // 文本类 recipe 只保留前缀：candidatesByRecipe 用 includes 匹配，前缀仍能命中；
+    // 不截断时容器元素（如带 tabindex 的滚动区）会把整页文本塞进快照。
+    const label = accessibleLabel(el).slice(0, RECIPE_TEXT_MAX);
+    const text = elementText(el).slice(0, RECIPE_TEXT_MAX);
     const selector = selectorHint(el);
     if (testId) recipes.push({ type: 'testId', attr: testId.attr, value: testId.value });
     if (role && (label || text)) recipes.push({ type: 'role', role, name: label || text });
@@ -379,6 +397,7 @@
       pathSignature: pathSignature(el),
       rect,
       visible: isVisible(el),
+      inViewport: isInViewport(el),
       enabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
       checked: typeof el.checked === 'boolean' ? el.checked : undefined,
       selected: typeof el.selected === 'boolean' ? el.selected : undefined,
@@ -454,9 +473,63 @@
     return score;
   }
 
-  function interactiveElements() {
-    const elements = queryAllDeep(INTERACTIVE_SELECTOR)
-      .filter(el => isVisible(el))
+  function intersectsViewport(rect, margin = 200) {
+    return rect.right >= -margin &&
+      rect.bottom >= -margin &&
+      rect.left <= window.innerWidth + margin &&
+      rect.top <= window.innerHeight + margin;
+  }
+
+  const CLIPPING_OVERFLOW = new Set(['hidden', 'auto', 'scroll', 'clip']);
+
+  /**
+   * 元素是否真的落在视口与所有滚动/裁剪容器的可视区域内。
+   * 与 isVisible() 不同：isVisible 只看元素自身（点击前会 scrollIntoView，语义不变）；
+   * isInViewport 额外与每个 overflow 不为 visible 的祖先的 clientRect 求交集，
+   * 因此被横向/纵向滚动容器裁掉的元素会返回 false。
+   */
+  function isInViewport(el) {
+    if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+    const rect = el.getBoundingClientRect();
+    // 视口交集（用 innerWidth/innerHeight 而非 rect 属性，方便测试桩模拟）
+    let top = Math.max(rect.top, 0);
+    let bottom = Math.min(rect.bottom, window.innerHeight);
+    let left = Math.max(rect.left, 0);
+    let right = Math.min(rect.right, window.innerWidth);
+    // 跨 shadow root 向上时 parentElement 可能为 null，用 host 继续。
+    const climb = (node) => node && typeof node.getBoundingClientRect === 'function'
+      ? node
+      : null;
+    let node = climb(el.parentElement || (typeof el.getRootNode === 'function' ? el.getRootNode().host : null));
+    while (node) {
+      let style = null;
+      try { style = getComputedStyle(node); } catch {}
+      const ox = style ? String(style.overflowX || style.overflow || '') : '';
+      const oy = style ? String(style.overflowY || style.overflow || '') : '';
+      if (CLIPPING_OVERFLOW.has(ox) || CLIPPING_OVERFLOW.has(oy)) {
+        const bounds = node.getBoundingClientRect();
+        top = Math.max(top, bounds.top);
+        bottom = Math.min(bottom, bounds.bottom);
+        left = Math.max(left, bounds.left);
+        right = Math.min(right, bounds.right);
+      }
+      node = climb(node.parentElement || (typeof node.getRootNode === 'function' ? node.getRootNode().host : null));
+    }
+    return bottom > top && right > left;
+  }
+
+  // 无参调用保持原有行为：全量扫描、仅按可见性过滤、按候选分数排序后截断。
+  // options.scopeRoot：只保留该元素子树（含自身）内的元素。
+  // options.viewportOnly：只保留与视口（含边距）相交的元素。
+  function interactiveElements(options = {}) {
+    const scopeRoot = options.scopeRoot && options.scopeRoot instanceof Element
+      ? options.scopeRoot
+      : null;
+    const viewportOnly = options.viewportOnly === true;
+    let elements = queryAllDeep(INTERACTIVE_SELECTOR).filter(el => isVisible(el));
+    if (scopeRoot) elements = elements.filter(el => containsOrEquals(scopeRoot, el));
+    if (viewportOnly) elements = elements.filter(el => intersectsViewport(el.getBoundingClientRect(), VIEWPORT_MARGIN));
+    elements = elements
       .sort((a, b) => scoreCandidateForSnapshot(b) - scoreCandidateForSnapshot(a))
       .slice(0, MAX_INTERACTIVE_ELEMENTS);
     interactiveCache.clear();
@@ -514,14 +587,21 @@
     switch (recipe.type) {
       case 'testId':
         return queryAllDeep(`[${recipe.attr || 'data-testid'}="${CSS.escape(String(recipe.value || ''))}"]`);
-      case 'role':
-        return queryAllDeep(INTERACTIVE_SELECTOR).filter(el => {
+      case 'role': {
+        // 任一无障碍名称来源（含旧快照拼接形式）命中即可。
+        const sources = labelSources(el);
+        return queryAllDeep(INTERACTIVE_SELECTOR).filter((el) => {
           if (elementRole(el) !== recipe.role) return false;
-          const name = normalizedText(`${accessibleLabel(el)} ${elementText(el)}`);
-          return name.includes(normalizedText(recipe.name));
+          const names = [...sources, elementText(el)];
+          return names.some(name => normalizedText(name).includes(normalizedText(recipe.name)));
         });
+      }
       case 'label':
-        return queryAllDeep(INTERACTIVE_SELECTOR).filter(el => normalizedText(accessibleLabel(el)).includes(normalizedText(recipe.value)));
+        // recipe.value 来自快照（无障碍名称前缀），按 label 值重新查找元素：任一来源命中即可。
+        return queryAllDeep(INTERACTIVE_SELECTOR).filter((el) => {
+          const sources = labelSources(el);
+          return [...sources, sources.join(' ')].some(value => normalizedText(value).includes(normalizedText(recipe.value)));
+        });
       case 'text':
         return queryAllDeep(INTERACTIVE_SELECTOR).filter(el => normalizedText(elementText(el)).includes(normalizedText(recipe.value)));
       case 'selector':
@@ -623,21 +703,26 @@
 
     // Label 匹配（核心优化：支持降级策略）
     if (params.label) {
-      const label = accessibleLabel(el);
+      // 任一无障碍名称来源（含旧快照输出的拼接形式）命中即可。
+      const sources = labelSources(el);
+      const candidates = [...sources, sources.join(' ')];
 
-      // 策略 1: 标准匹配（中文增强规范化）
-      const standardMatch = matchText(label, params.label, {
-        exact: params.exact,
-        normalizer: params.normalizer || 'chinese'
+      const labelMatched = candidates.some((label) => {
+        // 策略 1: 标准匹配（中文增强规范化）
+        const standardMatch = matchText(label, params.label, {
+          exact: params.exact,
+          normalizer: params.normalizer || 'chinese'
+        });
+        if (standardMatch) return true;
+
+        // 策略 2: 降级到纯字母数字匹配（移除所有标点）
+        return !params.exact && matchText(label, params.label, {
+          normalizer: 'alphanumeric'
+        });
       });
 
-      // 策略 2: 降级到纯字母数字匹配（移除所有标点）
-      const fallbackMatch = !params.exact && matchText(label, params.label, {
-        normalizer: 'alphanumeric'
-      });
-
-      // 如果两种策略都失败，返回 false（保持 AND 逻辑）
-      if (!standardMatch && !fallbackMatch) return false;
+      // 所有来源两种策略都失败，返回 false（保持 AND 逻辑）
+      if (!labelMatched) return false;
     }
 
     // NearText 匹配
@@ -651,8 +736,27 @@
     return true;
   }
 
+  /**
+   * Fallback for clickable things that are not semantic controls (div/span/li with an onClick,
+   * e.g. sidebar items and tab-bar entries): elements whose computed cursor is `pointer`.
+   * cursor is inherited, so keep only the deepest matching element, which is the real hit target.
+   */
+  function pointerCandidates(params) {
+    const matched = queryAllDeep('*').filter(el => {
+      if (!isVisible(el) || !matchesLocator(el, params)) return false;
+      try {
+        return window.getComputedStyle(el).cursor === 'pointer';
+      } catch {
+        return false;
+      }
+    });
+    const set = new Set(matched);
+    return matched.filter(el => !matched.some(other => other !== el && el.contains(other) && set.has(other)));
+  }
+
   function findByLocator(params = {}) {
-    const candidates = queryAllDeep(INTERACTIVE_SELECTOR).filter(el => matchesLocator(el, params));
+    let candidates = queryAllDeep(INTERACTIVE_SELECTOR).filter(el => matchesLocator(el, params));
+    if (!candidates.length) candidates = pointerCandidates(params);
     if (!candidates.length) return null;
     const index = Number(params.index);
     if (Number.isInteger(index) && index >= 0) return candidates[index] || null;
@@ -1292,6 +1396,18 @@
       }));
   }
 
+  /** Whether the taken-over tab is actually on screen: background tabs pause rAF and never render. */
+  function pageState() {
+    const visibilityState = document.visibilityState;
+    return {
+      visibilityState,
+      hasFocus: typeof document.hasFocus === 'function' ? document.hasFocus() : null,
+      ...(visibilityState === 'hidden'
+        ? { warning: 'The taken-over tab is in the background (document.visibilityState = hidden): requestAnimationFrame is paused and nothing renders, so animation / layout / flicker observations are unreliable. Ask the user to bring this tab to the front, or to re-take-over the tab they are looking at.' }
+        : {}),
+    };
+  }
+
   function snapshot(params = {}) {
     const options = Array.isArray(params) ? { selectors: params } : (params || {});
     const selectors = Array.isArray(options.selectors) ? options.selectors : [];
@@ -1300,6 +1416,33 @@
     const roleFilter = new Set(Array.isArray(options.roles)
       ? options.roles.map(role => String(role).toLowerCase())
       : []);
+    // scope：elementId（从 interactiveCache 解析）或 CSS 选择器；解析不到时给出含原始值的清晰错误。
+    let scopeRoot = null;
+    if (options.scope != null && options.scope !== '') {
+      const scopeValue = String(options.scope);
+      if (/^e_/.test(scopeValue)) {
+        const cached = interactiveCache.get(scopeValue);
+        if (!cached) {
+          throw new Error(`Scope elementId was not found in the current page snapshot cache: ${scopeValue}`);
+        }
+        const byRecipe = resolveByRecipes(cached);
+        const exact = cached.selectorHint ? selectorExistsInDocument(cached.selectorHint) || queryOneDeep(cached.selectorHint) : null;
+        scopeRoot = (exact && fingerprintMatches(exact, cached) && exact) || (byRecipe && fingerprintMatches(byRecipe, cached) ? byRecipe : null);
+        if (!scopeRoot) {
+          throw new Error(`Scope elementId is stale or no longer matches its snapshot fingerprint: ${scopeValue}`);
+        }
+      } else {
+        try {
+          scopeRoot = selectorExistsInDocument(scopeValue) || queryOneDeep(scopeValue);
+        } catch {
+          scopeRoot = null;
+        }
+        if (!scopeRoot) {
+          throw new Error(`Scope selector did not match any element: ${scopeValue}`);
+        }
+      }
+    }
+    const viewportOnly = options.viewportOnly === true;
     const viewport = {
       width: window.innerWidth,
       height: window.innerHeight,
@@ -1313,6 +1456,7 @@
           selector,
           exists: true,
           visible: isVisible(el),
+          inViewport: isInViewport(el),
           rect: rectOf(el),
         };
       } catch (err) {
@@ -1321,13 +1465,16 @@
     });
     const elementsList = level === 'summary'
       ? []
-      : interactiveElements()
+      : interactiveElements({ scopeRoot, viewportOnly })
         .filter(item => !roleFilter.size || roleFilter.has(String(item.role || '').toLowerCase()))
         .slice(0, maxElements);
-    return {
+    const page = pageState();
+    return fitSnapshotBudget({
       url: location.href,
       title: document.title,
       viewport,
+      page,
+      ...(page.warning ? { warnings: [page.warning] } : {}),
       elements,
       console: {
         errorCount: window.__domReview.browserConsole?.countByType?.('error') ?? undefined,
@@ -1337,9 +1484,100 @@
         level,
         maxElements,
         returnedInteractiveElements: elementsList.length,
+        ...(options.scope != null && options.scope !== '' ? { scope: String(options.scope) } : {}),
+        ...(viewportOnly ? { viewportOnly: true } : {}),
       },
       portalSurfaces: level === 'summary' ? [] : portalSurfaces(),
       interactiveElements: elementsList,
+    });
+  }
+
+  const FIND_MATCH_TEXT_MAX = 120;
+
+  function truncateText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, FIND_MATCH_TEXT_MAX);
+  }
+
+  // find_elements：按 query 子串匹配可见可交互元素，返回可直接用于 click_page/fill_text 的 elementId。
+  // 只读操作；匹配到的元素指纹会写入 interactiveCache（不清空已有缓存），以便后续按 elementId 定位。
+  // 纯函数：参数归一化。
+  function normalizeFindParams(params = {}) {
+    const query = String(params.query ?? '').trim();
+    const needle = normalizedText(query);
+    if (!needle) throw new Error('find_elements requires a non-empty query');
+    const role = params.role != null && String(params.role).trim() !== ''
+      ? normalizedText(params.role)
+      : '';
+    const requestedMax = Number.isFinite(Number(params.maxResults)) ? Number(params.maxResults) : 10;
+    const maxResults = Math.max(1, Math.min(Math.trunc(requestedMax), 50));
+    return { query, needle, role, maxResults };
+  }
+
+  // 纯函数：按 role 与 label/text/placeholder 子串过滤候选描述（{ role, label, text, placeholder }）。
+  function filterFindCandidates(candidates, opts) {
+    return candidates.filter(item => {
+      if (opts.role && normalizedText(item.role) !== opts.role) return false;
+      return normalizedText(`${item.label} ${item.text} ${item.placeholder}`).includes(opts.needle);
+    });
+  }
+
+  function findElements(params = {}) {
+    const opts = normalizeFindParams(params);
+    // 直接在全量可见可交互元素上用完整文本匹配：不受快照 100 个候选上限和 120 字截断影响，
+    // 也不清空 interactiveCache（之前快照拿到的 elementId 仍然有效）。
+    const candidates = queryAllDeep(INTERACTIVE_SELECTOR)
+      .filter(el => isVisible(el))
+      .map(el => ({
+        el,
+        role: elementRole(el),
+        label: accessibleLabel(el),
+        text: elementText(el),
+        placeholder: el.getAttribute('placeholder') || '',
+      }));
+    const matched = filterFindCandidates(candidates, opts)
+      .sort((a, b) => scoreCandidateForSnapshot(b.el) - scoreCandidateForSnapshot(a.el));
+    const seenIds = new Map();
+    const matches = matched.slice(0, opts.maxResults).map(({ el }, index) => {
+      const baseId = stableElementId(el, 0);
+      const count = seenIds.get(baseId) || 0;
+      seenIds.set(baseId, count + 1);
+      const info = elementFingerprint(el, index, count > 0 ? `${baseId}_${count + 1}` : baseId);
+      interactiveCache.set(info.elementId, info);
+      return {
+        elementId: info.elementId,
+        role: info.role,
+        tag: info.tag,
+        text: truncateText(info.text),
+        label: truncateText(info.label),
+        rect: info.rect,
+        inViewport: intersectsViewport(el.getBoundingClientRect(), 0),
+      };
+    });
+    return { query: opts.query, matches, totalMatches: matched.length, truncated: matched.length > opts.maxResults };
+  }
+
+  // 超出字符预算时从列表尾部丢元素（列表已按视口内优先排序），并标注截断信息。
+  function fitSnapshotBudget(result, budget = SNAPSHOT_CHAR_BUDGET) {
+    const elements = Array.isArray(result.interactiveElements) ? result.interactiveElements : [];
+    if (JSON.stringify(result).length <= budget) return result;
+    const total = elements.length;
+    const sizes = elements.map(item => JSON.stringify(item).length + 1);
+    let size = JSON.stringify({ ...result, interactiveElements: [] }).length + 300;
+    let keep = 0;
+    while (keep < total && size + sizes[keep] <= budget) {
+      size += sizes[keep];
+      keep += 1;
+    }
+    return {
+      ...result,
+      snapshot: {
+        ...result.snapshot,
+        returnedInteractiveElements: keep,
+        truncated: true,
+        totalCandidates: total,
+        hint: 'Snapshot exceeded the size budget. Narrow it with roles, maxElements, selectors, or level:"summary".',
+      },
+      interactiveElements: elements.slice(0, keep),
     };
   }
 
@@ -1379,12 +1617,15 @@
       actual = String(document.body?.innerText || document.body?.textContent || '');
     }
     const ok = actual.includes(expected);
-    return {
-      ok,
-      expected,
-      actual: actual.slice(0, 500),
-      message: ok ? 'Text assertion passed' : `Expected page text to include "${expected}"`,
-    };
+    // 断言通过时省略 actual，避免把页面文本浪费在调用方 token 上；失败时保留（截断到 500 字符）便于排查。
+    return ok
+      ? { ok, expected, message: 'Text assertion passed' }
+      : {
+          ok,
+          expected,
+          actual: actual.slice(0, 500),
+          message: `Expected page text to include "${expected}"`,
+        };
   }
 
   function assertUrl(params = {}) {
@@ -1456,11 +1697,17 @@
     pressKey,
     clearState,
     snapshot,
+    findElements,
+    normalizeFindParams,
+    filterFindCandidates,
+    fitSnapshotBudget,
+    pageState,
     assertText,
     assertUrl,
     assertElement,
     textInScope,
     isVisible,
+    isInViewport,
     runJs,
   };
 })();

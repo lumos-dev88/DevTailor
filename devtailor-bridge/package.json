@@ -15,11 +15,14 @@
     "mcp:dev": "tsx src/mcp-main.ts",
     "build:plugin": "node scripts/build-plugin.mjs",
     "smoke:plugin": "node scripts/smoke-plugin.mjs",
+    "test:ext": "node --test '../tests/extension/*.test.js'",
+    "e2e:ext": "npm run build:plugin && node ../scripts/e2e-extension.mjs",
     "test": "npm run build && tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "sql.js": "^1.14.1"
+    "sql.js": "^1.14.1",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

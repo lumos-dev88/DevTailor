@@ -4,10 +4,17 @@
  */
 
 import http, { IncomingMessage, ServerResponse } from 'http';
-import { createHash, randomUUID } from 'crypto';
-import { basename } from 'path';
-import { realpathSync } from 'fs';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { basename, join } from 'path';
+import { chmodSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
 import { WSMessage, ReviewPayload } from './types';
+import {
+  AgentStatus,
+  AgentStatusEvent,
+  AgentStatusPayload,
+  AgentStatusSnapshot,
+  isAgentStatusEvent,
+} from './agent-status';
 import { BrowserActionRouter } from './browser-action-router';
 import { ApprovalRouter, ApprovalEvent } from './approval-router';
 import { QuestionRouter, QuestionEvent } from './question-router';
@@ -15,6 +22,8 @@ import { BrowserActionEvent, BrowserActionName, BrowserActionResult } from './br
 import { SessionStore, StoredElementTarget } from './session-store';
 import { AgentSession, BrowserToolRunner, STOP_REASON_PENDING } from './agent-session';
 import { PlaceholderAgentSession } from './placeholder-agent-session';
+import { DesignDocs, DESIGN_DOCS_SETTING_KEY, DesignDocMeta } from './design-docs';
+import { BridgeError } from './errors';
 import { log, logError } from './log';
 
 export type AgentSessionFactory = (runner: BrowserToolRunner) => AgentSession;
@@ -27,6 +36,18 @@ const EXTENSION_ID_ENV = 'DEVTAILOR_EXTENSION_ID';
 
 /** Lower-case header name the extension service worker sends (value: chrome.runtime.id). */
 export const EXTENSION_CLIENT_HEADER = 'x-devtailor-client';
+
+/**
+ * Hook reporting route: Claude Code hook subprocesses (not a browser) POST tool
+ * events here, authenticated with the token from {@link AGENT_HOOK_TOKEN_FILE}.
+ * This is the only route exempt from the "extension Origin" rule; the Host
+ * check, the token and the "no browser Origin" rule still apply.
+ */
+export const AGENT_STATUS_PATH = '/agent-status';
+/** Token file inside `<dataDir>` (i.e. `<project>/.devtailor/agent-hook-token`), mode 0600. */
+export const AGENT_HOOK_TOKEN_FILE = 'agent-hook-token';
+/** Upper bound for a hook report body. */
+export const AGENT_STATUS_MAX_BODY_BYTES = 8 * 1024;
 
 interface Client {
   id: string;
@@ -107,11 +128,25 @@ export class WSServer {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private releaseTimers = new Set<NodeJS.Timeout>();
-  private projectInfo: { projectId: string; projectName: string; bridgeInstanceId: string; agentKey: string; agentLabel: string };
+  private projectInfo: { projectId: string; projectName: string; bridgeInstanceId: string; agentKey: string; agentLabel: string; backend: 'channel' };
   private browserRouter: BrowserActionRouter;
   private approvalRouter: ApprovalRouter;
   private questionRouter: QuestionRouter;
   private store: SessionStore | null = null;
+  private designDocs: DesignDocs;
+  /** "What is the AI doing now"; in-memory only, a restarted bridge starts idle. */
+  private agentStatus = new AgentStatus();
+  /** Bearer token for `POST /agent-status`; never logged. */
+  private agentHookToken: string | null = null;
+  private agentHookTokenPath: string | null = null;
+  private makeDesignDocs(): DesignDocs { return new DesignDocs(this.cwd, () => {
+    const store = this.store;
+    if (!store) return null;
+    return {
+      load: () => store.getSetting<DesignDocMeta[]>(DESIGN_DOCS_SETTING_KEY),
+      save: docs => store.setSetting(DESIGN_DOCS_SETTING_KEY, docs),
+    };
+  }); }
   private readonly idleTimeoutMs = 4 * 60 * 60 * 1000;
 
   constructor(
@@ -132,6 +167,7 @@ export class WSServer {
       bridgeInstanceId: randomUUID(),
       agentKey: this.agentKey,
       agentLabel: this.agentLabel,
+      backend: 'channel',
     };
     this.browserRouter = new BrowserActionRouter((clientId, event) => this.sendBrowserAction(clientId, event));
     this.browserRouter.setLocalHandler((action, params) => this.handleLocalBrowserAction(action, params));
@@ -145,6 +181,83 @@ export class WSServer {
       (event) => this.broadcastQuestion(event),
       () => this.browserRouter.activeClientId,
     );
+    this.designDocs = this.makeDesignDocs();
+  }
+
+  /** Absolute paths of enabled DESIGN.md files. */
+  designDocPaths(): string[] {
+    return this.designDocs.enabledPaths();
+  }
+
+  /**
+   * Permission relay: asks the browser side panel to approve a tool call Claude
+   * Code is about to run.
+   *
+   * Returns `'allow'` / `'deny'` only for an explicit click in the UI; `null`
+   * means "no verdict" — no SSE client connected, approval timed out (5 min), or
+   * the request was cancelled/Bridge stopped. Callers must relay nothing for
+   * `null` so the terminal's own permission dialog stays in charge.
+   */
+  async requestChannelPermission(req: {
+    requestId: string;
+    toolName: string;
+    description: string;
+    inputPreview: string;
+  }): Promise<'allow' | 'deny' | null> {
+    const live = [...this.clients.values()].filter(client => !client.res.destroyed);
+    // No browser UI at all: relay nothing so the terminal's dialog takes over.
+    if (live.length === 0) return null;
+    const result = await this.approvalRouter.request({
+      toolCallId: req.requestId,
+      toolName: req.toolName,
+      action: req.description,
+      risk: 'medium',
+      detail: req.inputPreview,
+    }, {
+      // A permission prompt is about a tool call, not about a page: even when no
+      // tab has been taken over, address a connected UI so the card is clickable.
+      targetClientId: this.browserRouter.activeClientId ?? live[0].id,
+    });
+    if (result.decision === 'approved') return 'allow';
+    if (result.decision === 'rejected' && !result.cancelled && !result.reason) return 'deny';
+    return null;
+  }
+
+  /** /design-docs routes. Returns true if handled. */
+  private async handleDesignDocs(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    const m = req.method || 'GET';
+    const p = url.pathname;
+    if (!p.startsWith('/design-docs')) return false;
+    try {
+      if (m === 'GET' && p === '/design-docs') {
+        this.sendJson(res, 200, { ok: true, docs: this.designDocs.list(), enabledPaths: this.designDocs.enabledPaths() });
+        return true;
+      }
+      if (m !== 'POST' || !['/design-docs', '/design-docs/toggle', '/design-docs/delete'].includes(p)) return false;
+      let value: unknown;
+      try {
+        value = await this.readJson(req);
+      } catch (err: any) {
+        throw new BridgeError(400, 'invalid_body', err?.message || 'Invalid request body');
+      }
+      const body = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+      if (p === '/design-docs') {
+        this.sendJson(res, 200, { ok: true, doc: this.designDocs.add(body.name, body.content), docs: this.designDocs.list() });
+      } else if (p === '/design-docs/toggle') {
+        this.sendJson(res, 200, { ok: true, doc: this.designDocs.toggle(body.id, body.enabled), docs: this.designDocs.list() });
+      } else {
+        this.designDocs.remove(body.id);
+        this.sendJson(res, 200, { ok: true, deleted: body.id, docs: this.designDocs.list() });
+      }
+    } catch (err) {
+      if (err instanceof BridgeError) {
+        this.sendJson(res, err.status, { ok: false, code: err.code, error: err.message, ...err.extra });
+      } else {
+        logError(`[DesignDocs] route error: ${(err as Error)?.message || err}`);
+        this.sendJson(res, 500, { ok: false, code: 'design_doc_error', error: 'Design docs operation failed' });
+      }
+    }
+    return true;
   }
 
   private agentKey: string;
@@ -169,6 +282,8 @@ export class WSServer {
         // DisplaySession needs DisplayMessage[] (role: "user"|"assistant").
         // Data was originally written from DisplayMessage, so the cast is safe.
         const display = { ...full, agentKey: full.agentKey || this.agentKey } as unknown as DisplaySession;
+        // 旧会话历史兼容：过滤掉 thinking/tool 消息，这条显示链路已删除（回调不再产生）。
+        display.messages = display.messages.filter((m: DisplayMessage) => m.type !== 'thinking' && m.type !== 'tool');
         this.displaySessions.set(full.id, display);
         // Restore the latest project-level active session for this agent.
         if (!this.activeDisplaySessionId ||
@@ -185,6 +300,9 @@ export class WSServer {
 
   /** Resolves once listening; rejects if binding fails (e.g. EADDRINUSE). */
   start(): Promise<void> {
+    // A fresh hook token on every start: an old hook subprocess (or a stale
+    // token copied out of .devtailor/) must not keep reporting.
+    this.rotateAgentHookToken();
     const server = http.createServer((req, res) => {
       this.handleRequest(req, res);
     });
@@ -210,14 +328,168 @@ export class WSServer {
     return listening;
   }
 
+  // -- agent status (hook reports) -----------------------------------------
+
+  /**
+   * Generates a fresh hook token and writes it to `<dataDir>/agent-hook-token`
+   * (mode 0600) so the hook script can read it. The token is never logged and
+   * only ever lives in memory plus that file.
+   */
+  private rotateAgentHookToken(): void {
+    const token = randomBytes(16).toString('hex'); // 32 hex chars
+    this.agentHookToken = token;
+    const dir = this.dataDir;
+    if (!dir) {
+      this.agentHookTokenPath = null;
+      log('[AgentStatus] no data directory: hook token is memory-only for this process');
+      return;
+    }
+    const path = join(dir, AGENT_HOOK_TOKEN_FILE);
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path, `${token}\n`, { encoding: 'utf8', mode: 0o600 });
+      // An existing file keeps its old mode when overwritten; force it.
+      chmodSync(path, 0o600);
+      this.agentHookTokenPath = path;
+      log(`[AgentStatus] hook token written to ${path}`);
+    } catch (err: any) {
+      this.agentHookTokenPath = null;
+      logError(`[AgentStatus] could not write hook token to ${path}: ${err?.message || err}`);
+    }
+  }
+
+  /** Best-effort removal of the token file when the bridge stops. */
+  private removeAgentHookToken(): void {
+    const path = this.agentHookTokenPath;
+    this.agentHookToken = null;
+    this.agentHookTokenPath = null;
+    if (!path) return;
+    try {
+      unlinkSync(path);
+    } catch {
+      // Already gone (or never written); nothing to clean up.
+    }
+  }
+
+  /** Constant-time Bearer comparison; a different length is rejected up front. */
+  private isAgentHookAuthorized(header: string | undefined): boolean {
+    const expected = this.agentHookToken;
+    if (!expected || typeof header !== 'string') return false;
+    const prefix = 'Bearer ';
+    if (header.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) return false;
+    const given = header.slice(prefix.length).trim();
+    const a = Buffer.from(given, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+
+  /** `POST /agent-status`: a Claude Code hook reporting what the AI is doing. */
+  private async handleAgentStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const authorization = typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined;
+    if (!this.isAgentHookAuthorized(authorization)) {
+      // Auditable rejection: never log the header value or the expected token.
+      log(`[AgentStatus] denied ${new Date().toISOString()} unauthorized report (${authorization ? 'bad_token' : 'no_token'})`);
+      res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+      res.end(JSON.stringify({ ok: false, error: 'Unauthorized' }));
+      req.resume();
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await this.readJson(req, AGENT_STATUS_MAX_BODY_BYTES);
+    } catch (err: any) {
+      res.writeHead(err?.tooLarge ? 413 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: err?.message || 'Invalid request body' }));
+      return;
+    }
+    const record = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+    const event = record.event;
+    if (typeof event !== 'string' || !event) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Missing event' }));
+      return;
+    }
+    if (!isAgentStatusEvent(event)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Unknown event' }));
+      return;
+    }
+    const payload: AgentStatusPayload = {
+      event,
+      toolName: typeof record.toolName === 'string' ? record.toolName : undefined,
+      label: typeof record.label === 'string' ? record.label : undefined,
+      toolUseId: typeof record.toolUseId === 'string' ? record.toolUseId : undefined,
+    };
+    this.applyAgentStatus(event as AgentStatusEvent, payload);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  }
+
+  /**
+   * Folds one event into the state machine and broadcasts the new snapshot to
+   * every SSE client. Bridge-internal turn boundaries use the same path.
+   */
+  private applyAgentStatus(event: AgentStatusEvent, payload: AgentStatusPayload = {}): AgentStatusSnapshot {
+    const snapshot = this.agentStatus.apply(event, payload, Date.now());
+    this.broadcastAgentStatus(snapshot);
+    return snapshot;
+  }
+
+  /**
+   * Turn boundary from the claude channel side (review written / turn finished).
+   * Wired through a callback so the hub stays independent of the HTTP layer.
+   */
+  notifyAgentTurn(kind: 'turn_start' | 'turn_end'): void {
+    this.applyAgentStatus(kind, {});
+  }
+
+  /** Current snapshot (`state/label/...`), read with staleness applied. */
+  currentAgentStatus(): AgentStatusSnapshot {
+    return this.agentStatus.snapshot(Date.now());
+  }
+
+  private agentStatusEvent(snapshot: AgentStatusSnapshot): WSMessage {
+    return {
+      type: 'agent_status',
+      state: snapshot.state,
+      label: snapshot.label,
+      toolName: snapshot.toolName,
+      activeTools: snapshot.activeTools,
+      since: snapshot.since,
+    };
+  }
+
+  private broadcastAgentStatus(snapshot: AgentStatusSnapshot): void {
+    const event = this.agentStatusEvent(snapshot);
+    for (const clientId of this.clients.keys()) {
+      this.send(clientId, event);
+    }
+  }
+
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url || '/', `http://127.0.0.1:${this.port}`);
     const guard = this.guardRequest(req, url);
     if (!guard.allowed) {
-      this.rejectRequest(req, res, url, guard.reason);
+      this.rejectRequest(req, res, url, guard.reason, guard.status);
       return;
     }
     if (guard.origin) this.allowedOrigins.set(res, guard.origin);
+
+    // Hook report: handled before the CORS plumbing so its response carries no
+    // CORS headers at all (the caller is a local subprocess, never a browser).
+    if (url.pathname === AGENT_STATUS_PATH) {
+      if (req.method !== 'POST') {
+        // Only the POST report is exempt from the extension-Origin rule.
+        // Written directly: this route never emits CORS headers.
+        res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST' });
+        res.end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
+        return;
+      }
+      await this.handleAgentStatus(req, res);
+      return;
+    }
+
     res.setHeader('Vary', 'Origin');
     this.setCorsHeaders(res);
 
@@ -226,6 +498,8 @@ export class WSServer {
       res.end();
       return;
     }
+
+    if (await this.handleDesignDocs(req, res, url)) return;
 
     if (req.method === 'GET' && url.pathname === '/events') {
       this.handleEvents(url, req, res);
@@ -338,6 +612,10 @@ export class WSServer {
       activeSessionTitle: activeDisplay?.title || null,
       ...this.projectInfo,
     } as any);
+
+    // New SSE client: hand it the current AI status immediately so a
+    // reconnecting side panel does not show a blank badge until the next event.
+    this.send(clientId, this.agentStatusEvent(this.currentAgentStatus()));
 
     req.on('close', () => {
       const current = this.clients.get(clientId);
@@ -533,7 +811,6 @@ export class WSServer {
         stopReason = 'end_turn';
       }
       if (stopReason === 'error') return;
-      this.closeActiveThinking(display);
       // The single place a normal `done` is emitted for a turn.
       this.sendRuntimeEvent(clientId, {
         type: 'done',
@@ -609,30 +886,23 @@ export class WSServer {
     session.setCallbacks({
       onStream: (delta) => {
         if (turn.canceled) return;
-        this.appendAssistantDelta(display, delta);
-        this.sendRuntimeEvent(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta } as any);
+        const displayMessage = this.appendAssistantDelta(display, delta);
+        this.sendRuntimeEvent(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta, displayMessage });
       },
       onNotice: (text) => {
         // Live-only hint: sent as a stream event but never stored in the display history.
         if (turn.canceled) return;
         this.sendRuntimeEvent(clientId, { type: 'stream', tabId: clientId, sessionId: display.id, delta: text } as any);
       },
-      onThinking: (delta) => {
-        if (turn.canceled) return;
-        this.appendThinkingDelta(display, delta);
-        this.sendRuntimeEvent(clientId, { type: 'thinking', tabId: clientId, sessionId: display.id, delta } as any);
-      },
       onDone: (summary) => {
         // `done` is emitted once by handleReview (after sendReview settles, or
         // after the async completion this call resolves).
         if (turn.canceled) return;
-        this.closeActiveThinking(display);
         if (summary) turn.summary = summary;
         turn.complete();
       },
       onError: (message) => {
         if (turn.canceled) return;
-        this.closeActiveThinking(display);
         turn.errored = true;
         this.sendRuntimeEvent(clientId, { type: 'error', tabId: clientId, sessionId: display.id, message } as any);
         turn.complete();
@@ -640,38 +910,6 @@ export class WSServer {
       onSessionInfoUpdate: (info) => {
         if (turn.canceled) return;
         this.updateDisplaySessionInfo(clientId, display, info);
-      },
-      onToolCall: (tool) => {
-        if (turn.canceled) return;
-        this.addToolDisplayMessage(display, tool);
-        this.sendRuntimeEvent(clientId, {
-          type: 'tool_call',
-          tabId: clientId,
-          sessionId: display.id,
-          toolTitle: tool.title,
-          toolCallId: tool.toolCallId,
-          toolKind: tool.kind,
-          toolInput: tool.rawInput,
-          toolLocations: tool.locations,
-          toolStatus: tool.status,
-        } as any);
-      },
-      onToolUpdate: (update) => {
-        if (turn.canceled) return;
-        this.updateToolDisplayMessage(display, update);
-        this.sendRuntimeEvent(clientId, {
-          type: 'tool_update',
-          tabId: clientId,
-          sessionId: display.id,
-          toolCallId: update.toolCallId,
-          toolTitle: update.title ?? undefined,
-          toolKind: update.kind ?? undefined,
-          toolStatus: update.status ?? undefined,
-          toolInput: update.rawInput,
-          toolOutput: update.rawOutput,
-          toolLocations: update.locations ?? undefined,
-          toolContent: update.content,
-        } as any);
       },
       onApprovalRequest: async (request) => {
         const result = await this.approvalRouter.request({
@@ -775,8 +1013,7 @@ export class WSServer {
     return msg;
   }
 
-  private appendAssistantDelta(display: DisplaySession, delta: string): void {
-    this.closeActiveThinking(display);
+  private appendAssistantDelta(display: DisplaySession, delta: string): DisplayMessage {
     let msg = [...display.messages].reverse().find(item => item.role === 'assistant' && item.type === 'stream') as DisplayMessage | undefined;
     if (!msg || display.messages[display.messages.length - 1] !== msg) {
       msg = {
@@ -793,6 +1030,7 @@ export class WSServer {
     msg.timestamp = Date.now();
     this.store?.updateMessage(display.id, msg);
     this.trimDisplayMessages(display);
+    return msg;
   }
 
   private updateDisplaySessionInfo(
@@ -813,73 +1051,6 @@ export class WSServer {
       agentSessionId: display.agentSessionId,
       sessionTitle: display.title,
     } as any);
-  }
-
-  private appendThinkingDelta(display: DisplaySession, delta: string): void {
-    let msg = [...display.messages].reverse().find(item => item.role === 'assistant' && item.type === 'thinking' && !item.closed) as DisplayMessage | undefined;
-    if (!msg) {
-      msg = {
-        id: `msg_${Date.now()}_${randomUUID()}`,
-        role: 'assistant',
-        type: 'thinking',
-        content: '',
-        closed: false,
-        timestamp: Date.now(),
-      };
-      display.messages.push(msg);
-      this.store?.addMessage(display.id, msg);
-    }
-    msg.content += delta;
-    msg.timestamp = Date.now();
-    this.store?.updateMessage(display.id, msg);
-    this.trimDisplayMessages(display);
-  }
-
-  private closeActiveThinking(display: DisplaySession): boolean {
-    const msg = [...display.messages].reverse().find(item => item.role === 'assistant' && item.type === 'thinking' && !item.closed) as DisplayMessage | undefined;
-    if (!msg) return false;
-    msg.closed = true;
-    msg.timestamp = Date.now();
-    this.store?.updateMessage(display.id, msg);
-    return true;
-  }
-
-  private addToolDisplayMessage(display: DisplaySession, tool: any): void {
-    this.closeActiveThinking(display);
-    const msg: DisplayMessage = {
-      id: `msg_${Date.now()}_${randomUUID()}`,
-      role: 'assistant',
-      type: 'tool',
-      toolCallId: tool.toolCallId,
-      title: tool.title || 'Tool',
-      kind: tool.kind || 'other',
-      input: tool.rawInput ?? null,
-      locations: tool.locations || [],
-      status: tool.status || 'pending',
-      output: null,
-      toolContent: null,
-      content: '',
-      timestamp: Date.now(),
-    };
-    display.messages.push(msg);
-    this.trimDisplayMessages(display);
-    this.store?.addMessage(display.id, msg);
-  }
-
-  private updateToolDisplayMessage(display: DisplaySession, update: any): void {
-    const msg = display.messages.find(item => item.type === 'tool' && item.toolCallId === update.toolCallId);
-    if (!msg) return;
-    if (update.title != null) msg.title = update.title;
-    if (update.kind != null) msg.kind = update.kind;
-    if (update.status != null) msg.status = update.status;
-    if (update.rawInput !== undefined) msg.input = update.rawInput;
-    if (update.rawOutput !== undefined) msg.output = update.rawOutput;
-    if (update.locations !== undefined) msg.locations = update.locations || [];
-    if (update.content !== undefined) msg.toolContent = update.content || null;
-    msg.timestamp = Date.now();
-    display.updatedAt = Date.now();
-    this.store?.updateMessage(display.id, msg);
-    this.store?.updateSession(display);
   }
 
   private trimDisplayMessages(display: DisplaySession): void {
@@ -1217,8 +1388,6 @@ export class WSServer {
 
       turn.canceled = true;
       turn.complete();
-      const display = displayId ? this.displaySessions.get(displayId) : null;
-      if (display) this.closeActiveThinking(display);
       // Tell the agent (Claude Code gets a kind=cancel channel notification).
       const agentSession = displayId ? this.sessions.get(displayId) : undefined;
       agentSession?.cancelCurrentTurn().catch(err => {
@@ -1301,7 +1470,7 @@ export class WSServer {
         feedback?: string;
       };
       const approvalId = typeof body.approvalId === 'string' ? body.approvalId : '';
-      const decision = body.decision === 'approved' ? 'approved'
+      const decision: 'approved' | 'rejected' | null = body.decision === 'approved' ? 'approved'
         : body.decision === 'rejected' ? 'rejected'
         : null;
       if (!approvalId || !decision) {
@@ -1400,11 +1569,18 @@ export class WSServer {
    * - Everything except GET /health requires an `Origin` of an extension
    *   (`chrome-extension://<id>`, optionally pinned via DEVTAILOR_EXTENSION_ID).
    *   Web pages cannot forge this Origin; requests without Origin are refused.
+   * - `/agent-status` is the single documented exception: the caller is a Claude
+   *   Code hook subprocess, not a browser. It is only reachable with an empty
+   *   Origin (a web page always sends its own Origin) plus a valid hook token;
+   *   every other method on that path answers 405. Non-POST requests without
+   *   Origin get 405 rather than 403 so the route can say "wrong method", but
+   *   nothing on this path ever serves data without the token. Nothing else is
+   *   exempt.
    */
   private guardRequest(
     req: IncomingMessage,
     url: URL,
-  ): { allowed: true; origin: string | null; trusted: boolean } | { allowed: false; reason: string } {
+  ): { allowed: true; origin: string | null; trusted: boolean } | { allowed: false; reason: string; status?: number } {
     const host = String(req.headers.host || '').toLowerCase();
     if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) {
       return { allowed: false, reason: 'bad_host' };
@@ -1413,8 +1589,13 @@ export class WSServer {
     const rawOrigin = req.headers.origin;
     const origin = typeof rawOrigin === 'string' ? rawOrigin : null;
     const isHealth = url.pathname === '/health' && (req.method === 'GET' || req.method === 'OPTIONS');
+    // Hook report from a non-browser caller: the one path reachable without an
+    // extension Origin. It is token-authenticated (POST) or answers 405; it
+    // never serves data, and a browser Origin is still refused below.
+    const isAgentStatus = url.pathname === AGENT_STATUS_PATH;
 
     if (!origin) {
+      if (isAgentStatus) return { allowed: true, origin: null, trusted: false };
       // Verified in real Chrome (scripts/e2e-extension.mjs): extension service-worker
       // GET requests to a host-permitted URL carry NO Origin header, exactly like a
       // page's no-cors GET. The extension therefore marks its requests with a custom
@@ -1427,6 +1608,8 @@ export class WSServer {
     }
     const originError = this.validateExtensionOrigin(origin);
     if (originError) {
+      // A browser Origin (web page CSRF attempt, `null` sandbox origin, …) never
+      // reaches /agent-status either: only the empty-Origin path is exempt.
       // /health stays reachable for liveness checks, but without CORS access or details.
       return isHealth ? { allowed: true, origin: null, trusted: false } : { allowed: false, reason: originError };
     }
@@ -1451,7 +1634,7 @@ export class WSServer {
     return null;
   }
 
-  private rejectRequest(req: IncomingMessage, res: ServerResponse, url: URL, reason: string): void {
+  private rejectRequest(req: IncomingMessage, res: ServerResponse, url: URL, reason: string, status = 403): void {
     let originDesc = '-';
     if (typeof req.headers.origin === 'string') {
       try {
@@ -1462,8 +1645,12 @@ export class WSServer {
       }
     }
     log(`[Guard] ${new Date().toISOString()} denied ${req.method} ${url.pathname} reason=${reason} origin=${originDesc}`);
-    res.writeHead(403, { 'Content-Type': 'application/json', Vary: 'Origin' });
-    res.end(JSON.stringify({ error: 'Forbidden', reason }));
+    res.writeHead(status, {
+      'Content-Type': 'application/json',
+      Vary: 'Origin',
+      ...(status === 401 ? { 'WWW-Authenticate': 'Bearer' } : {}),
+    });
+    res.end(JSON.stringify({ error: status === 401 ? 'Unauthorized' : 'Forbidden', reason }));
     // Do not keep reading a refused request body.
     req.resume();
   }
@@ -1478,8 +1665,8 @@ export class WSServer {
       this.sendJson(res, 200, { ok: true, protocolVersion: BRIDGE_PROTOCOL_VERSION });
       return;
     }
-    const activeDisplay = this.currentDisplaySession();
     const clientId = url.searchParams.get('clientId') || '';
+    const activeDisplay = this.currentDisplaySession();
     const activeSessionId = activeDisplay?.id || null;
     this.sendJson(res, 200, {
       ok: true,
@@ -1489,6 +1676,7 @@ export class WSServer {
       activeSessionId,
       isProcessing: clientId ? this.isClientProcessingSession(clientId, activeSessionId) : false,
       processingSessionId: clientId ? this.processingDisplaySessions.get(clientId) || null : null,
+      agentStatus: this.currentAgentStatus(),
     });
   }
 
@@ -1498,18 +1686,26 @@ export class WSServer {
     res.end(JSON.stringify(body));
   }
 
-  private readJson(req: IncomingMessage): Promise<unknown> {
+  private readJson(req: IncomingMessage, maxBytes = 12 * 1024 * 1024): Promise<unknown> {
     return new Promise((resolve, reject) => {
       let body = '';
+      let tooLarge = false;
       req.setEncoding('utf8');
       req.on('data', chunk => {
+        if (tooLarge) return; // keep draining, but stop buffering
         body += chunk;
-        if (body.length > 12 * 1024 * 1024) {
-          req.destroy();
-          reject(new Error('Request body too large'));
+        if (body.length > maxBytes) {
+          tooLarge = true;
+          body = '';
         }
       });
       req.on('end', () => {
+        if (tooLarge) {
+          const err: any = new Error('Request body too large');
+          err.tooLarge = true;
+          reject(err);
+          return;
+        }
         try {
           resolve(JSON.parse(body || '{}'));
         } catch {
@@ -1523,6 +1719,11 @@ export class WSServer {
   /** Runs a browser action through the active tab (used by the MCP tools). */
   runBrowserAction(action: BrowserActionName, params: Record<string, unknown> = {}): Promise<BrowserActionResult> {
     return this.browserRouter.run(action, params);
+  }
+
+  /** Like stop(), but async so callers can await a clean exit. */
+  async shutdown(): Promise<void> {
+    this.stop();
   }
 
   stop(): void {
@@ -1543,5 +1744,6 @@ export class WSServer {
     this.clients.clear();
     this.server?.close();
     if (this.store) this.store.close();
+    this.removeAgentHookToken();
   }
 }

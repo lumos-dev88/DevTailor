@@ -8,26 +8,6 @@ export interface AgentSessionStartResult {
   mode: AgentSessionStartMode;
 }
 
-export interface ToolCallInfo {
-  toolCallId: string;
-  title: string;
-  kind?: string;
-  rawInput?: unknown;
-  locations?: Array<{ path: string; line?: number | null }>;
-  status?: string;
-}
-
-export interface ToolUpdateInfo {
-  toolCallId: string;
-  title?: string | null;
-  kind?: string | null;
-  status?: string | null;
-  rawInput?: unknown;
-  rawOutput?: unknown;
-  locations?: Array<{ path: string; line?: number | null }> | null;
-  content?: Array<Record<string, unknown>>;
-}
-
 export interface ApprovalRequestInfo {
   /** Tool call id the approval belongs to. */
   toolCallId: string;
@@ -87,15 +67,12 @@ export interface AgentCallbacks {
    * Shown live only; never stored in the display session history.
    */
   onNotice?: (text: string) => void;
-  onThinking: (delta: string) => void;
   onDone: (summary?: string) => void;
   onError: (message: string) => void;
   onSessionInfoUpdate?: (info: {
     title?: string | null;
     updatedAt?: string | null;
   }) => void;
-  onToolCall?: (tool: ToolCallInfo) => void;
-  onToolUpdate?: (update: ToolUpdateInfo) => void;
   /**
    * Invoked when a high-risk tool call requires user approval. Resolves with
    * the user's decision. If not provided, high-risk calls are rejected (never

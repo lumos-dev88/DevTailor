@@ -29,8 +29,9 @@ try {
   const caps = client.getServerCapabilities();
   const tools = (await client.listTools()).tools;
   const health = await fetch(`http://127.0.0.1:${port}/health`).then(r => r.status);
-  console.log(JSON.stringify({ channel: !!caps?.experimental?.['claude/channel'], tools: tools.length, health }));
-  ok = !!caps?.experimental?.['claude/channel'] && tools.length === 19 && tools.some(t => t.name === 'reply') && health === 200;
+  const permission = !!caps?.experimental?.['claude/channel/permission'];
+  console.log(JSON.stringify({ channel: !!caps?.experimental?.['claude/channel'], permission, tools: tools.length, health }));
+  ok = !!caps?.experimental?.['claude/channel'] && permission && tools.length === 19 && tools.some(t => t.name === 'reply') && health === 200;
 } catch (err) {
   console.error('smoke failed:', err, stderr);
 } finally {

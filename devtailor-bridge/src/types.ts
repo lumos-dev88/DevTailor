@@ -30,7 +30,9 @@ export interface ReviewPayload {
 }
 
 export interface WSMessage {
-  type: 'review' | 'ping' | 'pong' | 'connected' | 'stream' | 'thinking' | 'tool_call' | 'tool_update' | 'tool_status' | 'done' | 'error' | 'display_message' | 'session_info' | 'session_reset' | 'session_snapshot';
+  type: 'review' | 'ping' | 'pong' | 'connected' | 'stream' | 'tool_status' | 'done' | 'error' | 'display_message' | 'session_info' | 'session_reset' | 'session_snapshot'
+    | 'queue_status'
+    | 'agent_status';
   tabId?: string;
   payload?: ReviewPayload['payload'];
   delta?: string;
@@ -38,17 +40,17 @@ export interface WSMessage {
   message?: string;
   displayMessage?: Record<string, unknown>;
   agentStatus?: string;
+  /** `agent_status` event: what the AI is doing right now (see src/agent-status.ts). */
+  state?: 'idle' | 'thinking' | 'tool' | 'waiting';
+  label?: string;
+  toolName?: string;
+  activeTools?: number;
+  since?: number;
   projectId?: string;
   projectName?: string;
   bridgeInstanceId?: string;
-  toolTitle?: string;
   toolStatus?: string;
   toolCallId?: string;
-  toolKind?: string;
-  toolInput?: unknown;
-  toolLocations?: Array<{ path: string; line?: number | null }>;
-  toolOutput?: unknown;
-  toolContent?: Array<Record<string, unknown>>;
   sessionId?: string;
   agentSessionId?: string | null;
   sessionTitle?: string | null;

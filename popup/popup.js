@@ -23,28 +23,16 @@
   const addSiteInput = document.getElementById('add-site-input');
   const addSiteBtn = document.getElementById('add-site-btn');
   const addSiteError = document.getElementById('add-site-error');
-  const sizePresetsEl = document.getElementById('size-presets');
-  const customSizeRow = document.getElementById('custom-size-row');
-  const customWidthInput = document.getElementById('custom-width');
-  const customHeightInput = document.getElementById('custom-height');
-  const customSizeApply = document.getElementById('custom-size-apply');
   const openSidePanelBtn = document.getElementById('open-sidepanel');
 
-  if (!countEl || !noPage || !toggleBtn || !siteList || !addSiteInput || !addSiteBtn || !addSiteError || !sizePresetsEl || !customSizeRow || !customWidthInput || !customHeightInput || !customSizeApply || !openSidePanelBtn) {
+  if (!countEl || !noPage || !toggleBtn || !siteList || !addSiteInput || !addSiteBtn || !addSiteError || !openSidePanelBtn) {
     console.warn('[DevTailor] Popup DOM is incomplete.');
     return;
   }
 
   const DEFAULT_PATTERNS = ['*://localhost/*', '*://127.0.0.1/*'];
-  const PANEL_SIZE_KEY = 'dr_panel_size';
-  const PANEL_SIZE_PRESETS = {
-    compact: { mode: 'compact', width: 380, height: 520 },
-    default: { mode: 'default', width: 480, height: 640 },
-    wide: { mode: 'wide', width: 640, height: 720 }
-  };
 
   let extensionEnabled = true;
-  let currentPanelSize = PANEL_SIZE_PRESETS.default;
 
   // --- Toggle ---
 
@@ -215,65 +203,6 @@
     addSiteError.textContent = '';
   }
 
-  // --- Panel size settings ---
-
-  function normalizePanelSize(size) {
-    const mode = size && size.mode ? size.mode : 'default';
-    const preset = PANEL_SIZE_PRESETS[mode];
-    const width = Number(size && size.width);
-    const height = Number(size && size.height);
-    return {
-      mode,
-      width: Math.min(Math.max(Number.isFinite(width) ? width : (preset ? preset.width : 480), 320), 960),
-      height: Math.min(Math.max(Number.isFinite(height) ? height : (preset ? preset.height : 640), 420), 900)
-    };
-  }
-
-  function renderPanelSize(size) {
-    currentPanelSize = normalizePanelSize(size);
-    sizePresetsEl.querySelectorAll('.size-preset').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.sizeMode === currentPanelSize.mode);
-    });
-    customSizeRow.classList.toggle('show', currentPanelSize.mode === 'custom');
-    customWidthInput.value = currentPanelSize.width;
-    customHeightInput.value = currentPanelSize.height;
-  }
-
-  async function savePanelSize(size) {
-    const normalized = normalizePanelSize(size);
-    await chrome.storage.sync.set({ [PANEL_SIZE_KEY]: normalized });
-    renderPanelSize(normalized);
-    applyPanelSizeToActiveTab(normalized);
-    showToast('卡片尺寸已更新。');
-  }
-
-  function applyPanelSizeToActiveTab(size) {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (!tab || !tab.id) return;
-      chrome.tabs.sendMessage(tab.id, {
-        type: 'APPLY_PANEL_SIZE',
-        size
-      }).catch(() => {
-        // The tab may not have the content script yet; executeScript below is a fallback.
-      });
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: (nextSize) => {
-          if (window.__domReview && window.__domReview.ui && window.__domReview.ui.applyPanelSize) {
-            window.__domReview.ui.applyPanelSize(nextSize);
-          }
-        },
-        args: [size]
-      }).catch(() => {});
-    });
-  }
-
-  function loadPanelSize() {
-    chrome.storage.sync.get(PANEL_SIZE_KEY, (result) => {
-      renderPanelSize(result[PANEL_SIZE_KEY] || PANEL_SIZE_PRESETS.default);
-    });
-  }
-
   async function openSidePanel() {
     const tab = await getActiveTab();
     const response = await chrome.runtime.sendMessage({
@@ -286,29 +215,6 @@
       return;
     }
     showToast('Chat 侧边栏已打开。');
-  }
-
-  function bridgeRequest(path, options = {}) {
-    return new Promise(resolve => {
-      chrome.runtime.sendMessage({
-        type: 'DEVTAILOR_BRIDGE_PROXY_REQUEST',
-        path,
-        method: options.method || 'GET',
-        headers: options.headers || {},
-        body: options.body
-      }, (response) => {
-        resolve(response || { ok: false, status: 0, error: chrome.runtime.lastError?.message || 'Bridge request failed' });
-      });
-    });
-  }
-
-  function parseBridgeJson(response) {
-    if (!response || !response.body) return null;
-    try {
-      return JSON.parse(response.body);
-    } catch {
-      return null;
-    }
   }
 
   // --- Add / Remove patterns ---
@@ -380,8 +286,6 @@
       renderAllowedSites(customPatterns || []);
     });
 
-    loadPanelSize();
-
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       if (!tab || !tab.url) {
         showNoPage();
@@ -444,34 +348,6 @@
   addSiteBtn.addEventListener('click', addPattern);
   addSiteInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') addPattern();
-  });
-  sizePresetsEl.addEventListener('click', (e) => {
-    const btn = e.target.closest('.size-preset');
-    if (!btn) return;
-    const mode = btn.dataset.sizeMode;
-    if (mode === 'custom') {
-      renderPanelSize({ ...currentPanelSize, mode: 'custom' });
-      return;
-    }
-    savePanelSize(PANEL_SIZE_PRESETS[mode]);
-  });
-  customSizeApply.addEventListener('click', () => {
-    savePanelSize({
-      mode: 'custom',
-      width: customWidthInput.value,
-      height: customHeightInput.value
-    });
-  });
-  [customWidthInput, customHeightInput].forEach(input => {
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        savePanelSize({
-          mode: 'custom',
-          width: customWidthInput.value,
-          height: customHeightInput.value
-        });
-      }
-    });
   });
   init();
   }

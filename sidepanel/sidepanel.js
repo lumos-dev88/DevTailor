@@ -14,6 +14,7 @@
   const welcome = $('#welcome');
   const welcomeSuggestions = $('#welcome-suggestions');
   const messagesEl = $('#messages');
+  const jumpBtn = $('#chat-jump');
   const composer = $('#composer');
   const promptEl = $('#prompt');
   const sendBtn = $('#send-btn');
@@ -24,27 +25,107 @@
   const imageLightboxImg = $('#image-lightbox-img');
   const imageLightboxClose = $('#image-lightbox-close');
   const newSessionBtn = $('#btn-new-session');
-  const historyBtn = $('#btn-history');
+  const sessionTitleEl = $('#session-title');
+  const promptCtxEl = $('#prompt-ctx');
+  /** 上一条提示带入的上下文（按会话记，切会话后不显示别的会话的） */
+  let lastPromptCtx = null;
+  const statusBanner = $('#status-banner');
 
+  const core = window.__domReview.bridgeCore;
+  const chatRender = window.__domReview.chatRender;
+  const marksCore = window.__domReview.marksCore;
   const chatMarkdown = window.__domReview?.chatMarkdown;
   const chatImages = window.__domReview?.chatImages;
   const normalizeImages = chatImages?.normalizeImages || (() => []);
   const markdownRenderCache = new Map();
 
+  // Shared chat component styles (permission card, diff/console, notices…).
+  const chatStyle = document.createElement('style');
+  chatStyle.textContent = window.__domReview.chatStyles.css;
+  document.head.appendChild(chatStyle);
+
+  /* ── 极简工具状态（工具名 + 状态） ────────────── */
+  // session bar 里的一小段文字：只描述最近一次工具调用，不进消息流、不碰滚动和 composer。
+  const toolStatus = window.__domReview.toolStatus.create({
+    elements: {
+      root: $('#tool-status'),
+      text: $('#tool-status-text'),
+    },
+  });
+
   /* ── State ────────────────────────────────────── */
   let clientId = null;
+  let bridgeReachable = false;
   let sseConnected = false;
-  let requestInFlight = false;
   let sendInProgress = false;
   let stopInFlight = false;
+  let requestInFlight = false;
   let pollTimer = null;
-
-  let activeStreamId = null;
-  let activeLoadingId = null;
-  let currentSessionId = null;
-  let syncedClientId = null;
-  let snapshotRequestSerial = 0;
   let imageManager = null;
+  let syncedSessionKey = null;
+  let healthSerial = 0;
+  let disconnectedAt = 0;
+  let syncSerial = 0;
+
+  /* ── Mark tray (page marks + screenshots of the followed tab) ── */
+  const sentTracker = window.__domReview.marksCore.createSentTracker(); // marks carried by in-flight turn(s)
+  let reconciling = false;
+  const markTray = window.__sidepanelMarkTray.create({
+    els: {
+      root: $('#mark-tray'),
+      toggle: $('#mark-tray-toggle'),
+      title: $('#mark-tray-title'),
+      clearSent: $('#mark-tray-clear-sent'),
+      body: $('#mark-tray-body'),
+    },
+    sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
+    showNotice: () => Boolean(clientId),
+    onChange: (state) => {
+      reconcileSentMarks(state);
+      updateSendState();
+    },
+  });
+
+  /** A reloaded page restores marks as unsent while their turn is still running: mark them sent again. */
+  function reconcileSentMarks(state) {
+    if (reconciling || !state || state.status !== 'ready') return;
+    const stale = sentTracker.staleIds(state.marks);
+    if (!stale.length) return;
+    reconciling = true;
+    markTray.controller.markSent(stale, false).finally(() => { reconciling = false; });
+  }
+
+  function tabIdFromClient(id) {
+    const m = /^tab_(\d+)$/.exec(id || '');
+    return m ? Number(m[1]) : null;
+  }
+
+  async function activeBrowserTabId() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!tab || tab.id == null || /^chrome-extension:/.test(tab.url || '')) return null;
+      return tab.id;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The tray follows the taken-over tab; without a takeover it shows the focused browser tab. */
+  let followSerial = 0;
+  async function followTray() {
+    const serial = ++followSerial;
+    const tabId = clientId ? tabIdFromClient(clientId) : await activeBrowserTabId();
+    // A newer call (e.g. the takeover became known while this one waited for tabs.query) wins.
+    if (serial !== followSerial) return;
+    await markTray.follow(tabId);
+  }
+
+  /** The turn that carried the marks ended: drop them (done) or make them sendable again (error). */
+  function settleSentMarks(outcome) {
+    const { clear, unsend } = sentTracker.settle(outcome);
+    if (clear) markTray.controller.clearSent();
+    else if (unsend.length) markTray.controller.markUnsent(unsend);
+  }
 
   /* ── Bridge proxy ─────────────────────────────── */
   function bridgeRequest(path, options = {}) {
@@ -78,58 +159,74 @@
     }
   }
 
-  /* ── Message store ────────────────────────────── */
-  const messages = [];
+  /**
+   * Tell the service worker which project /health reported so it can attach
+   * X-DevTailor-Project to every Bridge/Hub request. Only on change; silent on failure.
+   * /health with several projects and no top-level projectId stays header-less
+   * (the Hub applies its own fallback rules).
+   */
+  let lastSentProjectId = null;
+  function syncProjectIdToBackground(body) {
+    const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
+    if (!projectId && Array.isArray(body?.projects) && body.projects.length > 1) return;
+    if (projectId === lastSentProjectId) return;
+    // Nothing learned yet and nothing to report: the header already defaults to off.
+    if (!projectId && lastSentProjectId === null) return;
+    lastSentProjectId = projectId;
+    try {
+      chrome.runtime.sendMessage({ type: 'SET_PROJECT_ID', projectId }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch { /* service worker not reachable */ }
+  }
 
-  const messageStore = {
-    append(msg) {
-      messages.push(msg);
-      renderMessages();
+  /** JSON call parsed with bridgeCore: { ok, status, reachable, data, code, message }. */
+  async function call(path, options = {}) {
+    const response = await bridgeRequest(path, {
+      method: options.method || 'GET',
+      headers: options.body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    });
+    return core.parseProxyResponse(response);
+  }
+
+  /* ── Conversation (shared reducer) ────────────── */
+  // The side panel is the long-lived view: no practical message cap.
+  const messageStore = window.__domReview.createMessageStore({ maxMessages: 20000 });
+
+  const conversation = window.__domReview.chatConversation.create({
+    store: messageStore,
+    getClientId: () => clientId,
+    onChange: (kind) => {
+      if (kind === 'reset') toolStatus.clear();
+      if (kind === 'user' || kind === 'reset') scroll.scrollToBottom();
+      else scroll.followLatestIfPinned();
     },
-    update(id, updates) {
-      const idx = messages.findIndex(m => m.id === id);
-      if (idx === -1) return;
-      const msg = messages[idx];
-      if (typeof updates === 'function') {
-        updates(msg);
-      } else {
-        Object.assign(msg, updates);
-      }
-      renderMessages();
+    onMeta: applyMeta,
+    onDone: (ev) => {
+      if (ev.reason === 'cancelled') showHint('任务已取消', 'info');
+      toolStatus.clear();
+      settleSentMarks('done');
+      updateSendState();
     },
-    remove(id) {
-      const idx = messages.findIndex(m => m.id === id);
-      if (idx === -1) return false;
-      messages.splice(idx, 1);
-      renderMessages();
-      return true;
+    onError: (_ev, info) => {
+      if (info.kind === 'terminal' || info.kind === 'auth') showHint(info.text);
+      settleSentMarks('error');
+      updateSendState();
     },
-    find(predicate) {
-      return messages.find(predicate) || null;
-    },
-    findLast(predicate) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (predicate(messages[i])) return messages[i];
-      }
-      return null;
-    },
-    filter(predicate) {
-      return messages.filter(predicate);
-    },
-    replaceAll(items) {
-      messages.length = 0;
-      messages.push(...items);
-      renderMessages();
-    },
-    size() {
-      return messages.length;
-    },
-    get(id) {
-      return messages.find(m => m.id === id) || null;
-    },
-    getAll() {
-      return messages;
-    },
+    onToolStatus: (ev) => toolStatus.update(ev),
+  });
+  const meta = conversation.meta;
+
+  const scroll = window.__domReview.chatScroll.create({
+    getContainer: () => stream,
+    getJumpButton: () => jumpBtn,
+  });
+  scroll.setup();
+  jumpBtn.addEventListener('click', () => scroll.scrollToBottom({ smooth: true }));
+
+  const messageStoreApi = {
+    get(id) { return messageStore.find((m) => m.id === id); },
   };
 
   /* ── Status ───────────────────────────────────── */
@@ -140,65 +237,122 @@
     else bridgePip.classList.add('is-checking');
   }
 
+  function renderStatusBanner() {
+    const model = core.statusModel({
+      bridge: bridgeReachable ? 'connected' : 'disconnected',
+      activeClient: Boolean(clientId),
+      authRequired: meta.authRequired,
+    });
+    const quiet = model.key === 'ready';
+    statusBanner.hidden = quiet;
+    statusBanner.className = `status-banner status-banner--${model.tone}`;
+    statusBanner.innerHTML = quiet ? '' : chatRender.inlineText(model.text);
+    return model;
+  }
+
   async function refreshStatus(options = {}) {
-    setPip('checking');
-    bridgeStatus.textContent = '检查中…';
+    const serial = ++healthSerial;
+    if (!bridgeReachable) setPip('checking');
     const response = await bridgeRequest('/health');
+    if (serial !== healthSerial) return;
     const body = parseBridgeJson(response);
     if (!response.ok || !body) {
+      bridgeReachable = false;
+      designDocs.setConnected(false);
+      // Bridge 未连接时不可能有工具在跑：直接清掉（下次事件会重新填）。
+      toolStatus.clear();
       setPip('offline');
       bridgeStatus.textContent = '未连接';
       projectName.textContent = '-';
       runtimeLabel.textContent = '-';
       activeTab.textContent = '-';
       clientId = null;
-      snapshotRequestSerial++;
+      syncedSessionKey = null;
+      syncSerial++;
+      applyMeta(meta);
       updateSendState();
+      followTray();
       return;
     }
+    bridgeReachable = true;
+    designDocs.setConnected(true);
+    syncProjectIdToBackground(body);
     if (!sseConnected) setPip('online');
     bridgeStatus.textContent = sseConnected ? 'SSE 已连接' : '已连接';
     projectName.textContent = body.projectName || '-';
     runtimeLabel.textContent = body.agentLabel || body.agentKey || '-';
     activeTab.textContent = body.activeClientId || '未接管';
     clientId = body.activeClientId || null;
+    applyMeta(meta);
     updateSendState();
+    followTray();
 
-    const activeSessionChanged = Boolean(
-      body.activeSessionId && body.activeSessionId !== currentSessionId
-    );
-    if (
-      clientId &&
-      (options.forceSessionSync || syncedClientId !== clientId || activeSessionChanged)
-    ) {
-      await syncActiveSessionSnapshot(options.syncReason || 'status');
+    const key = JSON.stringify([body.projectId, body.bridgeInstanceId, clientId]);
+    const activeSessionChanged = Boolean(body.activeSessionId && body.activeSessionId !== meta.sessionId);
+    if (options.forceSessionSync || syncedSessionKey !== key || activeSessionChanged) {
+      await syncActiveSession(key, options);
     }
+  }
+
+  async function syncActiveSession(key, options) {
+    const targetClientId = clientId;
+    const serial = ++syncSerial;
+    const path = targetClientId ? `/sessions/active?clientId=${encodeURIComponent(targetClientId)}` : '/sessions/active';
+    const res = await call(path);
+    if (serial !== syncSerial || targetClientId !== clientId) return;
+    if (!res.ok) {
+      if (options.syncReason !== 'status') showHint(core.failureInfo(res).text);
+      return;
+    }
+    syncedSessionKey = key;
+    conversation.applyActive(res.data);
+    updateSendState();
   }
 
   /* Toggle meta strip */
   statusDot.addEventListener('click', () => {
     metaStrip.classList.toggle('is-open');
-    refreshStatus();
+    refreshStatus({ forceSessionSync: true, syncReason: 'manual' });
   });
 
-  /* ── Helpers ──────────────────────────────────── */
-  function scrollToEnd() {
-    requestAnimationFrame(() => {
-      stream.scrollTop = stream.scrollHeight;
-    });
+  function renderPromptCtx(metaNow) {
+    if (!promptCtxEl) return;
+    const model = lastPromptCtx && lastPromptCtx.sessionId === metaNow.sessionId
+      ? core.promptContextModel(lastPromptCtx)
+      : null;
+    if (!model || model.empty) {
+      promptCtxEl.hidden = true;
+      return;
+    }
+    promptCtxEl.hidden = false;
+    promptCtxEl.textContent = `带入 ${model.label}`;
+    promptCtxEl.title = model.title;
   }
 
-  function updateWelcome() {
-    if (messages.length > 0) {
-      welcome.classList.add('is-hidden');
-    } else {
-      welcome.classList.remove('is-hidden');
+  /* ── Meta (session title, composer lock) ── */
+  function applyMeta(m) {
+    const metaNow = m || meta;
+    sessionTitleEl.textContent = metaNow.sessionId ? (metaNow.title || '新会话') : '未选择会话';
+    sessionTitleEl.title = metaNow.sessionId ? `${metaNow.title || '新会话'}\n${metaNow.sessionId}` : '';
+    renderPromptCtx(metaNow);
+
+    if (metaNow.processing !== requestInFlight) {
+      requestInFlight = metaNow.processing;
+      if (!requestInFlight) stopInFlight = false;
     }
+    renderStatusBanner();
+    updateSendState();
+  }
+
+  /* ── Helpers ──────────────────────────────────── */
+  function updateWelcome() {
+    welcome.classList.toggle('is-hidden', messageStore.size > 0);
   }
 
   function updateSendState() {
     const hasText = promptEl.value.trim().length > 0;
     const hasImages = (imageManager?.count?.() || 0) > 0;
+    const hasPageContext = markTray.hasContent();
     const connected = Boolean(clientId);
 
     if (sendInProgress) {
@@ -207,92 +361,41 @@
       sendBtn.classList.remove('dt-send-btn--stop');
     } else if (requestInFlight) {
       sendBtn.disabled = stopInFlight;
-      sendBtn.textContent = stopInFlight ? '停止中' : '停止';
+      sendBtn.textContent = stopInFlight ? '取消中…' : '取消';
       sendBtn.classList.toggle('dt-send-btn--stop', true);
     } else {
-      sendBtn.disabled = !(connected && (hasText || hasImages));
+      sendBtn.disabled = !(connected && (hasText || hasImages || hasPageContext));
       sendBtn.textContent = '发送';
       sendBtn.classList.remove('dt-send-btn--stop');
     }
   }
 
-  async function syncActiveSessionSnapshot(reason = 'initial') {
-    const targetClientId = clientId;
-    if (!targetClientId) return false;
-
-    const requestSerial = ++snapshotRequestSerial;
-    const response = await bridgeRequest(
-      `/sessions/active?clientId=${encodeURIComponent(targetClientId)}`
-    );
-    const body = parseBridgeJson(response);
-    if (
-      requestSerial !== snapshotRequestSerial ||
-      targetClientId !== clientId
-    ) {
-      return false;
-    }
-    if (!response.ok || !body?.ok) {
-      if (reason !== 'status') {
-        showHint('当前会话同步失败，将继续接收新消息');
-      }
-      return false;
-    }
-
-    activeStreamId = null;
-    activeLoadingId = null;
-    currentSessionId = body.activeSessionId || body.session?.id || null;
-    syncedClientId = targetClientId;
-
-    const restored = Array.isArray(body.messages) ? body.messages : [];
-    messageStore.replaceAll(restored);
-    const tail = restored[restored.length - 1];
-    if (body.isProcessing && tail?.type === 'stream' && tail.id) {
-      activeStreamId = tail.id;
-    }
-    setRequestInFlight(Boolean(body.isProcessing));
-    updateSendState();
-    return true;
-  }
-
   function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str || '';
-    return div.innerHTML;
+    return core.escapeHtml(str);
   }
 
-  function truncate(str, max) {
-    const value = String(str || '');
-    return value.length > max ? value.slice(0, max - 1) + '…' : value;
+  function showHint(message, tone) {
+    const hint = $('#sidepanel-hint');
+    if (!hint) return;
+    hint.textContent = message;
+    hint.classList.toggle('is-info', tone === 'info');
+    hint.classList.add('show');
+    clearTimeout(showHint.timer);
+    showHint.timer = setTimeout(() => {
+      hint.classList.remove('show');
+    }, 4200);
   }
 
-  function toolStatusLabel(status) {
-    const map = {
-      pending: '准备中',
-      in_progress: '运行中',
-      running: '运行中',
-      completed: '已完成',
-      failed: '失败',
-      error: '失败',
-      canceled: '已取消',
-    };
-    return map[status] || status || '准备中';
-  }
-
-  function toolStatusClass(status) {
-    if (status === 'completed') return 'dt-tool-status-ok';
-    if (status === 'failed' || status === 'error' || status === 'canceled') return 'dt-tool-status-error';
-    if (status === 'in_progress' || status === 'running') return 'dt-tool-status-running';
-    return 'dt-tool-status-pending';
-  }
-
-  function toolIcon(kind) {
-    if (kind === 'browser') {
-      return '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/></svg>';
-    }
-    if (kind === 'edit') {
-      return '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
-    }
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>';
+  /* ── Message rendering ────────────────────────── */
+  /** Mark chips under a user message; a compacted DevTailor prompt folds them into a <details>. */
+  function renderBubbleMarks(bubble) {
+    const chips = bubble.marks.map((m) => {
+      const label = escapeHtml(m.desc || m.selector || '');
+      const tip = escapeHtml([m.selector, m.comment, m.file].filter(Boolean).join('\n'));
+      return `<span class="tray-chip tray-chip--static" title="${tip}"><span class="tray-chip__n" style="background:${escapeHtml(m.color || '#3b82f6')}">${escapeHtml(m.index)}</span><span class="tray-chip__t">${label}</span></span>`;
+    }).join('');
+    if (!bubble.parsed) return `<div class="dt-bubble-marks" aria-label="随消息发送的标记">${chips}</div>`;
+    return `<details class="dt-bubble-marks dt-bubble-marks--fold"><summary>含 ${bubble.marks.length} 个标记</summary><div class="dt-bubble-marks__list">${chips}</div></details>`;
   }
 
   function renderTextBubble(msg) {
@@ -304,11 +407,14 @@
       : '';
 
     if (msg.role === 'user') {
-      const syntheticImageText = images.length && /^发送\s+\d+\s+张图片$/.test(String(msg.content || '').trim());
-      const text = msg.content && !syntheticImageText
-        ? `<div class="dt-chat-msg dt-chat-msg--user">${escapeHtml(msg.content)}</div>`
+      const bubble = marksCore.userBubbleModel(msg);
+      const syntheticText = /^发送\s+\d+\s+(张图片|个标记)$/.test(String(bubble.text || '').trim());
+      const showText = bubble.text && !((images.length || bubble.marks.length) && syntheticText);
+      const text = showText
+        ? `<div class="dt-chat-msg dt-chat-msg--user">${escapeHtml(bubble.text)}</div>`
         : '';
-      return `<div class="dt-chat-user-stack">${text}${imageHtml}</div>`;
+      const chips = bubble.marks.length ? renderBubbleMarks(bubble) : '';
+      return `<div class="dt-chat-user-stack">${text}${chips}${imageHtml}</div>`;
     }
 
     const content = String(msg.content || '');
@@ -322,108 +428,20 @@
     return `<div class="dt-chat-msg dt-chat-md">${html}</div>`;
   }
 
-  function renderThinkingBlock(msg) {
-    const preview = escapeHtml(msg.content.trim().slice(0, 140));
-    const hasMore = msg.content.trim().length > 140;
-    const isOpen = msg.open ? 'open' : '';
-    const label = msg.closed ? '已思考' : '思考中';
-    return `
-      <div class="dt-thinking-block ${isOpen}" data-msg-id="${escapeHtml(msg.id)}">
-        <button class="dt-thinking-toggle" type="button" data-action="toggle-thinking" data-msg-id="${escapeHtml(msg.id)}" aria-expanded="${msg.open ? 'true' : 'false'}">
-          <span class="dt-thinking-icon" aria-hidden>
-            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <path d="M8 6.65A1.35 1.35 0 1 1 8 9.35A1.35 1.35 0 0 1 8 6.65Z" fill="currentColor"/>
-              <path d="M8 2.4C10.9.1 14.2.3 15 1.1C15.8 1.9 15.9 5.2 13.6 8C15.9 10.8 15.8 14.1 15 14.9C14.2 15.7 10.9 15.9 8 13.6C5.2 15.9 1.9 15.8 1.1 14.9C.3 14.1.1 10.8 2.4 8C.1 5.2.3 1.9 1.1 1.1C1.9.3 5.2.1 8 2.4Z" fill="currentColor" fill-opacity=".55"/>
-            </svg>
-          </span>
-          <span class="dt-thinking-label">${label}</span>
-          <span class="dt-thinking-preview">${msg.open ? '' : preview}${!msg.open && hasMore ? '…' : ''}</span>
-          <span class="dt-thinking-chev" aria-hidden>
-            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              ${msg.open ? '<polyline points="6 9 12 15 18 9"/>' : '<polyline points="9 18 15 12 9 6"/>'}
-            </svg>
-          </span>
-        </button>
-        ${msg.open ? `<pre class="dt-thinking-body">${escapeHtml(msg.content)}</pre>` : ''}
-      </div>
-    `;
-  }
-
-  function renderToolCard(msg) {
-    const status = msg.status || 'pending';
-    const hasOutput = Boolean(msg.output);
-    const isOpen = msg.open && hasOutput;
-    const title = escapeHtml(msg.title || 'Tool');
-    const meta = escapeHtml(msg.meta || '');
-    const family = msg.kind === 'browser' ? 'browser' : 'execute';
-    const headerAttrs = hasOutput
-      ? `button class="dt-tool-card-head" type="button" data-action="toggle-tool" data-msg-id="${escapeHtml(msg.id)}" aria-expanded="${isOpen ? 'true' : 'false'}"`
-      : 'div class="dt-tool-card-head"';
-    const headerClose = hasOutput ? 'button' : 'div';
-    return `
-      <div class="dt-tool-card dt-tool-card--${family} ${isOpen ? 'open' : ''}" data-msg-id="${escapeHtml(msg.id)}">
-        <${headerAttrs}>
-          <span class="dt-tool-card-icon" aria-hidden>${toolIcon(msg.kind)}</span>
-          <span class="dt-tool-card-title" title="${title}">${title}</span>
-          ${meta ? `<span class="dt-tool-card-meta">${truncate(meta, 120)}</span>` : ''}
-          <span class="dt-tool-card-status ${toolStatusClass(status)}">${toolStatusLabel(status)}</span>
-          ${hasOutput ? `<span class="dt-tool-card-chev" aria-hidden>
-            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              ${isOpen ? '<polyline points="6 9 12 15 18 9"/>' : '<polyline points="9 18 15 12 9 6"/>'}
-            </svg>
-          </span>` : ''}
-        </${headerClose}>
-        ${isOpen ? `<pre class="dt-tool-output">${escapeHtml(truncate(msg.output, 4000))}</pre>` : ''}
-      </div>
-    `;
-  }
-
   function renderLoadingDots() {
     return '<div class="dt-loading-dots" aria-label="加载中"><span></span><span></span><span></span></div>';
   }
 
   function renderMessageBlock(msg) {
-    if (msg.type === 'loading') return renderLoadingDots();
-    if (msg.type === 'thinking') return renderThinkingBlock(msg);
-    if (msg.type === 'tool') return renderToolCard(msg);
-    if (msg.type === 'approval') return renderApprovalCard(msg);
-    if (msg.type === 'question') return renderQuestionCard(msg);
-    return renderTextBubble(msg);
-  }
-
-  function renderApprovalCard(msg) {
-    const status = msg.status || 'pending';
-    const idAttr = escapeHtml(msg.id);
-    const toolName = escapeHtml(msg.toolName || 'tool');
-    const action = escapeHtml(msg.action || '');
-    const risk = escapeHtml(msg.risk || '');
-    let footer = '';
-    if (status === 'pending' && !msg.observing) {
-      footer = `
-        <div class="dt-approval-actions">
-          <button class="dt-approval-btn dt-approval-reject" type="button" data-action="approval-decide" data-decision="rejected" data-msg-id="${idAttr}">拒绝</button>
-          <button class="dt-approval-btn dt-approval-approve" type="button" data-action="approval-decide" data-decision="approved" data-msg-id="${idAttr}">批准</button>
-        </div>`;
-    } else if (status === 'submitting') {
-      footer = '<div class="dt-approval-note">提交中…</div>';
-    } else if (status === 'pending' && msg.observing) {
-      footer = '<div class="dt-approval-note">等待发起会话的界面处理…</div>';
-    } else if (status === 'approved') {
-      footer = '<div class="dt-approval-note dt-approval-note--approved">已批准</div>';
-    } else if (status === 'rejected') {
-      footer = '<div class="dt-approval-note dt-approval-note--rejected">已拒绝</div>';
+    let html;
+    switch (msg.type) {
+      case 'loading': return renderLoadingDots();
+      case 'approval': return chatRender.renderApprovalCard(msg);
+      case 'notice': return chatRender.renderNotice(msg);
+      case 'question': return renderQuestionCard(msg);
+      default: html = renderTextBubble(msg);
     }
-    return `
-      <div class="dt-approval-card dt-approval-card--${status}" data-msg-id="${idAttr}">
-        <div class="dt-approval-head">
-          <span class="dt-approval-badge">需要审批</span>
-          <span class="dt-approval-tool" title="${toolName}">${toolName}</span>
-        </div>
-        ${action ? `<div class="dt-approval-action">${action}</div>` : ''}
-        ${risk ? `<div class="dt-approval-risk">${risk}</div>` : ''}
-        ${footer}
-      </div>
-    `;
+    return chatRender.markHistory(html, msg);
   }
 
   const OTHER_SENTINEL = '__other__';
@@ -509,40 +527,47 @@
     `;
   }
 
-  /* ── Render messages ──────────────────────────── */
+  /**
+   * Keyed incremental render: only the rows whose HTML changed are replaced,
+   * 按消息 key 增量替换，避免重绘时丢失审批卡片按钮状态、文字选区和滚动位置。
+   */
+  const rows = new Map(); // message id -> { html, node }
+  const rowTemplate = document.createElement('template');
+
   function renderMessages() {
-    const liveIds = new Set(messages.map(message => message.id));
+    const msgs = messageStore.getAll();
+    const liveIds = new Set(msgs.map((message) => message.id));
     for (const id of markdownRenderCache.keys()) {
       if (!liveIds.has(id)) markdownRenderCache.delete(id);
     }
-    messagesEl.innerHTML = messages.map(renderMessageBlock).join('');
+    for (const [id, row] of rows) {
+      if (!liveIds.has(id)) {
+        row.node.remove();
+        rows.delete(id);
+      }
+    }
+
+    let previous = null;
+    for (const msg of msgs) {
+      const html = renderMessageBlock(msg).trim();
+      let row = rows.get(msg.id);
+      if (!row || row.html !== html) {
+        rowTemplate.innerHTML = html;
+        const node = rowTemplate.content.firstElementChild;
+        if (!node) continue;
+        node.dataset.row = msg.id;
+        if (row && row.node.isConnected) row.node.replaceWith(node);
+        row = { html, node };
+        rows.set(msg.id, row);
+      }
+      const expected = previous ? previous.nextElementSibling : messagesEl.firstElementChild;
+      if (row.node !== expected) messagesEl.insertBefore(row.node, expected);
+      previous = row.node;
+    }
     updateWelcome();
-    scrollToEnd();
   }
 
-  function addMessage(role, type, content, extra = {}) {
-    const msg = {
-      id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
-      role,
-      type,
-      content,
-      timestamp: Date.now(),
-      ...extra,
-    };
-    messageStore.append(msg);
-    return msg;
-  }
-
-  function showHint(message) {
-    const hint = $('#sidepanel-hint');
-    if (!hint) return;
-    hint.textContent = message;
-    hint.classList.add('show');
-    clearTimeout(showHint.timer);
-    showHint.timer = setTimeout(() => {
-      hint.classList.remove('show');
-    }, 2200);
-  }
+  messageStore.subscribe(renderMessages);
 
   imageManager = chatImages?.create?.({
     getPreview: () => screenshotPreview,
@@ -565,205 +590,25 @@
     imageLightboxImg.removeAttribute('src');
   }
 
-  /* ── Stream / loading management ──────────────── */
-  function startLoading(statusText) {
-    if (activeLoadingId) {
-      if (statusText) {
-        messageStore.update(activeLoadingId, { statusText });
-      }
-      return;
-    }
-    const id = 'msg_' + Date.now() + '_loading';
-    activeLoadingId = id;
-    messageStore.append({
-      id,
-      role: 'assistant',
-      type: 'loading',
-      content: '',
-      statusText: statusText || '…',
-      timestamp: Date.now(),
-    });
-  }
-
-  function removeLoading() {
-    if (!activeLoadingId) return;
-    messageStore.remove(activeLoadingId);
-    activeLoadingId = null;
-  }
-
-  function startStream() {
-    if (activeStreamId) return;
-    removeLoading();
-    const id = 'msg_' + Date.now() + '_stream';
-    activeStreamId = id;
-    messageStore.append({
-      id,
-      role: 'assistant',
-      type: 'stream',
-      content: '',
-      timestamp: Date.now(),
-    });
-  }
-
-  function endStream() {
-    activeStreamId = null;
-    removeLoading();
-    closeActiveThinking();
-  }
-
-  function closeActiveThinking() {
-    const lastThinking = messageStore.findLast(m => m.type === 'thinking' && !m.closed);
-    if (!lastThinking) return;
-    messageStore.update(lastThinking.id, { closed: true });
-  }
-
-  function markLastPendingToolCompleted() {
-    const lastTool = messageStore.findLast(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'));
-    if (!lastTool) return;
-    if (activeStreamId) {
-      messageStore.update(lastTool.id, { status: 'completed' });
-    }
-  }
-
   /* ── SSE event projection ─────────────────────── */
   function handleSseMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
 
+    // The side panel hears every connected tab's stream; per-client events carry the receiver's
+    // tabId, so keep only the ones addressed to the tab we follow (approvals have no tabId).
+    if (msg.tabId && clientId && msg.tabId !== clientId) return;
+    if (msg.tabId && !clientId && msg.type !== 'active_client') return;
+
+    if (msg.type === 'session_reset') {
+      syncSerial++;
+      syncedSessionKey = null;
+      toolStatus.clear();
+    }
+    if (conversation.handle(msg)) return;
+
     switch (msg.type) {
-      case 'stream':
-        if (!activeStreamId) startStream();
-        markLastPendingToolCompleted();
-        closeActiveThinking();
-        if (activeStreamId) {
-          messageStore.update(activeStreamId, (m) => { m.content += msg.delta || ''; });
-        }
-        break;
-
-      case 'thinking': {
-        if (!msg.delta) return;
-        removeLoading();
-        markLastPendingToolCompleted();
-        const lastThinking = messageStore.findLast(m => m.type === 'thinking');
-        if (lastThinking && !lastThinking.closed) {
-          messageStore.update(lastThinking.id, (m) => { m.content += msg.delta; });
-        } else {
-          messageStore.append({
-            id: 'msg_' + Date.now() + '_thinking',
-            role: 'assistant',
-            type: 'thinking',
-            content: msg.delta,
-            closed: false,
-            open: false,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-      }
-
-      case 'tool_call': {
-        removeLoading();
-        closeActiveThinking();
-        const toolCallId = msg.toolCallId || msg.toolTitle || 'tool_' + Date.now();
-        const existing = messageStore.find(m => m.type === 'tool' && m.toolCallId === toolCallId);
-        if (existing) {
-          messageStore.update(existing.id, {
-            title: msg.toolTitle || existing.title,
-            status: msg.toolStatus || existing.status,
-          });
-        } else {
-          messageStore.append({
-            id: 'msg_' + Date.now() + '_tool',
-            role: 'assistant',
-            type: 'tool',
-            toolCallId,
-            title: msg.toolTitle || 'Tool',
-            kind: msg.toolKind || 'other',
-            input: msg.toolInput || null,
-            status: msg.toolStatus || 'pending',
-            output: null,
-            open: false,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-      }
-
-      case 'tool_update': {
-        const tool = messageStore.find(m => m.type === 'tool' && m.toolCallId === msg.toolCallId);
-        if (!tool) break;
-        messageStore.update(tool.id, {
-          status: msg.toolStatus || tool.status,
-          output: msg.toolOutput !== undefined ? msg.toolOutput : tool.output,
-        });
-        break;
-      }
-
-      case 'tool_status': {
-        const lastTool = messageStore.findLast(m => m.type === 'tool');
-        if (lastTool) {
-          messageStore.update(lastTool.id, { status: msg.toolStatus || 'running' });
-        }
-        break;
-      }
-
-      case 'approval_request': {
-        removeLoading();
-        closeActiveThinking();
-        const existing = messageStore.find(m => m.type === 'approval' && m.approvalId === msg.approvalId);
-        if (existing) {
-          messageStore.update(existing.id, { status: 'pending', observing: false });
-        } else {
-          messageStore.append({
-            id: 'msg_' + Date.now() + '_approval',
-            role: 'assistant',
-            type: 'approval',
-            approvalId: msg.approvalId,
-            toolName: msg.toolName || 'tool',
-            action: msg.action || '',
-            risk: msg.risk || '',
-            detail: msg.detail || null,
-            status: 'pending',
-            observing: false,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-      }
-
-      case 'approval_pending': {
-        // Fired to all UIs; the decision-owner already has approval_request.
-        const mine = clientId && msg.targetClientId === clientId;
-        if (mine) break;
-        const existing = messageStore.find(m => m.type === 'approval' && m.approvalId === msg.approvalId);
-        if (!existing) {
-          messageStore.append({
-            id: 'msg_' + Date.now() + '_approval',
-            role: 'assistant',
-            type: 'approval',
-            approvalId: msg.approvalId,
-            toolName: msg.toolName || 'tool',
-            action: '',
-            risk: '',
-            detail: null,
-            status: 'pending',
-            observing: true,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-      }
-
-      case 'approval_resolved': {
-        const existing = messageStore.find(m => m.type === 'approval' && m.approvalId === msg.approvalId);
-        if (existing) {
-          messageStore.update(existing.id, { status: msg.decision === 'approved' ? 'approved' : 'rejected' });
-        }
-        break;
-      }
-
       case 'question_request': {
-        removeLoading();
-        closeActiveThinking();
+        conversation.removeLoading();
         const questions = Array.isArray(msg.questions) ? msg.questions : [];
         const existing = messageStore.find(m => m.type === 'question' && m.questionId === msg.questionId);
         if (existing) {
@@ -815,104 +660,44 @@
         break;
       }
 
-      case 'done':
-        endStream();
-        markLastPendingToolCompleted();
-        messageStore.filter(m => m.type === 'tool' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'running'))
-          .forEach(tool => messageStore.update(tool.id, { status: msg.reason === 'cancelled' ? 'canceled' : 'completed' }));
-        if (msg.reason === 'cancelled') showHint('任务已停止');
-        setRequestInFlight(false);
-        updateSendState();
-        break;
-
-      case 'error':
-        endStream();
-        addMessage('assistant', 'text', 'Error: ' + (msg.message || 'Unknown error'));
-        setRequestInFlight(false);
-        updateSendState();
-        break;
-
-      case 'display_message': {
-        const incoming = msg.displayMessage;
-        if (!incoming || incoming.role !== 'user' || !incoming.id) break;
-        const existing = messageStore.get(incoming.id);
-        if (!existing) {
-          const optimistic = messageStore.findLast(item =>
-            item.role === 'user' &&
-            item.optimistic &&
-            item.content === incoming.content
-          );
-          if (optimistic) {
-            messageStore.update(optimistic.id, { ...incoming, optimistic: false });
-          } else {
-            messageStore.append({ ...incoming, optimistic: false });
-          }
-        }
-        currentSessionId = msg.sessionId || currentSessionId;
-        syncedClientId = clientId;
-        setRequestInFlight(Boolean(msg.isProcessing));
-        updateSendState();
-        break;
-      }
-
-      case 'session_reset':
-        activeStreamId = null;
-        activeLoadingId = null;
-        currentSessionId = msg.sessionId || null;
-        syncedClientId = clientId;
-        if (msg.reason === 'user_requested') {
-          messageStore.replaceAll([]);
-          setRequestInFlight(false);
-          updateSendState();
-        }
-        break;
-
-      case 'session_snapshot': {
-        activeStreamId = null;
-        activeLoadingId = null;
-        currentSessionId = msg.sessionId || null;
-        syncedClientId = clientId;
-        const restored = Array.isArray(msg.messages) ? msg.messages : [];
-        messageStore.replaceAll(restored);
-        const tail = restored[restored.length - 1];
-        if (msg.reason === 'reconnect' && tail?.type === 'stream' && tail.id) {
-          activeStreamId = tail.id;
-        }
-        setRequestInFlight(Boolean(msg.isProcessing));
-        updateSendState();
-        break;
-      }
-
-      case 'connected':
-        // Project info from bridge
+      case 'tool_status':
+        // 正常情况下 tool_status 已被 conversation.handle 消费（旧的 canceled → endStream，
+        // 新形态带 toolName → onToolStatus 回调）。这里是兜底：万一事件没被归约器吃掉，
+        // 极简状态条也能自己判断（不带 toolName 的旧形态 normalize() 返回 null，什么都不会变）。
+        toolStatus.update(msg);
         break;
 
       case 'active_client':
         refreshStatus({ forceSessionSync: true, syncReason: 'active_client' });
         break;
 
-      case 'session_info':
-        if (msg.sessionId && msg.sessionId !== currentSessionId) {
-          currentSessionId = msg.sessionId;
-          syncActiveSessionSnapshot('session_info');
-        }
+      default:
+        // Unknown event types are ignored.
         break;
     }
   }
 
   /* ── SSE listener ─────────────────────────────── */
   chrome.runtime.onMessage.addListener((message) => {
+    if (message && message.type === 'DT_MARKS_UPDATED') {
+      markTray.model.applyUpdate(message);
+      return;
+    }
+    if (message && message.type === 'DT_SIDEPANEL_FOCUS_INPUT') {
+      focusComposer();
+      return;
+    }
     if (!message || message.type !== 'DEVTAILOR_SIDEPANEL_PROXY_EVENT') return;
 
-    // Filter by clientId if we know ours
+    // Open/error events name the tab stream they belong to; ignore other tabs' streams.
     if (message.clientId && clientId && message.clientId !== clientId) return;
 
     if (message.event === 'open') {
       sseConnected = true;
       setPip('online');
       bridgeStatus.textContent = 'SSE 已连接';
-      // The content script emits its reconnect snapshot only to its own
-      // listeners, so the side panel must independently restore the session.
+      disconnectedAt = 0;
+      // Restore persisted messages missed while the event proxy was disconnected.
       refreshStatus({ forceSessionSync: true, syncReason: 'reconnect' });
       return;
     }
@@ -929,6 +714,9 @@
 
     if (message.event === 'error') {
       sseConnected = false;
+      if (!disconnectedAt) disconnectedAt = Date.now();
+      // 事件通道断了就没有可信的工具状态：先清掉（下一条 tool_status 会重新填）。
+      toolStatus.clear();
       setPip('offline');
       bridgeStatus.textContent = '连接断开';
       return;
@@ -936,44 +724,58 @@
   });
 
   /* ── Send flow ─────────────────────────────────── */
-  function setRequestInFlight(value) {
-    requestInFlight = Boolean(value);
-    if (!requestInFlight) {
-      stopInFlight = false;
-    }
-  }
-
   async function executeSend(text, images) {
     if (!clientId) {
-      showHint(bridgeStatus.textContent === '未连接' ? 'Bridge 未连接：请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动' : '尚未接管标签页：请先在页面中点击“接管”');
+      showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
       return { ok: false };
     }
+
+    // The page owns the marks and its screenshots: ask the followed tab for the payload parts.
+    const parts = await markTray.controller.buildPayload();
+    const pageImages = parts ? parts.screenshots : [];
+    const allImages = [...pageImages, ...images];
+    const markIds = parts ? parts.markIds : [];
+    const sentMarks = markTray.model.getState().marks.filter((m) => markIds.includes(m.id));
 
     const payload = {
       type: 'review',
       payload: {
-        pageUrl: '',
+        pageUrl: parts ? parts.pageUrl : '',
         userIntent: text,
-        items: [],
-        screenshots: images,
-        screenshot: images[0] || null,
+        items: parts ? parts.items : [],
+        screenshots: allImages,
+        screenshot: allImages[0] || null,
       },
       clientId,
       tabId: clientId,
     };
 
-    const response = await bridgeRequest('/review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      showHint('发送失败，请稍后重试');
-      return { ok: false, error: response.error };
+    // Mark optimistically BEFORE the request: the turn's `done` may beat the HTTP response, and the
+    // marks must never be picked up by the next BUILD. Screenshots are consumed only on success.
+    if (markIds.length) {
+      sentTracker.begin(markIds);
+      await markTray.controller.markSent(markIds, false);
     }
-
-    return { ok: true };
+    const res = await call('/review', { method: 'POST', body: payload });
+    if (!res.ok) {
+      if (markIds.length) {
+        sentTracker.rollback(markIds);
+        await markTray.controller.markUnsent(markIds);
+      }
+      showHint(core.failureInfo(res).text);
+      return { ok: false, error: res.message };
+    }
+    // 记下这条提示带了什么，显示在顶部「上下文」左侧
+    lastPromptCtx = {
+      sessionId: meta.sessionId,
+      marks: markIds.length,
+      images: allImages.length,
+      designDocs: (designDocs.getState().docs || []).filter((d) => d.enabled).length,
+    };
+    renderPromptCtx(meta);
+    // Keep the sent marks visible ("已发送") until the turn finishes; screenshots are consumed now.
+    if (pageImages.length) await markTray.controller.markSent([], true);
+    return { ok: true, markCount: markIds.length, imageCount: allImages.length, marks: sentMarks, images: allImages };
   }
 
   async function handleSend() {
@@ -985,10 +787,10 @@
 
     const text = promptEl.value.trim();
     const pendingImages = imageManager?.getImages?.() || [];
-    if (!text && pendingImages.length === 0) return;
+    if (!text && pendingImages.length === 0 && !markTray.hasContent()) return;
 
     if (!clientId) {
-      showHint(bridgeStatus.textContent === '未连接' ? 'Bridge 未连接：请确认 Claude Code 已用 scripts/claude-devtailor.sh 启动' : '尚未接管标签页：请先在页面中点击“接管”');
+      showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
       return;
     }
 
@@ -999,91 +801,95 @@
     try {
       const result = await executeSend(text, pendingImages);
       if (result.ok) {
-        const optimisticContent = text || `发送 ${pendingImages.length} 张图片`;
-        const persistedMessage = messageStore.findLast(item =>
+        const optimisticContent = text
+          || (result.markCount ? `发送 ${result.markCount} 个标记` : `发送 ${result.imageCount} 张图片`);
+        // The bridge echoes the user message to every UI (display_message); it may beat this response.
+        const echoed = messageStore.findLast(item =>
           item.role === 'user' &&
           !item.optimistic &&
           item.content === optimisticContent &&
           Number(item.timestamp || 0) >= sendStartedAt
         );
-        if (!persistedMessage) {
-          addMessage('user', 'text', optimisticContent, {
-            optimistic: true,
-            images: pendingImages.slice(),
-            image: pendingImages[0] || null,
-          });
+        if (echoed) {
+          // The bridge echo carries text and images only: keep the marks on the bubble.
+          if (result.marks.length) messageStore.update(echoed.id, (m) => { m.marks = result.marks; });
+        } else {
+          conversation.addUserMessage({ content: optimisticContent, images: result.images.slice(), marks: result.marks });
         }
         imageManager?.clear?.();
         promptEl.value = '';
         promptEl.style.height = 'auto';
-        setRequestInFlight(true);
-        startLoading();
+        meta.processing = true;
+        conversation.startLoading();
+        applyMeta(meta);
       }
     } finally {
       sendInProgress = false;
       updateSendState();
-      promptEl.focus();
+      if (!promptEl.disabled) promptEl.focus();
     }
   }
 
   async function handleStop() {
-    if (stopInFlight) return;
-    if (!clientId) return;
+    if (stopInFlight || !clientId) return;
 
     stopInFlight = true;
     updateSendState();
-    showHint('正在停止任务...');
+    showHint('正在取消…', 'info');
 
-    const response = await bridgeRequest('/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, tabId: clientId }),
-    });
-
-    const body = parseBridgeJson(response);
-    if (!response.ok || !body?.ok) {
+    const res = await call('/cancel', { method: 'POST', body: { clientId, tabId: clientId } });
+    if (!res.ok) {
       stopInFlight = false;
-      showHint('停止失败，请稍后重试');
+      showHint(core.failureInfo(res).text);
       updateSendState();
       return;
     }
-    if (!body.canceled) {
+    // Stay in "取消中…" until the bridge's done(cancelled) arrives (it forces one after ~5s).
+    if (!res.data.canceled) {
       stopInFlight = false;
-      setRequestInFlight(false);
+      meta.processing = false;
+      conversation.endStream();
+      applyMeta(meta);
       showHint('当前没有正在执行的任务');
-      updateSendState();
     }
   }
 
-  async function requestNewSession() {
+  /* ── Design spec (DESIGN.md) ──────────────────── */
+  const designDocs = window.__sidepanelDesignDocs.create({
+    els: {
+      toggle: $('#design-docs-toggle'),
+      summary: $('#design-docs-summary'),
+      body: $('#design-docs-body'),
+      list: $('#design-docs-list'),
+      error: $('#design-docs-error'),
+      uploadBtn: $('#design-docs-upload'),
+      fileInput: $('#design-docs-file'),
+    },
+    call,
+  });
+
+  /* ── New session (POST /new-session) ──────────── */
+  async function startNewSession() {
     if (!clientId) {
-      showHint('未检测到活跃标签页');
+      showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
       return;
     }
-    if (requestInFlight) {
-      showHint('任务执行中，请结束后再开启新会话');
+    if (meta.processing) {
+      showHint('当前正在回复，请等完成或取消后再新建会话', 'info');
       return;
     }
-
-    const response = await bridgeRequest('/new-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, tabId: clientId }),
-    });
-
-    const body = parseBridgeJson(response);
-    if (!response.ok || !body?.ok) {
-      showHint(body?.error || '开启新会话失败');
+    newSessionBtn.disabled = true;
+    const res = await call('/new-session', { method: 'POST', body: { clientId, tabId: clientId } });
+    newSessionBtn.disabled = false;
+    if (!res.ok) {
+      showHint(core.failureInfo(res).text);
       return;
     }
-
-    messageStore.replaceAll([]);
-    activeStreamId = null;
-    activeLoadingId = null;
-    setRequestInFlight(false);
-    updateSendState();
-    showHint(body.reused ? '当前已是新会话' : '已开启新会话');
+    showHint(res.data && res.data.reused ? '当前已是新会话' : '已开启新会话', 'info');
+    refreshStatus({ forceSessionSync: true, syncReason: 'new_session' });
   }
+
+  newSessionBtn.addEventListener('click', startNewSession);
 
   /* ── Composer events ──────────────────────────── */
   composer.addEventListener('submit', (e) => {
@@ -1127,44 +933,23 @@
       return;
     }
 
-    const thinkingBtn = e.target.closest('[data-action="toggle-thinking"]');
-    if (thinkingBtn) {
-      const msg = messageStore.get(thinkingBtn.dataset.msgId);
-      if (msg) {
-        msg.open = !msg.open;
-        renderMessages();
-      }
-      return;
-    }
-
-    const toolBtn = e.target.closest('[data-action="toggle-tool"]');
-    if (toolBtn) {
-      const msg = messageStore.get(toolBtn.dataset.msgId);
-      if (msg) {
-        msg.open = !msg.open;
-        renderMessages();
-      }
-      return;
-    }
-
-    const approvalBtn = e.target.closest('[data-action="approval-decide"]');
+    const approvalBtn = e.target.closest('[data-action="approval-decision"]');
     if (approvalBtn) {
-      const msg = messageStore.get(approvalBtn.dataset.msgId);
-      const decision = approvalBtn.dataset.decision === 'approved' ? 'approved' : 'rejected';
-      if (msg && msg.status === 'pending' && !msg.observing) {
-        submitApprovalDecision(msg, decision);
-      }
+      conversation.submitApproval(approvalBtn.dataset.msgId, approvalBtn.dataset.decision, (path, body) => call(path, { method: 'POST', body })).then((result) => {
+        if (result && result.ok === false && result.error) showHint(result.error);
+      });
+      return;
     }
 
     const questionSubmit = e.target.closest('[data-action="question-submit"]');
     if (questionSubmit) {
-      const msg = messageStore.get(questionSubmit.dataset.msgId);
+      const msg = messageStoreApi.get(questionSubmit.dataset.msgId);
       if (msg && msg.status === 'pending' && !msg.observing) submitQuestionAnswer(msg);
     }
 
     const questionSkip = e.target.closest('[data-action="question-skip"]');
     if (questionSkip) {
-      const msg = messageStore.get(questionSkip.dataset.msgId);
+      const msg = messageStoreApi.get(questionSkip.dataset.msgId);
       if (msg && msg.status === 'pending' && !msg.observing) submitQuestionAnswer(msg, true);
     }
   });
@@ -1174,7 +959,7 @@
   messagesEl.addEventListener('change', (e) => {
     const sel = e.target.closest('[data-action="question-select"]');
     if (!sel) return;
-    const msg = messageStore.get(sel.dataset.msgId);
+    const msg = messageStoreApi.get(sel.dataset.msgId);
     if (!msg || msg.status !== 'pending' || msg.observing) return;
     const qIdx = Number(sel.dataset.qIdx);
     const q = msg.questions?.[qIdx];
@@ -1194,29 +979,12 @@
   messagesEl.addEventListener('input', (e) => {
     const other = e.target.closest('[data-action="question-other"]');
     if (!other) return;
-    const msg = messageStore.get(other.dataset.msgId);
+    const msg = messageStoreApi.get(other.dataset.msgId);
     if (!msg || msg.status !== 'pending' || msg.observing) return;
     const qIdx = Number(other.dataset.qIdx);
     if (!Array.isArray(msg.otherText)) msg.otherText = [];
     msg.otherText[qIdx] = other.value;
   });
-
-  async function submitApprovalDecision(msg, decision) {
-    messageStore.update(msg.id, { status: 'submitting' });
-    const response = await bridgeRequest('/approval-decision', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approvalId: msg.approvalId, decision }),
-    });
-    const body = parseBridgeJson(response);
-    if (response.ok && body && body.ok) {
-      messageStore.update(msg.id, { status: decision });
-    } else {
-      // Another UI decided first, or the request expired.
-      messageStore.update(msg.id, { status: 'pending' });
-      showHint(response.status === 409 ? '该审批已被处理' : '提交审批失败');
-    }
-  }
 
   function buildQuestionAnswers(msg) {
     const answers = {};
@@ -1241,18 +1009,13 @@
       return;
     }
     messageStore.update(msg.id, { status: 'submitting' });
-    const response = await bridgeRequest('/question-answer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ questionId: msg.questionId, answers }),
-    });
-    const body = parseBridgeJson(response);
-    if (response.ok && body && body.ok) {
+    const res = await call('/question-answer', { method: 'POST', body: { questionId: msg.questionId, answers } });
+    if (res.ok) {
       messageStore.update(msg.id, { status: skip ? 'dismissed' : 'answered' });
     } else {
       // Another UI answered first, or the request expired.
       messageStore.update(msg.id, { status: 'pending' });
-      showHint(response.status === 409 ? '该提问已被回答' : '提交回答失败');
+      showHint(res.status === 409 ? '该提问已被回答' : '提交回答失败');
     }
   }
 
@@ -1281,12 +1044,31 @@
     if (event.key === 'Escape' && !imageLightbox?.hidden) closeImagePreview();
   });
 
-  newSessionBtn?.addEventListener('click', requestNewSession);
-  historyBtn?.addEventListener('click', () => {
-    showHint('历史会话列表会在接入 Bridge sessions 后显示。');
+  /* ── Tray follows the browser tabs ─────────────── */
+  function focusComposer() {
+    if (!promptEl.disabled) promptEl.focus();
+  }
+
+  chrome.tabs.onActivated.addListener(() => { if (!clientId) followTray(); });
+  chrome.tabs.onUpdated.addListener((tabId, info) => {
+    if (info.status !== 'complete') return;
+    if (tabId === markTray.model.getState().tabId) markTray.controller.refresh();
+    else if (!clientId) followTray();
+  });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (tabId === markTray.model.getState().tabId) markTray.follow(null);
   });
 
+  // "在侧边栏发送" in the page toolbar opens this panel and asks for the composer focus.
+  try {
+    chrome.runtime.sendMessage({ type: 'DT_SIDEPANEL_READY' }, (res) => {
+      void chrome.runtime.lastError;
+      if (res && res.focusInput) focusComposer();
+    });
+  } catch { /* service worker not reachable */ }
+
   /* ── Init ──────────────────────────────────────── */
+  applyMeta(meta);
   updateSendState();
   refreshStatus({ forceSessionSync: true, syncReason: 'initial' });
   pollTimer = setInterval(refreshStatus, 30000);

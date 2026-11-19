@@ -32,10 +32,12 @@ logs                    查看后台日志
 
 模型与密钥：
 
-- Bridge 不再保存或读取任何模型配置；AI 由 Claude Code 担任（第二步接入）。`/model-config`、`OPENAI_*`、`DEVTAILOR_MODEL`、`DEVTAILOR_MAX_STEPS`、`DEVTAILOR_RUNTIME` 都已移除。
+- Bridge 不再保存或读取任何模型配置；AI 由 Claude Code 担任（Channels 通道）。`/model-config`、`OPENAI_*`、`DEVTAILOR_MODEL`、`DEVTAILOR_MAX_STEPS`、`DEVTAILOR_RUNTIME` 都已移除。
 - 可选环境变量：`DEVTAILOR_EXTENSION_ID`——设置后 Bridge 只接受 `chrome-extension://<该 ID>` 的请求（见 `docs/HANDOFF.md`「安全守卫」）。
+- 没有后端选择开关。**真实使用**：在目标项目目录运行 `scripts/claude-devtailor.sh`，由 Claude Code 以插件形式拉起 Bridge（stdio MCP server，`src/mcp-main.ts`，声明 `experimental['claude/channel']`）；CLI 入口 `devtailor --dir` 只跑占位会话（`PlaceholderAgentSession`），仅用于调试 SSE/队列/展示会话。
+- 由于扩展固定连 34781，同一时间只能有一个 Bridge：由 `scripts/claude-devtailor.sh` 拉起的那个会话持有端口，别的 Bridge 请先让对应 Claude Code 会话退出。`DEVTAILOR_PROJECT_DIR`（其次 `CLAUDE_PROJECT_DIR`，最后 `process.cwd()`）决定项目目录，`DEVTAILOR_PORT` 只用于测试/调试。Bridge 退出（stdin 关闭或 SIGINT/SIGTERM）时关闭 HTTP server 并退出。
 
-输出约定：Bridge 所有日志和 CLI 提示（含 `--help`、`--version`）都写 stderr，stdout 保留给第二步的 MCP stdio 协议。
+输出约定：Bridge 所有日志和 CLI 提示（含 `--help`、`--version`）都写 stderr，stdout 保留给 MCP stdio 协议。
 
 ## 固定端口规则
 
@@ -51,7 +53,7 @@ Bridge 固定运行在 `127.0.0.1:34781`（只绑回环地址），这是 Chrome
 
 ## Runtime 规则
 
-Bridge 不再支持 `--agent`、内置 Agent 预设或原始 ACP 命令，也不再带自有 AI runtime（Scream / RealAgentSession / LocalAgentSession / workspace tools 均已删除）。第一步完成后使用占位会话 `PlaceholderAgentSession`（所有 review 立即返回「Claude Code 通道尚未连接」）；第二步会接入 Claude Code 的 MCP/channel。
+Bridge 不再支持 `--agent` 和内置 Agent 预设，也不再带自有 AI runtime（Scream / RealAgentSession / LocalAgentSession / workspace tools 均已删除）。CLI 入口（`src/index.ts`）独立运行时只用占位会话 `PlaceholderAgentSession`（所有 review 立即返回「Claude Code 通道尚未连接」），仅用于调试 SSE/队列/展示会话；真实使用必须走 `scripts/claude-devtailor.sh`，由 Claude Code 拉起 `src/mcp-main.ts`。
 
 ## 后台进程规则
 

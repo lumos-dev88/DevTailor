@@ -2,7 +2,7 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ClaudeChannelHub, ClaudeChannelSession, CANCEL_CONTENT, REPLY_TIMEOUT_MESSAGE } from '../src/claude-channel-session';
+import { ClaudeChannelHub, ClaudeChannelSession, CANCEL_CONTENT } from '../src/claude-channel-session';
 import { imagesDir, safeFileBase, saveImage } from '../src/image-store';
 import { makeRig, recorder, Rig, REVIEW_PAYLOAD, sleep, TINY_PNG_DATA_URL } from './channel-helpers';
 
@@ -29,7 +29,7 @@ describe('ClaudeChannelSession', () => {
     assert.deepStrictEqual(caps.experimental['claude/channel'], {});
     assert.ok(caps.tools);
     const { tools } = await rig.client.listTools();
-    assert.strictEqual(tools.length, 19);
+    assert.strictEqual(tools.length, 20);
     assert.ok(tools.some(t => t.name === 'reply'));
     assert.match(rig.client.getInstructions() || '', /reply/);
   });
@@ -101,27 +101,6 @@ describe('ClaudeChannelSession', () => {
     assert.strictEqual(second.cb.streamed, 'for latest');
   });
 
-  it('reports an error and ends the turn when no final reply arrives in time', async () => {
-    rig = await makeRig({ hub: { replyTimeoutMs: 60 } });
-    const { cb, turnId } = await startTurn(rig);
-    await sleep(150);
-    assert.deepStrictEqual(cb.events.filter(e => e[0] === 'error'), [['error', REPLY_TIMEOUT_MESSAGE]]);
-    const late = await rig.callReply({ turn_id: turnId, text: 'late' });
-    assert.strictEqual(late.isError, true);
-    assert.ok(!cb.events.some(e => e[0] === 'done'));
-  });
-
-  it('every reply re-arms the timeout', async () => {
-    rig = await makeRig({ hub: { replyTimeoutMs: 120 } });
-    const { cb, turnId } = await startTurn(rig);
-    for (let i = 0; i < 4; i++) {
-      await sleep(50);
-      await rig.callReply({ turn_id: turnId, text: `p${i}` });
-    }
-    assert.ok(!cb.events.some(e => e[0] === 'error'));
-    await rig.callReply({ turn_id: turnId, text: 'bye', final: true });
-  });
-
   it('cancelCurrentTurn pushes a kind=cancel notification and drops later replies', async () => {
     rig = await makeRig();
     const { session, cb, turnId } = await startTurn(rig);
@@ -163,28 +142,6 @@ describe('ClaudeChannelSession', () => {
     await assert.rejects(() => session.sendReview(REVIEW_PAYLOAD), /pipe closed/);
     assert.strictEqual(cb.events.filter(e => e[0] === 'error').length, 1);
     assert.deepStrictEqual(hub.activeTurnIds(), []);
-  });
-
-  it('shows the no-response hint once, only when Claude shows no sign of life', async () => {
-    rig = await makeRig({ hub: { noResponseHintMs: 40 } });
-    const quiet = await startTurn(rig);
-    await sleep(120);
-    assert.strictEqual(quiet.cb.events.filter(e => e[0] === 'notice').length, 1);
-    assert.match(String(quiet.cb.events.find(e => e[0] === 'notice')![1]), /dangerously-load-development-channels/);
-    const second = await startTurn(rig);
-    await sleep(120);
-    assert.strictEqual(second.cb.events.filter(e => e[0] === 'notice').length, 0);
-    await rig.callReply({ turn_id: quiet.turnId, text: 'x', final: true });
-    await rig.callReply({ turn_id: second.turnId, text: 'x', final: true });
-  });
-
-  it('does not show the hint when Claude replied in time', async () => {
-    rig = await makeRig({ hub: { noResponseHintMs: 60 } });
-    const { cb, turnId } = await startTurn(rig);
-    await rig.callReply({ turn_id: turnId, text: 'working' });
-    await sleep(120);
-    assert.strictEqual(cb.events.filter(e => e[0] === 'notice').length, 0);
-    await rig.callReply({ turn_id: turnId, text: 'x', final: true });
   });
 
   describe('screenshots', () => {

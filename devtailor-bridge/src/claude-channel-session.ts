@@ -29,14 +29,7 @@ import { log } from './log';
 
 export const CHANNEL_NOTIFICATION_METHOD = 'notifications/claude/channel';
 
-export const DEFAULT_REPLY_TIMEOUT_MS = 10 * 60 * 1000;
-export const DEFAULT_NO_RESPONSE_HINT_MS = 30 * 1000;
-
 export const CANCEL_CONTENT = '用户在浏览器里取消了上一条请求，请停止相关操作，不要继续回复。';
-export const REPLY_TIMEOUT_MESSAGE =
-  'Claude 长时间没有回复，请检查终端里的 Claude Code 会话是否仍在运行/是否在等待你确认权限';
-export const NO_RESPONSE_HINT =
-  '⏳ 已发送给 Claude Code，等待响应…（若终端里没有反应，请确认是否用 --dangerously-load-development-channels 启动）\n\n';
 
 export interface ChannelNotificationParams {
   content: string;
@@ -49,8 +42,16 @@ export interface ClaudeChannelHubOptions {
   /** Project directory; screenshots go to `<projectDir>/.devtailor/images`. */
   projectDir: string;
   notify: ChannelNotifier;
-  replyTimeoutMs?: number;
-  noResponseHintMs?: number;
+  /** Absolute paths of enabled DESIGN.md files; may be bound after construction. */
+  getDesignDocPaths?: () => string[];
+  /**
+   * Turn boundary for the "what is the AI doing" badge. Fired with
+   * `turn_start` once the review notification was written, and `turn_end`
+   * when the turn finishes (final reply, cancel, error, stop).
+   * Wired to `WSServer.notifyAgentTurn` in `mcp-main.ts`, so the hub keeps
+   * knowing nothing about HTTP/SSE.
+   */
+  onAgentStatus?: (kind: 'turn_start' | 'turn_end') => void;
 }
 
 export interface ReplyArgs {
@@ -70,14 +71,9 @@ interface Turn {
   callbacks: AgentCallbacks;
   /** True once the turn can no longer receive replies (final, error, cancel, stop). */
   ended: boolean;
+  /** True once `turn_start` was reported (a failed write never started a turn). */
+  announced: boolean;
   streamed: string;
-  timer: NodeJS.Timeout | null;
-}
-
-function resolveTimeoutMs(explicit: number | undefined, envName: string, fallback: number): number {
-  if (explicit !== undefined) return explicit;
-  const fromEnv = Number(process.env[envName]);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : fallback;
 }
 
 /** Meta values must be strings; keys are fixed identifiers (letters/digits/underscore). */
@@ -92,17 +88,10 @@ function cleanMeta(meta: Record<string, string>): Record<string, string> {
 
 export class ClaudeChannelHub {
   private readonly turns = new Map<string, Turn>();
-  private readonly replyTimeoutMs: number;
-  private readonly noResponseHintMs: number;
   private ready = false;
-  private hintShown = false;
-  private lastActivityAt = 0;
   private stopped = false;
 
-  constructor(private readonly options: ClaudeChannelHubOptions) {
-    this.replyTimeoutMs = resolveTimeoutMs(options.replyTimeoutMs, 'DEVTAILOR_REPLY_TIMEOUT_MS', DEFAULT_REPLY_TIMEOUT_MS);
-    this.noResponseHintMs = options.noResponseHintMs ?? DEFAULT_NO_RESPONSE_HINT_MS;
-  }
+  constructor(private readonly options: ClaudeChannelHubOptions) {}
 
   get projectDir(): string {
     return this.options.projectDir;
@@ -114,14 +103,6 @@ export class ClaudeChannelHub {
 
   setReady(ready: boolean): void {
     this.ready = ready;
-  }
-
-  /** Called for any sign that Claude is alive (reply or browser tool call). */
-  noteActivity(): void {
-    this.lastActivityAt = Date.now();
-    for (const turn of this.turns.values()) {
-      if (!turn.ended) this.armTimeout(turn);
-    }
   }
 
   activeTurnIds(): string[] {
@@ -152,7 +133,7 @@ export class ClaudeChannelHub {
       }
     }
 
-    let content = buildPrompt(payload).map(block => block.text).join('\n');
+    let content = buildPrompt(payload, { designDocPaths: this.options.getDesignDocPaths?.() ?? [] }).map(block => block.text).join('\n');
     if (images.length > 0) {
       content += '## Screenshots\n';
       for (const p of paths) content += `- ${p}\n`;
@@ -171,7 +152,7 @@ export class ClaudeChannelHub {
       ...(paths.length > 0 ? { image_paths: paths.join(',') } : {}),
     });
 
-    const turn: Turn = { id: turnId, session, callbacks, ended: false, streamed: '', timer: null };
+    const turn: Turn = { id: turnId, session, callbacks, ended: false, announced: false, streamed: '' };
     this.turns.set(turnId, turn);
     // The turn exists before the write so an instant reply is never lost.
     try {
@@ -184,8 +165,8 @@ export class ClaudeChannelHub {
       throw new Error(message);
     }
     log(`[Channel] review sent turn=${turnId} images=${paths.length} client=${context?.clientId || '-'}`);
-    this.armTimeout(turn);
-    this.armHint(turn);
+    turn.announced = true;
+    this.emitAgentStatus('turn_start');
     return STOP_REASON_PENDING;
   }
 
@@ -229,7 +210,6 @@ export class ClaudeChannelHub {
       if (!turn) return { ok: false, message: 'No browser request is waiting for a reply.' };
     }
 
-    this.noteActivity();
     if (text) {
       const separator = turn.streamed === '' || turn.streamed.endsWith('\n\n')
         ? ''
@@ -265,6 +245,15 @@ export class ClaudeChannelHub {
 
   // -- internals ----------------------------------------------------------
 
+  /** Reports a turn boundary to the status badge; a broken sink never breaks a turn. */
+  private emitAgentStatus(kind: 'turn_start' | 'turn_end'): void {
+    try {
+      this.options.onAgentStatus?.(kind);
+    } catch (err: any) {
+      log(`[Channel] agent status callback failed kind=${kind} reason=${err?.message || err}`);
+    }
+  }
+
   private latestActiveTurn(session?: ClaudeChannelSession): Turn | undefined {
     let found: Turn | undefined;
     for (const turn of this.turns.values()) {
@@ -276,9 +265,10 @@ export class ClaudeChannelHub {
   }
 
   private endTurn(turn: Turn): void {
+    if (turn.ended) return;
     turn.ended = true;
-    if (turn.timer) clearTimeout(turn.timer);
-    turn.timer = null;
+    // The turn can no longer change the AI status badge.
+    if (turn.announced) this.emitAgentStatus('turn_end');
     // Keep ended turns for a while so stale ids get a precise error; prune the old ones.
     if (this.turns.size > 50) {
       for (const [id, t] of this.turns) {
@@ -286,29 +276,6 @@ export class ClaudeChannelHub {
         if (this.turns.size <= 25) break;
       }
     }
-  }
-
-  private armTimeout(turn: Turn): void {
-    if (turn.timer) clearTimeout(turn.timer);
-    turn.timer = setTimeout(() => {
-      if (turn.ended) return;
-      log(`[Channel] reply timeout turn=${turn.id} after=${this.replyTimeoutMs}ms`);
-      this.endTurn(turn);
-      turn.callbacks.onError(REPLY_TIMEOUT_MESSAGE);
-    }, this.replyTimeoutMs);
-    turn.timer.unref();
-  }
-
-  /** One-time, non-persistent "still waiting" hint if Claude shows no sign of life. */
-  private armHint(turn: Turn): void {
-    if (this.hintShown || !turn.callbacks.onNotice) return;
-    const sentAt = Date.now();
-    const timer = setTimeout(() => {
-      if (this.hintShown || turn.ended || this.lastActivityAt >= sentAt) return;
-      this.hintShown = true;
-      turn.callbacks.onNotice?.(NO_RESPONSE_HINT);
-    }, this.noResponseHintMs);
-    timer.unref();
   }
 }
 

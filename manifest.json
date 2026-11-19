@@ -11,7 +11,7 @@
         "default": "Ctrl+Shift+X",
         "mac": "Command+Shift+X"
       },
-      "description": "Toggle DevTailor sidebar"
+      "description": "Toggle the DevTailor marks drawer"
     }
   },
   "action": {
@@ -45,8 +45,9 @@
     {
       "matches": ["*://localhost/*", "*://127.0.0.1/*"],
       "js": [
-        "lib/marked.umd.js",
         "content/modules/review-store.js",
+        "content/modules/marks-core.js",
+        "content/modules/toolbar-core.js",
         "content/modules/element-targets.js",
         "content/modules/selector-generator.js",
         "content/modules/framework-detector.js",
@@ -56,23 +57,16 @@
         "content/modules/element-saver.js",
         "content/modules/badges.js",
         "content/modules/sidebar.js",
-        "content/modules/chat-markdown.js",
-        "content/modules/chat-tools.js",
-        "content/modules/chat-scroll.js",
-        "content/modules/chat-images.js",
-        "content/modules/message-store.js",
-        "content/modules/chat-persistence.js",
-        "content/modules/chat-preview-editor.js",
-        "content/modules/chat-bridge-events.js",
-        "content/modules/chat-send.js",
-        "content/modules/chat-panel.js",
+        "content/modules/bridge-core.js",
         "content/modules/prompt-builder.js",
         "content/modules/browser-console.js",
         "content/modules/browser-action-dom.js",
         "content/modules/browser-actions.js",
         "content/modules/ws-client.js",
+        "content/modules/marks-sync.js",
         "content/modules/screenshot.js",
         "content/modules/selector-mode.js",
+        "content/modules/toolbar.js",
         "content/modules/export-import.js",
         "content/content-script.js"
       ],

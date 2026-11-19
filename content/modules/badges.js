@@ -56,6 +56,39 @@
     document.body.appendChild(container);
     injectStyles();
     wireDocumentClose();
+    wireModalGuard();
+  }
+
+  // 页面里有模态层（Radix / Headless UI / MUI 的 Dialog、Popover）时，卡片在它们的 DOM 之外，
+  // 会被「焦点陷阱」和「点击外部关闭」当成外部：textarea 一聚焦就被抢回焦点、点一下弹窗就关了，
+  // 表现为层级很高的元素（弹窗里的元素）没法输入备注。卡片内的事件在这里拦住，不让页面的监听看到。
+  const MODAL_GUARD_EVENTS = [
+    'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick',
+    'touchstart', 'touchend', 'focusin', 'focusout',
+    'keydown', 'keyup', 'keypress', 'beforeinput', 'input', 'compositionstart', 'compositionend',
+  ];
+  let modalGuardWired = false;
+
+  function wireModalGuard() {
+    if (modalGuardWired) return;
+    modalGuardWired = true;
+    // 冒泡阶段拦在容器上：卡片自己的监听（在卡片/子元素上）已经先执行，页面 document 级监听拿不到
+    MODAL_GUARD_EVENTS.forEach((type) => {
+      container.addEventListener(type, (event) => event.stopPropagation());
+    });
+    // focus trap 的 focusout 是挂在 document 上、由弹窗内元素触发的（relatedTarget 才是卡片），
+    // 容器上拦不到，只能在 window 捕获阶段抢先；Escape 同理（Radix 在 document 捕获阶段监听），
+    // 拦下后由这里自己收起卡片，避免同时把弹窗关掉。
+    window.addEventListener('focusout', (event) => {
+      if (event.relatedTarget && container.contains(event.relatedTarget)) event.stopPropagation();
+    }, true);
+    window.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !selectedId) return;
+      const path = event.composedPath ? event.composedPath() : [];
+      if (!path.includes(container)) return;
+      event.stopPropagation();
+      closeFloating();
+    }, true);
   }
 
   function injectStyles() {

@@ -2,6 +2,9 @@
  * DevTailor — Orchestrator
  *
  * Wires all modules together. Runs last in content_scripts injection order.
+ *
+ * The page-side UI is only the marks toolbar (toolbar.js). Chat, sessions, approvals, mode, plan and
+ * usage live in the side panel; marks flow there through marks-sync.js.
  */
 (() => {
   'use strict';
@@ -17,61 +20,18 @@
   });
 
   function bootstrap() {
-    // 1. Init Shadow DOM UI
+    const toolbar = window.__domReview.toolbar;
+
+    // 1. Shadow DOM host + marks toolbar
     ui.init();
-
-    // 3. Initialize sidebar and persistent highlights
-    sidebar.render();
-    sidebar.updatePersistentHighlights();
-
-    // 3.5. Initialize chat panel
-    if (window.__domReview.chatPanel) {
-      try {
-        window.__domReview.chatPanel.init();
-      } catch (err) {
-        console.error('[DevTailor] Chat panel init failed:', err);
-      }
-    }
-
-    // 3.55. Initialize element saver
-    if (window.__domReview.elementSaver) {
-      window.__domReview.elementSaver.init();
-    }
-
-    // 3.6. Wire WebSocket connection status to UI
-    let currentConnStatus = 'disconnected';
-    function updateStatusBar() {
-      const ws = window.__domReview.wsClient;
-      if (!ws) return;
-      ui.setConnectionStatus(
-        currentConnStatus,
-        ws.getSessionTitle?.() || '新会话',
-        Boolean(ws.isActive?.()),
-      );
-    }
-    if (window.__domReview.wsClient) {
-      window.__domReview.wsClient.onStatusChange((status) => {
-        currentConnStatus = status;
-        updateStatusBar();
-      });
-      window.__domReview.wsClient.onSessionChange?.(() => {
-        updateStatusBar();
-      });
-      currentConnStatus = window.__domReview.wsClient.getStatus();
-      updateStatusBar();
-    }
-
-    // 4. Render badges for restored reviews (with retries for SPA)
-    badges.render();
-    [500, 1000, 2000, 4000].forEach(ms => setTimeout(() => badges.render(), ms));
 
     function syncMarkModeUi() {
       if (!selector.isActive()) {
-        ui.setMarkMode?.('idle');
+        toolbar?.setPickMode('idle');
       } else if (selector.isPaused?.()) {
-        ui.setMarkMode?.('describing');
+        toolbar?.setPickMode('describing');
       } else {
-        ui.setMarkMode?.('selecting');
+        toolbar?.setPickMode('selecting');
       }
     }
 
@@ -80,7 +40,8 @@
     }
 
     function enterOrAdvanceMarkMode() {
-      window.__domReview.chatPanel?.prepareForPageSelection?.();
+      // Picking and saving to the library are exclusive page-click modes.
+      if (window.__domReview.elementSaver?.isActive()) window.__domReview.elementSaver.disable();
       if (!selector.isActive()) {
         selector.enable();
         return;
@@ -97,77 +58,28 @@
 
     selector.onStateChange?.(syncMarkModeUi);
 
-    // 5. Wire toolbar Mark button -> explicit mark workflow states
-    ui.onMarkClick(() => {
-      if (!selector.isActive() || selector.isPaused?.()) {
-        enterOrAdvanceMarkMode();
-      } else {
-        exitMarkMode();
-      }
-      syncMarkModeUi();
-    });
-
-    // 5.5. Wire toolbar Save Element button -> independent one-shot element saving
-    ui.onSaveElementClick?.(() => {
-      const elementSaver = window.__domReview.elementSaver;
-      if (!elementSaver) {
-        console.warn('[DevTailor] Element saver module not loaded.');
-        return;
-      }
-
-      // If already active, toggle off
-      if (elementSaver.isActive()) {
-        elementSaver.disable();
-        return;
-      }
-
-      // Exit mark mode if active
-      if (selector.isActive()) {
-        exitMarkMode();
+    // 2. Toolbar "选取" -> explicit mark workflow states
+    toolbar?.init({
+      onPick: () => {
+        if (!selector.isActive() || selector.isPaused?.()) {
+          enterOrAdvanceMarkMode();
+        } else {
+          exitMarkMode();
+        }
         syncMarkModeUi();
-      }
-
-      elementSaver.showLibraryCard?.();
+      },
     });
 
-    // 6. Wire toolbar Screenshot button
-    ui.onScreenshotClick(() => {
-      if (window.__domReview.screenshot) {
-        window.__domReview.screenshot.capture();
-      } else {
-        console.warn('[DevTailor] Screenshot module not loaded yet.');
-      }
-    });
+    // 3. Persistent highlights, element library, side-panel sync
+    sidebar.updatePersistentHighlights();
+    window.__domReview.elementSaver?.init();
+    window.__domReview.marksSync?.init();
 
-    // 7. Wire toolbar New Session button
-    ui.onNewSessionClick(() => {
-      if (window.__domReview.chatPanel) {
-        window.__domReview.chatPanel.requestNewSession();
-      }
-    });
+    // 4. Render badges for restored reviews (with retries for SPA)
+    badges.render();
+    [500, 1000, 2000, 4000].forEach(ms => setTimeout(() => badges.render(), ms));
 
-    // 8. Wire toolbar Close button -> collapse to FAB
-    ui.onCloseClick(() => {
-      ui.hideSidebar();
-    });
-
-    // 8.1 Wire FAB click -> expand sidebar
-    ui.onFabClick(() => {
-      ui.showSidebar();
-    });
-
-    ui.onUndoMarkClick(() => {
-      sidebar.undoLast();
-    });
-
-    ui.onDiscardBatchClick(() => {
-      const count = store.getAll().length;
-      if (count > 0) {
-        sidebar.discardBatch();
-      }
-    });
-
-    // 10. Wire element selection -> add mark to store
+    // 5. Element selection -> add mark to store
     selector.onSelect((element, options = {}) => {
       const selectorData = selectorGen.generate(element);
       const context = contextCapture.capture(element);
@@ -214,20 +126,15 @@
       // capturing more page clicks while the note editor is open.
     });
 
-    // 11. React to store changes
-    store.onChange((reviews) => {
+    // 6. React to store changes
+    store.onChange(() => {
       badges.render();
-      sidebar.render();
       sidebar.updatePersistentHighlights();
-      if (window.__domReview.chatPanel) {
-        window.__domReview.chatPanel.refreshSendState();
-      }
     });
 
-    // 12. Handle SPA navigation
+    // 7. Handle SPA navigation
     window.addEventListener('popstate', () => {
       badges.cleanup();
-      sidebar.render();
       sidebar.updatePersistentHighlights();
       badges.render();
     });

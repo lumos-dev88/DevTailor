@@ -71,7 +71,13 @@ describe('SessionStore', () => {
       }
     });
 
-    it('migrates legacy sessions without agent_key to claude', async () => {
+    it('creates sessions with the current agent session id column', () => {
+      const columns = (store as any).db.exec('PRAGMA table_info(sessions)')[0].values.map((row: unknown[]) => row[1]);
+      assert.ok(columns.includes('agent_session_id'));
+      assert.ok(!columns.includes('acp_session_id'));
+    });
+
+    it('migrates legacy sessions without losing the session ID or messages', async () => {
       const legacyDir = join(process.cwd(), '.test-tmp-session-store-legacy');
       if (existsSync(legacyDir)) rmSync(legacyDir, { recursive: true });
       mkdirSync(legacyDir, { recursive: true });
@@ -92,6 +98,21 @@ describe('SessionStore', () => {
         INSERT INTO sessions (id, client_id, title, acp_session_id, created_at, updated_at)
         VALUES ('dt_legacy', 'tab_legacy', 'Legacy', 'acp_legacy', 1, 2)
       `);
+      legacyDb.run(`
+        CREATE TABLE messages (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          type TEXT NOT NULL,
+          content TEXT NOT NULL,
+          timestamp INTEGER NOT NULL,
+          extra TEXT
+        )
+      `);
+      legacyDb.run(`
+        INSERT INTO messages (id, session_id, role, type, content, timestamp)
+        VALUES ('m1', 'dt_legacy', 'user', 'text', 'Keep this message', 2)
+      `);
       writeFileSync(join(legacyDir, 'sessions.db'), Buffer.from(legacyDb.export()));
       legacyDb.close();
 
@@ -100,6 +121,11 @@ describe('SessionStore', () => {
       assert.equal(sessions.length, 1);
       assert.equal(sessions[0].id, 'dt_legacy');
       assert.equal(sessions[0].agentKey, 'claude');
+      assert.equal(sessions[0].agentSessionId, 'acp_legacy');
+      assert.equal(legacyStore.getSession('dt_legacy')?.messages[0].content, 'Keep this message');
+      const columns = (legacyStore as any).db.exec('PRAGMA table_info(sessions)')[0].values.map((row: unknown[]) => row[1]);
+      assert.ok(columns.includes('agent_session_id'));
+      assert.ok(!columns.includes('acp_session_id'));
       legacyStore.close();
       rmSync(legacyDir, { recursive: true });
     });

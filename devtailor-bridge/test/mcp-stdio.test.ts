@@ -62,17 +62,17 @@ describe('mcp-main over stdio', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('initializes with channel + tools capabilities and instructions', () => {
+  it('initializes with channel + permission + tools capabilities and instructions', () => {
     const caps: any = client.getServerCapabilities();
     assert.deepStrictEqual(caps.experimental['claude/channel'], {});
+    assert.deepStrictEqual(caps.experimental['claude/channel/permission'], {});
     assert.ok(caps.tools);
-    assert.strictEqual(caps.experimental['claude/channel/permission'], undefined);
     assert.match(client.getInstructions() || '', /reply/);
   });
 
-  it('lists 18 browser tools plus reply', async () => {
+  it('lists 19 browser tools plus reply', async () => {
     const { tools } = await client.listTools();
-    assert.strictEqual(tools.length, 19);
+    assert.strictEqual(tools.length, 20);
     assert.ok(tools.some(t => t.name === 'reply'));
     assert.ok(tools.some(t => t.name === 'run_js'));
   });

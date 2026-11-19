@@ -441,7 +441,6 @@ class FakeAgentSession implements AgentSession {
     this.sent++;
     if (this.mode === 'tools') {
       const snapshot = await this.runner('get_page_snapshot', {});
-      this.callbacks.onToolCall?.({ toolCallId: 't1', title: 'get_page_snapshot', status: 'pending' });
       this.callbacks.onStream(JSON.stringify(snapshot.result));
       this.callbacks.onDone('tools done');
       return 'end_turn';
@@ -502,7 +501,15 @@ describe('integration: review lifecycle with a scripted agent session', () => {
       const dones = messages.filter(m => m.type === 'done');
       assert.strictEqual(dones.length, 1);
       assert.strictEqual(dones[0].summary, 'all good');
-      assert.ok(messages.some(m => m.type === 'stream' && m.delta === 'hello'));
+      const reply = messages.find(m => m.type === 'stream' && m.delta === 'hello');
+      assert.ok(reply);
+      assert.equal((await c.getJson('/health')).body.activeClientId, null);
+      const snapshot = await c.getJson('/sessions/active');
+      assert.equal(snapshot.status, 200);
+      const [question, answer] = snapshot.body.messages;
+      assert.equal(question.content, 'hi');
+      assert.equal(answer.content, 'hello');
+      assert.deepEqual(reply.displayMessage, answer);
       stream.close();
     });
   });

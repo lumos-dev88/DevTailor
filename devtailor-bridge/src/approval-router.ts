@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
 
 /**
- * ApprovalRouter — transports high-risk tool approval requests from the agent
- * runtime to the connected extension UI(s) and collects the user's decision.
+ * ApprovalRouter — transports tool approval requests from the agent runtime
+ * (or from a Claude Code permission relay) to the connected extension UI(s) and
+ * collects the user's decision.
  *
  * Mirrors BrowserActionRouter's request/response pattern:
  *   - request(): emit an `approval_request` to the turn-initiating (active)
@@ -34,12 +35,16 @@ export interface ApprovalDecisionInput {
 export interface ApprovalDecisionResult {
   decision: 'approved' | 'rejected';
   feedback?: string;
+  /** The request was cancelled (turn cancelled / bridge stopped) rather than answered. */
+  cancelled?: boolean;
+  /** Why the request ended without an explicit user answer. */
+  reason?: 'timeout' | 'cancelled' | 'stopped';
 }
 
 export type ApprovalEvent =
   | ({ type: 'approval_request'; approvalId: string } & ApprovalRequestPayload)
   | { type: 'approval_pending'; approvalId: string; toolName: string; targetClientId: string | null }
-  | { type: 'approval_resolved'; approvalId: string; decision: 'approved' | 'rejected'; reason?: string };
+  | { type: 'approval_resolved'; approvalId: string; decision: 'approved' | 'rejected' | 'cancelled'; reason?: string };
 
 interface PendingApproval {
   resolve: (result: ApprovalDecisionResult) => void;
@@ -62,30 +67,31 @@ export class ApprovalRouter {
     return this.pending.size > 0;
   }
 
-  request(payload: ApprovalRequestPayload): Promise<ApprovalDecisionResult> {
+  request(payload: ApprovalRequestPayload, options: { targetClientId?: string | null } = {}): Promise<ApprovalDecisionResult> {
     const approvalId = `approval_${randomUUID()}`;
     return new Promise(resolve => {
       const timer = setTimeout(() => {
         this.pending.delete(approvalId);
         this.broadcast({ type: 'approval_resolved', approvalId, decision: 'rejected', reason: 'timeout' });
-        resolve({ decision: 'rejected', feedback: '审批超时，已自动拒绝。' });
+        resolve({ decision: 'rejected', feedback: '审批超时，已自动拒绝。', reason: 'timeout' });
       }, this.timeoutMs);
       // Do not keep the process alive just for a pending timeout (the HTTP server does that).
       timer.unref();
 
       this.pending.set(approvalId, { resolve, timer, payload });
-      this.dispatch(approvalId, payload);
+      // `targetClientId` lets a caller address a specific UI when there is no
+      // active (taken-over) client to route to by default.
+      this.dispatch(approvalId, payload, options.targetClientId !== undefined ? options.targetClientId : this.getActiveClientId());
     });
   }
 
-  private dispatch(approvalId: string, payload: ApprovalRequestPayload): void {
-    const active = this.getActiveClientId();
-    if (active) {
-      this.sendToClient(active, { type: 'approval_request', approvalId, ...payload });
+  private dispatch(approvalId: string, payload: ApprovalRequestPayload, target: string | null): void {
+    if (target) {
+      this.sendToClient(target, { type: 'approval_request', approvalId, ...payload });
     }
     // Other connected UIs observe the waiting state; the initiating client
     // (which received approval_request) ignores its own approval_pending.
-    this.broadcast({ type: 'approval_pending', approvalId, toolName: payload.toolName, targetClientId: active });
+    this.broadcast({ type: 'approval_pending', approvalId, toolName: payload.toolName, targetClientId: target });
   }
 
   /** Re-send any still-pending approval requests to a (re)connecting client. */
@@ -102,14 +108,33 @@ export class ApprovalRouter {
     clearTimeout(pending.timer);
     this.pending.delete(input.approvalId);
     pending.resolve({ decision: input.decision, feedback: input.feedback });
-    this.broadcast({ type: 'approval_resolved', approvalId: input.approvalId, decision: input.decision });
+    this.broadcast({
+      type: 'approval_resolved',
+      approvalId: input.approvalId,
+      decision: input.decision,
+    });
+    return true;
+  }
+
+  isPending(approvalId: string): boolean {
+    return this.pending.has(approvalId);
+  }
+
+  /** Cancel one pending approval (the agent gets `cancelled`, never an approval). */
+  cancel(approvalId: string, reason: 'cancelled' | 'stopped' = 'cancelled'): boolean {
+    const pending = this.pending.get(approvalId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pending.delete(approvalId);
+    pending.resolve({ decision: 'rejected', cancelled: true, reason });
+    this.broadcast({ type: 'approval_resolved', approvalId, decision: 'cancelled', reason });
     return true;
   }
 
   stop(): void {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve({ decision: 'rejected', feedback: 'Bridge stopped before approval completed.' });
+      p.resolve({ decision: 'rejected', feedback: 'Bridge stopped before approval completed.', cancelled: true, reason: 'stopped' });
     }
     this.pending.clear();
   }

@@ -17,6 +17,7 @@ import type { BrowserActionName } from '../src/browser-action-types';
 const ALL_ACTIONS: BrowserActionName[] = [
   'take_visible_screenshot',
   'get_page_snapshot',
+  'find_elements',
   'get_console_logs',
   'get_console_message',
   'get_element_targets',
@@ -69,6 +70,34 @@ describe('get_page_snapshot', () => {
     const def = getBrowserToolDefinition('get_page_snapshot')!;
     assert.ok(def);
     assert.equal(def.parameters.required, undefined);
+  });
+
+  it('exposes the page-side snapshot options', () => {
+    const def = getBrowserToolDefinition('get_page_snapshot')!;
+    const props = def.parameters.properties as Record<string, Record<string, unknown>>;
+    assert.deepEqual(Object.keys(props).sort(), ['level', 'maxElements', 'roles', 'scope', 'selectors', 'viewportOnly']);
+    assert.deepEqual(props.level.enum, ['interactive-only', 'summary']);
+    assert.equal(props.maxElements.maximum, 200);
+    assert.equal(props.scope.type, 'string');
+    assert.equal(props.viewportOnly.type, 'boolean');
+    assert.match(String(props.scope.description), /elementId|selector/);
+    assert.match(String(props.viewportOnly.description), /viewport/i);
+  });
+});
+
+describe('find_elements', () => {
+  it('requires query and bounds maxResults', () => {
+    const def = getBrowserToolDefinition('find_elements')!;
+    assert.ok(def);
+    assert.deepEqual(def.parameters.required, ['query']);
+    const props = def.parameters.properties as Record<string, any>;
+    assert.equal(props.query.type, 'string');
+    assert.equal(props.role.type, 'string');
+    assert.equal(props.maxResults.type, 'integer');
+    assert.equal(props.maxResults.minimum, 1);
+    assert.equal(props.maxResults.maximum, 50);
+    assert.match(def.description, /click_page/);
+    assert.match(def.description, /cheaper/i);
   });
 });
 

@@ -543,6 +543,8 @@
         return captureVisibleScreenshot(params);
       case 'get_page_snapshot':
         return window.__domReview.browserActionDom.snapshot(params);
+      case 'find_elements':
+        return window.__domReview.browserActionDom.findElements(params);
       case 'get_console_logs':
         return window.__domReview.browserConsole?.getLogs?.(params) || { messages: [], total: 0 };
       case 'get_console_message':
@@ -631,7 +633,8 @@
       }
       case 'run_js': {
         const result = await window.__domReview.browserActionDom.runJs(params);
-        return { executed: true, result };
+        const page = window.__domReview.browserActionDom.pageState();
+        return { executed: true, result, page: { visibilityState: page.visibilityState, hasFocus: page.hasFocus }, ...(page.warning ? { warning: page.warning } : {}) };
       }
       default:
         throw new Error(`Unsupported browser action: ${name}`);

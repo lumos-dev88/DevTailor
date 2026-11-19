@@ -5,7 +5,7 @@
  * compatibility. The DB is persisted to disk as a single file.
  *
  * Schema:
- *   sessions:  id, client_id, agent_key, title, acp_session_id, created_at, updated_at
+ *   sessions:  id, client_id, agent_key, title, agent_session_id, created_at, updated_at
  *   messages:  id, session_id, role, type, content, timestamp, extra (JSON)
  *   images:    id, session_id, data_url, filename, created_at
  *   element_targets: id, name, page_pattern, payload_json, created_at, updated_at
@@ -71,7 +71,7 @@ export class SessionStore {
     this.imagesDir = imagesDir;
   }
 
-  /** Async factory — loads WASM and opens/creates the DB */
+  /** Async factory — loads WASM and opens/creates the DB. */
   static async create(dataDir: string): Promise<SessionStore> {
     if (!existsSync(dataDir)) {
       mkdirSync(dataDir, { recursive: true });
@@ -99,18 +99,24 @@ export class SessionStore {
   }
 
   private schema(): void {
+    this.displaySessionSchema();
+    this.sharedSchema();
+    this.flush();
+  }
+
+  private displaySessionSchema(): void {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
         id            TEXT PRIMARY KEY,
         client_id     TEXT NOT NULL,
         agent_key     TEXT NOT NULL DEFAULT 'claude',
         title         TEXT NOT NULL DEFAULT '新会话',
-        acp_session_id TEXT,
+        agent_session_id TEXT,
         created_at    INTEGER NOT NULL,
         updated_at    INTEGER NOT NULL
       )
     `);
-    this.ensureSessionAgentKeyColumn();
+    this.migrateSessionColumns();
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_sessions_client_agent ON sessions(client_id, agent_key, updated_at)
     `);
@@ -140,6 +146,9 @@ export class SessionStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_images_session ON images(session_id)
     `);
+  }
+
+  private sharedSchema(): void {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS element_targets (
         id            TEXT PRIMARY KEY,
@@ -163,7 +172,6 @@ export class SessionStore {
         updated_at INTEGER NOT NULL
       )
     `);
-    this.flush();
   }
 
   /**
@@ -191,9 +199,17 @@ export class SessionStore {
     }
   }
 
-  private ensureSessionAgentKeyColumn(): void {
+  private migrateSessionColumns(): void {
     const info = this.db.exec(`PRAGMA table_info(sessions)`);
     const columns = new Set((info[0]?.values || []).map(row => row[1] as string));
+    if (!columns.has('agent_session_id')) {
+      if (columns.has('acp_session_id')) {
+        this.db.run('ALTER TABLE sessions RENAME COLUMN acp_session_id TO agent_session_id');
+      } else {
+        this.db.run('ALTER TABLE sessions ADD COLUMN agent_session_id TEXT');
+      }
+      this.markDirty();
+    }
     if (!columns.has('agent_key')) {
       this.db.run(`ALTER TABLE sessions ADD COLUMN agent_key TEXT NOT NULL DEFAULT 'claude'`);
       this.markDirty();
@@ -239,7 +255,7 @@ export class SessionStore {
 
   createSession(session: StoredSession): void {
     this.db.run(
-      `INSERT INTO sessions (id, client_id, agent_key, title, acp_session_id, created_at, updated_at)
+      `INSERT INTO sessions (id, client_id, agent_key, title, agent_session_id, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         session.id,
@@ -256,7 +272,7 @@ export class SessionStore {
 
   updateSession(session: StoredSession): void {
     this.db.run(
-      `UPDATE sessions SET agent_key = ?, title = ?, acp_session_id = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE sessions SET agent_key = ?, title = ?, agent_session_id = ?, updated_at = ? WHERE id = ?`,
       [
         session.agentKey || SessionStore.DEFAULT_AGENT_KEY,
         session.title,
@@ -423,6 +439,27 @@ export class SessionStore {
   // Settings operations
   // ---------------------------------------------------------------------------
 
+  getSetting<T = unknown>(key: string): T | null {
+    const results = this.db.exec(`SELECT value_json FROM settings WHERE key = ?`, [key]);
+    const raw = results[0]?.values[0]?.[0];
+    if (typeof raw !== 'string') return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  setSetting(key: string, value: unknown): void {
+    this.db.run(
+      `INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      [key, JSON.stringify(value), Date.now()],
+    );
+    this.markDirty();
+    this.flush();
+  }
+
   private queryImages(sessionId: string): Array<{ id: string; filename: string }> {
     const results = this.db.exec(
       `SELECT id, filename FROM images WHERE session_id = ?`,
@@ -442,7 +479,7 @@ export class SessionStore {
   /** List all sessions for a client (without messages) */
   listSessions(clientId: string, agentKey = SessionStore.DEFAULT_AGENT_KEY): StoredSession[] {
     const results = this.db.exec(
-      `SELECT id, client_id, agent_key, title, acp_session_id, created_at, updated_at
+      `SELECT id, client_id, agent_key, title, agent_session_id, created_at, updated_at
        FROM sessions WHERE client_id = ? AND agent_key = ? ORDER BY updated_at DESC`,
       [clientId, agentKey],
     );
@@ -462,7 +499,7 @@ export class SessionStore {
   /** List all sessions across all clients (without messages) */
   listAllSessions(agentKey = SessionStore.DEFAULT_AGENT_KEY): StoredSession[] {
     const results = this.db.exec(
-      `SELECT id, client_id, agent_key, title, acp_session_id, created_at, updated_at
+      `SELECT id, client_id, agent_key, title, agent_session_id, created_at, updated_at
        FROM sessions WHERE agent_key = ? ORDER BY updated_at DESC`,
       [agentKey],
     );
@@ -482,7 +519,7 @@ export class SessionStore {
   /** Get a single session with all messages */
   getSession(sessionId: string): StoredSession | null {
     const results = this.db.exec(
-      `SELECT id, client_id, agent_key, title, acp_session_id, created_at, updated_at
+      `SELECT id, client_id, agent_key, title, agent_session_id, created_at, updated_at
        FROM sessions WHERE id = ?`,
       [sessionId],
     );

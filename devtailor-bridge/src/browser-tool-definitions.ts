@@ -50,10 +50,69 @@ const DEFINITIONS: Record<BrowserActionName, BrowserToolDefinition> = {
   get_page_snapshot: {
     name: 'get_page_snapshot',
     description:
-      'Get a prioritized page summary (not a full DOM dump). Returns visible interactive element summaries with stable-ish elementIds, locator recipes, roles, labels, testIds, text, rects, and console counts. Scans the document, open shadow roots, and same-origin iframes when accessible.',
+      'Get a prioritized page summary (not a full DOM dump). Returns visible interactive element summaries with stable-ish elementIds, locator recipes, roles, labels, testIds, text, rects, and console counts. Scans the document, open shadow roots, and same-origin iframes when accessible. Output is capped by a size budget; when snapshot.truncated is true, narrow with scope, viewportOnly, roles, maxElements, selectors, or level:"summary".',
     parameters: {
       type: 'object',
-      properties: {},
+      properties: {
+        level: {
+          type: 'string',
+          enum: ['interactive-only', 'summary'],
+          description: '"summary" returns page state, console counts and selector checks only (no element list). Default "interactive-only".',
+        },
+        maxElements: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 200,
+          description: 'Max interactive elements to return (viewport elements first). Default 80.',
+        },
+        roles: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Only return elements whose role matches one of these (e.g. ["button", "textbox"]).',
+        },
+        selectors: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'CSS selectors to check; each returns exists/visible/rect in `elements`.',
+        },
+        scope: {
+          type: 'string',
+          description:
+            'Optional elementId (from a previous snapshot) or CSS selector. When set, only interactive elements inside that subtree (including the element itself) are collected.',
+        },
+        viewportOnly: {
+          type: 'boolean',
+          description:
+            'When true, keep only elements intersecting the current viewport (plus a small margin). Default false keeps every visible interactive element.',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  find_elements: {
+    name: 'find_elements',
+    description:
+      'Find visible interactive elements whose accessible label, text, or placeholder contains a case-insensitive query substring, then return compact elementIds. Much cheaper than a full get_page_snapshot when you only need to locate one control; the returned elementId can be passed directly to click_page / fill_text. Results are ordered by the same snapshot relevance score and capped by maxResults.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Case-insensitive substring matched against accessibleLabel + elementText + placeholder.',
+        },
+        role: {
+          type: 'string',
+          description: 'Optional ARIA role filter (e.g. "button", "textbox").',
+        },
+        maxResults: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 50,
+          description: 'Maximum matches to return. Default 10.',
+        },
+      },
+      required: ['query'],
       additionalProperties: false,
     },
   },
@@ -416,7 +475,7 @@ const DEFINITIONS: Record<BrowserActionName, BrowserToolDefinition> = {
         code: {
           type: 'string',
           description:
-            'A JS function body (arrow or function). It is executed via `new Function()` in the page. Must return a JSON-serializable value.',
+            'A JS function EXPRESSION that is evaluated and called, e.g. `() => { ...; return value }` or `async () => await fetch(...)`. Bare statements or a top-level `return` fail with SyntaxError. Must return a JSON-serializable value. The result carries `page.visibilityState`/`page.hasFocus`; when the taken-over tab is in the background (`hidden`) it also carries a `warning` — requestAnimationFrame is paused and nothing renders there, so animation/layout/flicker recording is meaningless until the user brings that tab to the front.',
         },
         timeout: {
           type: 'number',

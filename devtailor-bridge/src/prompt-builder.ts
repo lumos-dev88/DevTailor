@@ -12,7 +12,12 @@ export type PromptContentBlock = { type: 'text'; text: string };
 // User prompt — dynamic data, sent with each request
 // ---------------------------------------------------------------------------
 
-export function buildPrompt(payload: ReviewPayload['payload']): PromptContentBlock[] {
+export interface BuildPromptOptions {
+  /** Absolute paths of enabled DESIGN.md files, in enable order (later wins). */
+  designDocPaths?: string[];
+}
+
+export function buildPrompt(payload: ReviewPayload['payload'], options: BuildPromptOptions = {}): PromptContentBlock[] {
   const { pageUrl, userIntent, items } = payload;
   const intent = userIntent || '(No additional description provided)';
   const hasMarks = items.length > 0;
@@ -53,6 +58,15 @@ export function buildPrompt(payload: ReviewPayload['payload']): PromptContentBlo
     }
   } else {
     text += `## Marked Elements\nNo elements were marked. Use the user's request as the primary context.\n\n`;
+  }
+
+  const designPaths = (options.designDocPaths ?? []).filter(p => typeof p === 'string' && p);
+  if (designPaths.length > 0) {
+    text += `## Design Spec\n`;
+    for (const p of designPaths) text += `- ${p}\n`;
+    text += 'Read these design spec files before making changes. All style and component changes must follow them. '
+      + 'If they conflict, the later file takes precedence. Where the spec says nothing, keep the existing style. '
+      + 'If the project has its own frontend standard (CLAUDE.md, CODE_STANDARD, etc.) that contradicts a spec rule, the project standard wins; say which rule you followed.\n\n';
   }
 
   return [{ type: 'text', text }];
