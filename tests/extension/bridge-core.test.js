@@ -7,13 +7,13 @@ const render = require('../../content/modules/chat-render.js');
 // ---------------------------------------------------------------- error copy
 test('errorInfo maps bridge codes to actionable copy', () => {
   assert.match(core.errorInfo('no_claude_instance').text, /Claude Code/);
-  assert.match(core.errorInfo('no_claude_instance').text, /claude-devtailor\.sh/);
+  assert.match(core.errorInfo('no_claude_instance').text, /`claude-devtailor\.sh`.*devtailor-hub/);
   // 429 / review_queue_full is gone: an unknown code falls back to the server message
   assert.match(core.errorInfo('review_queue_full', { message: '服务端文案' }).text, /服务端文案/);
   assert.match(core.errorInfo('client_not_connected').text, /连接当前页/);
   assert.match(core.errorInfo('auth_required').text, /`claude`/);
   assert.strictEqual(core.errorInfo('auth_required').kind, 'auth');
-  assert.match(core.errorInfo('bridge_offline').text, /scripts\/claude-devtailor\.sh/);
+  assert.match(core.errorInfo('bridge_offline').text, /Hub 未连接.*fh hub status/);
   assert.strictEqual(core.errorInfo('bridge_offline').kind, 'offline');
   assert.match(core.errorInfo('gone').text, /更新扩展/);
   assert.match(core.errorInfo('something_new', { message: '自定义', status: 500 }).text, /自定义/);
@@ -138,7 +138,7 @@ test('approval state machine: observer, resolved, cancel, timeout', () => {
 test('statusModel priority: offline > connecting > auth > inactive > ready', () => {
   const s = (ctx) => core.statusModel({ bridge: 'connected', activeClient: true, ...ctx });
   assert.strictEqual(s({ bridge: 'disconnected' }).key, 'offline');
-  assert.match(s({ bridge: 'disconnected' }).text, /scripts\/claude-devtailor\.sh/);
+  assert.match(s({ bridge: 'disconnected' }).text, /Hub 未连接.*fh hub status/);
   assert.strictEqual(s({ bridge: 'connecting' }).key, 'connecting');
   assert.strictEqual(s({ bridge: 'connecting', retrying: true }).key, 'offline', 'reconnect attempts after a failure mean the bridge is down');
   assert.match(s({ authRequired: true }).text, /`claude`/);

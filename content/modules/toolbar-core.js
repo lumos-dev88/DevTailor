@@ -15,7 +15,7 @@
   const COLLAPSED_WIDTH = 44;
   const EXPANDED_WIDTH = 320;
   const APPROVAL_TTL_MS = 300000; // same as the bridge's approval timeout
-  const BRIDGE_START_COMMAND = 'scripts/claude-devtailor.sh';
+  const BRIDGE_START_COMMAND = 'claude-devtailor.sh';
 
   // ---------------------------------------------------------------- state
 

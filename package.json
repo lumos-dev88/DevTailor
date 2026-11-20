@@ -1,0 +1,1 @@
+{"name":"devtailor-extension","private":true,"scripts":{"test:ext":"node --test 'tests/extension/*.test.js'"}}

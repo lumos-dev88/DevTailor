@@ -18,7 +18,7 @@
    * permission relay). `label` is what the button shows; `name` stays empty so a
    * resolved card reads plain 已允许 / 已拒绝 instead of repeating the label.
    */
-  const BRIDGE_START_COMMAND = 'scripts/claude-devtailor.sh';
+  const BRIDGE_START_COMMAND = 'claude-devtailor.sh';
   const FINAL_APPROVAL_STATUSES = ['approved', 'rejected', 'cancelled', 'timeout', 'expired'];
 
   // ---------------------------------------------------------------- helpers
@@ -48,10 +48,10 @@
     switch (code) {
       case 'bridge_offline':
         kind = 'offline';
-        text = `桥接服务未连接：请在项目目录运行 \`${BRIDGE_START_COMMAND}\` 启动 DevTailor 桥接服务`;
+        text = 'Hub 未连接：请确认 devtailor-hub 正在运行（终端执行 `fh hub status` 查看）。';
         break;
       case 'no_claude_instance':
-        text = '没有在线的 Claude Code 实例：请在项目目录运行 `scripts/claude-devtailor.sh` 启动 Claude Code 后重试。';
+        text = '没有在线的 Claude Code 实例：请在项目目录运行 `claude-devtailor.sh`（devtailor-hub 仓库 scripts/ 下）启动 Claude Code 后重试。';
         break;
       case 'client_not_connected':
         text = '当前标签页没有连接到桥接服务：请刷新页面或点击“连接当前页”。';

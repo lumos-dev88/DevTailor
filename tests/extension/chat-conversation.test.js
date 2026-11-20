@@ -317,7 +317,7 @@ test('approval flow: request -> submit decision -> resolved; observer -> upgrade
   await conv.submitApproval('appr_a5', 'approved', async () => ({ ok: false, status: 0, code: 'bridge_offline' }));
   const a5 = store.find((m) => m.id === 'appr_a5');
   assert.strictEqual(a5.status, 'pending');
-  assert.match(a5.error, /claude-devtailor\.sh/);
+  assert.match(a5.error, /Hub 未连接.*fh hub status/);
 });
 
 test('mcp permission relay: 允许 / 拒绝 post the verdict', async () => {
