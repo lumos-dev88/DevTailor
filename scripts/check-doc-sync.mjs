@@ -41,9 +41,6 @@ const rules = [
       /^content\/modules\/screenshot\.js$/,
       /^content\/modules\/element-targets\.js$/,
       /^content\/modules\/element-saver\.js$/,
-      /^devtailor-bridge\/src\/browser-mcp-server\.ts$/,
-      /^devtailor-bridge\/src\/browser-action-/,
-      /^devtailor-bridge\/src\/mcp-browser-tools\.ts$/,
     ],
     docs: [
       'docs/HANDOFF.md',
@@ -60,31 +57,11 @@ const rules = [
       /^content\/modules\/markdown-/,
       /^content\/modules\/image-/,
       /^content\/modules\/screenshot\.js$/,
-      /^devtailor-bridge\/src\/ws-server\.ts$/,
-      /^devtailor-bridge\/src\/agent-session\.ts$/,
-      /^devtailor-bridge\/src\/placeholder-agent-session\.ts$/,
-      /^devtailor-bridge\/src\/session-store\.ts$/,
-      /^devtailor-bridge\/src\/prompt-builder\.ts$/,
-      /^devtailor-bridge\/src\/claude-channel-session\.ts$/,
-      /^devtailor-bridge\/src\/image-store\.ts$/,
-      /^devtailor-bridge\/src\/mcp-(main|server)\.ts$/,
     ],
     docs: [
       'docs/HANDOFF.md',
       'docs/ARCHITECTURE.md',
       'docs/STATE_ANALYSIS.md',
-    ],
-  },
-  {
-    name: 'CLI / daemon / agent args',
-    implementation: [
-      /^devtailor-bridge\/src\/index\.ts$/,
-      /^devtailor-bridge\/src\/mcp-main\.ts$/,
-      /^devtailor-bridge\/package\.json$/,
-    ],
-    docs: [
-      'docs/CLI_OPTIMIZATION.md',
-      'docs/HANDOFF.md',
     ],
   },
   {

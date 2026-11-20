@@ -1,5 +1,7 @@
 # DevTailor Browser Tool — 用户故事与历史设计
 
+> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
+
 > 当前实现：Bridge 本身就是 Claude Code 的 MCP stdio server（`devtailor-bridge/src/mcp-main.ts`），browser tool 作为 **MCP 工具**直接暴露（`src/mcp-browser-tools.ts`，由 `createBrowserToolDefinitions()` 生成 18 个，外加 `reply`），调用经 `BrowserActionRouter.run()` → SSE `browser_action` → 当前接管 tab。没有 MCP 的 HTTP endpoint，也没有 `/browser-tool` HTTP 路由（后者是无审批的 `run_js` 通道，已删除）。下文的「会话」一律指「Claude Code 通道」的展示会话语义（一个 Claude 会话 → 一个展示会话 → 一个当前接管 tab），以代码和 `docs/HANDOFF.md`「Claude Code 通道」为准。
 
 ## 一、定位

@@ -1,5 +1,7 @@
 # Claude Code Channel 协议摘录
 
+> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
+
 本文只记录 DevTailor Bridge **实际依赖**的协议点，以官方文档为准；官方文档变化时先改这里再改代码。抓取日期：2026-11-07；本机 Claude Code 2.1.319，Node v26.3，`@modelcontextprotocol/sdk` 1.32.2（`LATEST_PROTOCOL_VERSION = 2025-11-25`）。
 
 来源：
@@ -129,7 +131,7 @@ fakechat 的 `reply` 返回 `{ content: [{ type: 'text', text: 'sent' }] }`，�
 2. **路径变量**：`${CLAUDE_PLUGIN_ROOT}` 是已安装版本的绝对路径，在 MCP `command`/`args`/`env` 里会被替换；marketplace 安装会把插件复制到缓存，所以必须用它且不能引用插件目录之外的相对路径。`CLAUDE_PROJECT_DIR` 由 Claude Code 注入 server 环境，无需在 `env` 里重复。
 3. **命名**：插件内 MCP server 在 `/mcp` 里叫 `plugin:<plugin>:<server>`（这里是 `plugin:devtailor:devtailor`）；工具全名 `mcp__plugin_<plugin>_<server>__<tool>`，名字里 `A-Za-z0-9_-` 以外的字符变 `_`。权限规则、hook matcher、skill `allowed-tools` 都要用这个全名（`mcp__plugin_devtailor_devtailor__reply`）。channel 事件的 `source` 属性是 `plugin:devtailor:devtailor`。
 4. **开发 flag**：`claude --dangerously-load-development-channels plugin:<name>@<marketplace>` 或 `server:<name>`；交互式会话才生效（`-p` 会忽略）；绕过的是白名单，不绕过 `channelsEnabled` 组织策略；flag 不在 `claude --help` 里但可用。官方写“marketplace 里发布的 channel 插件仍需开发 flag，之后用 `--channels plugin:<name>@<marketplace>`”。
-5. **`--plugin-dir`**：加载目录或 `.zip`，仅本会话，可重复；`claude --plugin-dir ./claude-plugin plugin list` 实测显示 `devtailor@inline`（Session-only plugins 段），所以组合形式是 `--plugin-dir ./claude-plugin --dangerously-load-development-channels plugin:devtailor@inline`。**官方文档没有明确写这个组合**，是否真注册为 channel 需实机验证（`docs/CLAUDE_PLUGIN_VERIFY.md` 第 0 步）；备选是项目 `.mcp.json` + `server:<name>`。
+5. **`--plugin-dir`**：加载目录或 `.zip`，仅本会话，可重复；`claude --plugin-dir ./claude-plugin plugin list` 实测显示 `devtailor@inline`（Session-only plugins 段），所以组合形式是 `--plugin-dir ./claude-plugin --dangerously-load-development-channels plugin:devtailor@inline`。**官方文档没有明确写这个组合**，是否真注册为 channel 需实机验证（旧 Bridge 的验证清单可在提交 `0569936` 之前的 git 历史中查看，现行通道配置与验证以 Hub 仓库文档为准）；备选是项目 `.mcp.json` + `server:<name>`。
 6. **校验**：`claude plugin validate <path>` 可校验插件目录或 marketplace（非交互，退出码 0/1/2）；会检查 `plugin.json`、`.mcp.json`/内联 MCP 条目（v2.1.281+）、skills/commands。`claude-plugin` 唯一的警告是缺少 icon（可选，不影响结果）。
 7. **超时**：`mcpServers.<name>.timeout`（毫秒）是硬性墙钟；DevTailor 设 `660000`（≥ `request_user_assistance` 的 10 分钟上限）。
 8. **认证/平台**：channels 需要 claude.ai 账号或 Console API key 认证，Bedrock/Vertex/Foundry 不可用；Team/Enterprise 需管理员启用 `channelsEnabled`。官方文档没有写“Claude Code ≥ 2.1.80”这个最低版本（来自任务要求，未被文档佐证）；permission relay 相关行为提到 v2.1.234，MCP v2 运行时提到 v2.1.221/232/274。

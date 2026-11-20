@@ -1,5 +1,7 @@
 # DevTailor Handoff Notes
 
+> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
+
 > 修改 chat、bridge、agent session、持久化、SSE、图片、Markdown、browser tool 或元素库逻辑前，先读本文。这里记录当前设计边界和防回归规则。
 >
 > **Claude Code Channels 为唯一后端；仓库备份分支 `backup/pre-channels-only`。**
@@ -13,7 +15,7 @@ DevTailor 是 **浏览器页面 ↔ Claude Code 的前端开发桥接工具**（
 
 核心目标：用户在页面上指出问题，Agent 获得 DOM、截图、标记元素、控制台信息和浏览器操作能力，完成“理解页面 → 修改代码 → 回到页面验证”的闭环。
 
-## 快速启动
+## 旧 Bridge 快速启动（历史参考）
 
 **真实使用**：在目标项目目录运行 `scripts/claude-devtailor.sh`（Claude Code 以插件形式拉起 `src/mcp-main.ts`）。
 
@@ -75,7 +77,7 @@ Claude → 浏览器工具(mcp) → BrowserActionRouter.run → SSE browser_acti
 
 **Claude Code 插件**（`claude-plugin/`，`.claude-plugin/plugin.json` 声明 `mcpServers.devtailor` + `channels:[{server:'devtailor'}]`，另含 `skills/devtailor-browser`、`commands/status.md`）：MCP server 指向 `${CLAUDE_PLUGIN_ROOT}/server/mcp-main.cjs`——由 `devtailor-bridge` 的 `npm run build:plugin`（esbuild，`scripts/build-plugin.mjs`）把 `mcp-main.ts` 打成单文件并把 `sql-wasm.wasm` 复制到旁边（sql.js 在运行时按 `__dirname` 找 wasm）。**选这个方案的原因**：marketplace 安装会把插件复制到缓存目录，指向仓库 `dist` 的相对路径会失效；单文件 + wasm 自包含，装到哪都能跑。产物 `claude-plugin/server/` 与 `claude-plugin-marketplace/` 在 `.gitignore`。工具名为 `mcp__plugin_devtailor_devtailor__<tool>`，server 在 `/mcp` 里叫 `plugin:devtailor:devtailor`。`timeout: 660000`（≥ `request_user_assistance` 的 10 分钟上限）。
 
-启动脚本 `scripts/claude-devtailor.sh`（在目标项目目录里运行）：检查 `claude`、Node ≥ 20、插件已构建，`MCP_PROTOCOL_NEGOTIATION=legacy`，然后 `exec claude --plugin-dir <repo>/claude-plugin --dangerously-load-development-channels plugin:devtailor@inline "$@"`（`--plugin-dir` 加载的会话级插件 id 是 `devtailor@inline`，由 `claude --plugin-dir … plugin list` 实测得到；官方文档未明说“`--plugin-dir` + `plugin:` 开发 flag”这一组合，实机是否注册为 channel 见 `docs/CLAUDE_PLUGIN_VERIFY.md` 第 0 步；另一种入口是 `DEVTAILOR_CHANNEL_ENTRY=server:<name>` + 项目 `.mcp.json`）。`scripts/make-local-marketplace.sh` 生成本地 marketplace（`devtailor-local`）供“安装形态”使用。开发时也可不打包：`.mcp.json` 直接指向 `devtailor-bridge/dist/mcp-main.js`，用 `server:<名字>`。
+启动脚本 `scripts/claude-devtailor.sh`（在目标项目目录里运行）：检查 `claude`、Node ≥ 20、插件已构建，`MCP_PROTOCOL_NEGOTIATION=legacy`，然后 `exec claude --plugin-dir <repo>/claude-plugin --dangerously-load-development-channels plugin:devtailor@inline "$@"`（`--plugin-dir` 加载的会话级插件 id 是 `devtailor@inline`，由 `claude --plugin-dir … plugin list` 实测得到；官方文档未明说“`--plugin-dir` + `plugin:` 开发 flag”这一组合，当时的实机验证清单可在提交 `0569936` 之前的 git 历史中查看；另一种入口是 `DEVTAILOR_CHANNEL_ENTRY=server:<name>` + 项目 `.mcp.json`）。`scripts/make-local-marketplace.sh` 生成本地 marketplace（`devtailor-local`）供“安装形态”使用。开发时也可不打包：`.mcp.json` 直接指向 `devtailor-bridge/dist/mcp-main.js`，用 `server:<名字>`。
 
 **通知**：`kind: 'review'`，meta 键 `kind/turn_id/page_url/client_id/has_images/image_count/image_paths`（键只含字母数字下划线，值都是字符串）；`turn_id` 为 12 位十六进制（uuid 去横线截断），避免 Bridge 重启后复用旧 id。content 为 `buildPrompt` 文本 + `## Screenshots` 路径清单。`sendReview` 在通知写出后立即 resolve `'pending'`；写出失败 → `onError` + reject。
 
@@ -117,7 +119,7 @@ Claude Code ← notifications/claude/channel/permission {request_id, behavior: '
 - Claude 上下文不能被 Bridge 清空：`/new-session` 只重置展示层。
 - 多个 Claude Code 会话各自启动 MCP 时会争 34781，后来者退出（不再互相 kill）。
 - permission relay 没有「终端已答复」的撤销信号：终端先批准后，侧边栏那张卡片会留到 5 分钟超时才变成「已超时」。relay 只覆盖工具使用审批，项目信任/MCP server consent 对话框不参与。
-- 未实机验证项（清单见 `docs/CLAUDE_PLUGIN_VERIFY.md`）：`--plugin-dir` + `plugin:devtailor@inline` 是否注册为 channel、空闲会话是否被通知唤醒、`reply` 是否触发权限提示、image content 是否被渲染。
+- 旧 Bridge 未实机验证项（当时的清单可在提交 `0569936` 之前的 git 历史中查看；现行验证请按 Hub 仓库文档执行）：`--plugin-dir` + `plugin:devtailor@inline` 是否注册为 channel、空闲会话是否被通知唤醒、`reply` 是否触发权限提示、image content 是否被渲染。
 
 **真实 Chrome 端到端**：`node scripts/e2e-extension.mjs`（不在 `npm test` 内；需本机 Chrome + playwright-core）。品牌版 Chrome 137+ 不再支持 `--load-extension`，脚本改用 `--remote-debugging-port` + `--enable-unsafe-extension-debugging` + CDP `Extensions.loadUnpacked`。页内工具条是 **closed** Shadow DOM，Playwright 选择器无法穿透，脚本用 CDP `DOM.getDocument({pierce:true})` 取 closed root 再点击/输入。覆盖：SW→守卫、网页反例（CORS/no-cors GET、text/plain POST）、页内接管+发送+流式回复、sidepanel 页发送/回复、cancel、MCP 浏览器工具（snapshot/click/screenshot）、退出后端口释放。这次实测发现并修复了三个缺陷：SW GET 无 Origin（上面守卫的客户端头）、`prompt-builder.js` 导出了已删除的 `build`（ReferenceError 使整个页内发送不可用）、`click_page` 因 `dispatchMouseSequence` 已派发 `click` 又调用 `el.click()` 而触发两次点击。
 
@@ -340,13 +342,7 @@ SessionStore(SQLite)
 
 SQLite schema 变更必须写迁移，不要假设用户已有 `.devtailor/sessions.db` 是最新结构。尤其 `element_targets` 这类新增表/列必须支持旧库启动。旧 `sessions.acp_session_id` 列启动时迁移为 `agent_session_id`，保留会话 ID 和聊天记录。迁移后，仍依赖旧列名的 Bridge 构建不能直接使用新库；如需回退，请先备份 `sessions.db`。
 
-修改 `devtailor-bridge/src/session-store.ts` 后，至少跑：
-
-```bash
-cd devtailor-bridge
-npm test
-npm run build
-```
+现行持久化和 SQLite schema 变更请在 `devtailor-hub` 仓库修改，并按该仓库文档运行相关迁移与持久化测试；`devtailor-bridge/src/session-store.ts` 已删除。
 
 ## Browser Tool 边界
 
@@ -491,6 +487,8 @@ Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid
 - Credits 只保留项目名称、原仓库地址和 license，不写长感谢文。
 
 ## 重要文件
+
+以下 `devtailor-bridge/` 文件列表仅为历史索引，均已删除；涉及这些服务端职责的改动请在 `devtailor-hub` 仓库定位并修改现行实现。
 
 - `content/content-script.js`：模块装配、工具栏事件、标记/元素库入口。
 - `content/modules/shadow-ui.js`：Shadow DOM 面板和样式。

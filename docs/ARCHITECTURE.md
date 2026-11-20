@@ -1,5 +1,7 @@
 # DevTailor 架构与时序分析
 
+> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
+
 > **唯一后端是 Claude Code Channels**：Claude Code 以插件形式拉起 Bridge 的 stdio MCP server（`src/mcp-main.ts`，声明 `experimental['claude/channel']`），侧边栏经 HTTP/SSE `127.0.0.1:34781` 与 Bridge 通信，回复走 `reply` MCP 工具，浏览器工具走 MCP。下面的整体架构图和「发送消息流程」描述的就是当前 Channels 后端（Bridge 仍保存展示会话/消息，AI 上下文由 Claude Code 持有）；详见文末「Claude Code 通道（MCP stdio）」。历史备份分支：`backup/pre-channels-only`。
 
 ## 📐 整体架构
@@ -675,7 +677,7 @@ npm run dev -- --dir /path/to/project   # 占位会话，不调用真实 AI
 
 - [STATE_ANALYSIS.md](./STATE_ANALYSIS.md) - 状态管理与时序问题详细分析
 - [HANDOFF.md](./HANDOFF.md) - 交接文档，设计边界和防回归规则
-- [devtailor-bridge/README.md](../devtailor-bridge/README.md) - Bridge 服务器文档
+- 服务端文档：参阅 `devtailor-hub` 仓库 README；旧 Bridge 服务器文档可在提交 `0569936` 之前的 git 历史中查看。
 
 ---
 
@@ -721,7 +723,7 @@ SSE(每个标签页一条, 经 service worker) ─┬─▶ 页内 ws-client（�
 - **审批**：`approval_request` / `approval_pending` / `approval_resolved` 进同一个状态机，`POST /approval-decision` 回传。Claude Code 的权限转发（permission relay）是唯一生产调用方：`permission_request` → 审批卡（没有选项列表时用默认「允许 / 拒绝」）→ `approved`/`rejected` → `notifications/claude/channel/permission`；无客户端/超时/取消不发裁决，交给终端对话框。`QuestionRouter` 仍只保留传输层。
 - **侧边栏不开自己的 SSE**：它订阅 service worker 对所有扩展页的广播，所以会收到每个已连接标签页的流，靠 `tabId === 接管标签` 过滤去重。
 - **样式**：共享组件样式模块只依赖 `--dt-*` 令牌 + 半透明灰，明暗两套主题通用；侧边栏专属在 `sidepanel.css`，页内工具条样式在 `toolbar.js` 的样式串里。
-- **测试矩阵**：`tests/extension/*.test.js`（事件归约、会话按钮可用性、审批状态机、错误码映射、渲染转义）→ `devtailor-bridge npm test`（桥接服务）→ `scripts/e2e-extension.mjs`（真实 Chrome + 真实 Bridge + 假 MCP 客户端端到端）→ `docs/CLAUDE_PLUGIN_VERIFY.md`（真实 Claude 会话的人工验证，自动化不覆盖）。
+- **测试矩阵**：`npm run test:ext`（扩展纯逻辑测试）→ `npm run e2e:ext`（真实 Chrome + 临时 Hub + 假 MCP 客户端，需 Hub 仓库已装依赖且 34781 空闲）；服务端测试与真实 Claude 通道验证请按 `devtailor-hub` 仓库文档执行。
 
 
 ## 标记工具条与标记同步

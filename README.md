@@ -25,14 +25,14 @@ DevTailor 就是为了解决这些麻烦而存在的。它把你的浏览器和�
 DevTailor 由两部分组成：
 
 1. **Chrome 扩展** — 在网页右边缘放一条“标记工具条”（选取、标记、搜索、截图），并提供浏览器侧边栏：和 Claude 对话、管理展示会话。页面里没有悬浮球，也没有页内聊天。
-2. **本地桥接服务（Bridge）** — 用 `scripts/claude-devtailor.sh` 在你要调试的项目目录启动 Claude Code 时，Claude Code 以插件形式把 Bridge 作为 **stdio MCP server**（`devtailor-bridge/src/mcp-main.ts`，声明 `experimental['claude/channel']`）拉起。侧边栏经 HTTP/SSE `127.0.0.1:34781` 与 Bridge 通信，Claude 的回复走 `reply` MCP 工具，浏览器工具走 MCP。**AI 的上下文在 Claude Code 那边**（Bridge 只保存本地展示会话），工具授权请求会转发到侧边栏审批卡（终端对话框与侧边栏谁先答谁生效）。
+2. **本地 Hub** — 服务端实现在独立的 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。扩展经 HTTP/SSE 连接其 devtailor 通道（`127.0.0.1:34781`），由 Claude Code 的 **hub-channel** 接收消息、回复并调用浏览器工具。AI 的上下文由 Claude Code 持有，Hub 管理本地展示会话。旧 Bridge 及其插件、打包和启动脚本已从本仓库删除。
 
 整个流程大概是这样：
 
 ```text
-你在浏览器里标记问题 → Bridge 经 channel 通知把页面上下文发给当前 Claude Code 会话
+你在浏览器里标记问题 → Hub 经 hub-channel 通知把页面上下文发给当前 Claude Code 会话
     Claude 读取/修改项目代码 → Claude 调用浏览器工具（stdio MCP）
-        Bridge 经 SSE 让当前接管的 tab 执行点击/填写/截图 → 结果返回给 Claude 继续分析
+        Hub 经 SSE 让当前接管的 tab 执行点击/填写/截图 → 结果返回给 Claude 继续分析
             Claude 用 reply 工具把回复写回侧边栏
 ```
 
@@ -55,7 +55,7 @@ AI 可以在你正在调试的页面上做这些事（不需要你写测试代�
 
 ### 项目隔离
 
-- 元素库、展示会话和消息都存在项目目录的 `.devtailor/` 下（不要提交进仓库）；AI 的对话上下文在 Claude Code 那边，Bridge 只存本地展示镜像；
+- 元素库、展示会话和消息都存在项目目录的 `.devtailor/` 下（不要提交进仓库）；AI 的对话上下文在 Claude Code 那边，Hub 只存本地展示镜像；
 - 刷新页面后侧边栏会自动重新接上当前会话，新开标签页只需点一下「连接当前页」（接管）即可切换调试目标。
 
 ## 一个完整的例子
@@ -76,36 +76,18 @@ AI 可以在你正在调试的页面上做这些事（不需要你写测试代�
 
 ## 快速开始
 
-完整流程：**构建插件 → 在项目目录用 `scripts/claude-devtailor.sh` 启动 Claude Code（Bridge 随之启动）→ 加载扩展 → 在页面里点「连接当前页」→ 在侧边栏聊天**。
+完整流程：**按 Hub 仓库文档启动 Hub 与 Claude Code 的 hub-channel → 加载扩展 → 在页面里点「连接当前页」→ 在侧边栏聊天**。
 
 ### 要求
 
-- **Node.js 20+**（Bridge 与插件打包的最低要求）；Chrome / Chromium 系列浏览器。
-- 本机已安装并**登录**过 Claude Code（在终端运行过一次 `claude` 并完成登录，启动脚本会检查 `claude` 在 PATH 里）。
+- Chrome / Chromium 系列浏览器。
+- 本机已安装并登录 Claude Code；Node.js 与服务端依赖要求以 `devtailor-hub` 仓库文档为准。
 
-### 1. 启动 Claude Code 通道（Bridge 随之启动）
+### 1. 启动 Hub 与 Claude Code 通道
 
-首次使用先安装依赖并打包插件（只需一次，改过 Bridge 代码后需重新 `npm run build:plugin`）：
+在独立的 `devtailor-hub` 仓库中，按其 README 安装依赖并启动 Hub，再在目标项目中连接 Claude Code 的 `hub-channel`。启动命令和服务端配置以 Hub 仓库文档为准。
 
-```bash
-cd /path/to/DOM-Review/devtailor-bridge
-npm install && npm run build:plugin
-```
-
-然后**在你要调试的项目目录**里启动 Claude Code（`--plugin-dir` 会加载本仓库的插件，Bridge 作为该会话的 stdio MCP server 启动）：
-
-```bash
-# 在你要调试的项目目录里一条命令启动（前台运行，Ctrl+C 退出）
-cd /absolute/path/to/your/project
-/path/to/DOM-Review/scripts/claude-devtailor.sh
-# 建议设别名：alias devtailor='/path/to/DOM-Review/scripts/claude-devtailor.sh'
-```
-
-要注意：
-
-- Bridge 固定监听 `127.0.0.1:34781`（扩展约定端口），**同一时间只能有一个 Bridge**；端口被占用时新会话的 Bridge 不会抢占，直接报错退出（启动脚本会先探测并给出警告）。
-- 必须用脚本里的 `--dangerously-load-development-channels`（channel 是研究预览，自定义 channel 不在 allowlist 里），否则浏览器发来的通知会被静默丢弃。
-- 开发 Bridge 本身时可以 `cd devtailor-bridge && npm run dev -- --dir /绝对路径`（`--` 不能省）或 `npm run mcp:dev`：前者只跑**占位会话**（不会调用真实 AI，仅用于调试 SSE/队列/展示会话），后者手工跑同一个 stdio MCP 入口。
+扩展固定连接 Hub 的 devtailor 通道 `127.0.0.1:34781`，请确认该通道已启动。服务端、通道、会话和 Browser MCP 的服务端行为均在 Hub 仓库维护。
 
 ### 2. 加载扩展
 
@@ -122,42 +104,36 @@ cd /absolute/path/to/your/project
 点击工具栏里的 DevTailor 图标 →「打开 Chat 侧边栏」，然后直接输入并发送：
 
 - **新会话**：重置本地展示层（Claude 的上下文不会被清空）；
-- 聊天时可以看到流式回复、工具调用卡片（带文件 diff / 命令输出）和上下文占用；可以随时点「取消」（Bridge 会推一条取消通知给 Claude）；
-- Claude 要执行命令或改文件时的**权限确认出现在启动它的那个终端里**（侧边栏的权限转发还没做，浏览器侧此时只会看到“等待”）。
+- 发送即完成：`POST /review` 受理后立即返回 **202**，可以继续发送下一条消息；
+- Claude 每次调用 `reply` 都会生成独立消息，无 `done` 事件或等待回复的队列。
 
 ### 注意事项
 
-- **会话必须保持打开**：Bridge 是 Claude Code 的子进程，Claude 会话结束（stdin 关闭）或 Ctrl+C 时 Bridge 一起退出。
-- **同时只能有一个 Bridge**（端口固定 34781）：多个 Claude Code 会话各自启动 MCP 时会争这个端口，后来者退出（不会互相 kill）。
-- 通知发出后不再有“等待响应”提示或无回复超时；如果终端里的 Claude 没有反应，请确认它是否在等权限确认，必要时在侧边栏取消该轮。
-- 同时到达的多条通知会被 Claude 合并处理，回复靠 `turn_id` 路由到正确的会话。
-- 更多细节与手动验证步骤：[docs/CLAUDE_PLUGIN_VERIFY.md](docs/CLAUDE_PLUGIN_VERIFY.md) 与 [docs/CLAUDE_CHANNEL_PROTOCOL.md](docs/CLAUDE_CHANNEL_PROTOCOL.md)。
+- 使用期间保持 Hub 和 Claude Code 的 hub-channel 连接可用。
+- `127.0.0.1:34781` 由 Hub 的 devtailor 通道监听，避免启动其他占用该端口的服务。
+- 消息已受理不代表 Claude 已回复；权限确认与通道状态请结合 Claude Code 和 Hub 的提示检查。
+- 官方 Channel 协议的历史参考见 [docs/CLAUDE_CHANNEL_PROTOCOL.md](docs/CLAUDE_CHANNEL_PROTOCOL.md)，现行配置以 Hub 仓库文档为准。
 
 ## 整体数据流
 
 ```text
 你在浏览器里标记问题、截图、发送消息
               ↓ 扩展 service worker → http://127.0.0.1:34781（HTTP/SSE）
-Bridge（Claude Code 以插件形式拉起的 stdio MCP server，同进程跑 WSServer）
-              ↓ notifications/claude/channel → Claude Code 会话（读代码 → 改代码 → 调用浏览器工具）
-              ↑ Claude 用 reply 工具回复 → SSE stream
-              ↑ Claude 调用浏览器工具 → BrowserActionRouter → SSE browser_action → 当前接管 tab
-你在侧边栏里看到流式回复、工具调用卡片和验证结果（权限确认在终端里）
+Hub 的 devtailor 通道（服务端位于 devtailor-hub 仓库）
+              ↓ Claude Code 的 hub-channel → 读代码、改代码、调用浏览器工具
+              ↑ Claude 用 reply 工具回复 → SSE → 侧边栏独立消息
+              ↑ 浏览器工具调用 → SSE browser_action → 当前接管 tab → 工具结果
 ```
 
 ## 开发者须知
 
-如果你要修改本项目源码（尤其是标记工具条、侧边栏聊天、Bridge 通信、会话管理、页面截图等关键逻辑），请先阅读 [docs/HANDOFF.md](docs/HANDOFF.md) 中的防回归规则。
+如果你要修改本项目源码（尤其是标记工具条、侧边栏聊天、Hub 通信、会话管理、页面截图等关键逻辑），请先阅读 [docs/HANDOFF.md](docs/HANDOFF.md) 中的防回归规则。
 
 ```bash
 # 仓库根目录（现行链路：扩展 → Hub）
 npm run test:ext                   # 扩展侧纯逻辑测试（tests/extension，node --test）
 npm run e2e:ext                    # 真实 Chrome 端到端：扩展 + 临时 Hub + 假 MCP 客户端（需 34781 空闲，且 Hub 仓库已装依赖）
 
-# 旧 Bridge（遗留，待删除）
-cd devtailor-bridge
-npm run build && npm test          # Bridge 单元/集成测试（含插件 stdio 冒烟测试）
-npm run build:plugin               # 打包 Claude Code 插件（claude-plugin/server）
 ```
 
 e2e 脚本需要本机 Chrome 和 playwright-core（路径用 `DEVTAILOR_PLAYWRIGHT_CORE` 指定），且 34781 端口必须空闲。
@@ -184,7 +160,7 @@ Apache-2.0
 - **搜索**：展开抽屉并聚焦搜索框；抽屉打开时按 `/` 也可聚焦，`Esc` 先清搜索再关抽屉。搜索按编号、标签/id/class、选择器、文字、备注、组件名、文件路径做不区分大小写的子串匹配，空格分词、全部命中才算；只过滤显示，不影响发送。
 - **截图**：截可见区域，作为待发送附件。
 - **存元素**：把当前对象存进元素库。
-- **接管状态点**：绿=已接管，灰=未接管（点击“连接当前页”），红=桥接未连接（悬停看启动命令 `scripts/claude-devtailor.sh`）。
+- **接管状态点**：绿=已接管，灰=未接管（点击“连接当前页”），红=Hub 未连接（请按 Hub 仓库文档检查 devtailor 通道）。
 - **打开侧边栏**：有待审批请求时带红点（Claude Code 权限请求会转发到这里审批，见 `docs/HANDOFF.md`「权限转发」）。
 - **收起/展开**。
 
