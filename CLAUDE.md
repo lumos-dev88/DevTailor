@@ -1,5 +1,7 @@
 # DevTailor Agent Notes
 
+> **链路现状（2026-11-20）**：现行链路是 **扩展 → devtailor-hub 仓库（`/Users/liguangzhen/代码/devtailor-hub`）的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 里的 hub-channel**。本仓库的 `devtailor-bridge/`、`claude-plugin/`、`claude-plugin-marketplace/` 与 `scripts/claude-devtailor.sh` 是**旧链路（遗留）**，同样占用 34781，**不要与 Hub 同时运行**。改 chat / 会话 / 审批 / Browser MCP 的服务端行为时，应改 Hub 仓库，而不是这里的旧 Bridge。旧链路仍保留，是因为扩展测试与 e2e 还依赖它；清理分三步：①标注（本说明）→ ②把 e2e/测试迁到 Hub → ③确认无引用后删除。下文关于 Bridge 的描述均指旧链路。
+
 修改 chat、bridge、channel 会话、持久化、SSE、图片、Markdown、Browser MCP 或元素库逻辑前，先阅读：
 
 - `docs/HANDOFF.md`
