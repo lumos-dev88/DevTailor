@@ -25,7 +25,7 @@ DevTailor 就是为了解决这些麻烦而存在的。它把你的浏览器和�
 DevTailor 由两部分组成：
 
 1. **Chrome 扩展** — 在网页右边缘放一条“标记工具条”（选取、标记、搜索、截图），并提供浏览器侧边栏：和 Claude 对话、管理展示会话。页面里没有悬浮球，也没有页内聊天。
-2. **本地 Hub** — 服务端实现在独立的 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。扩展经 HTTP/SSE 连接其 devtailor 通道（`127.0.0.1:34781`），由 Claude Code 的 **hub-channel** 接收消息、回复并调用浏览器工具。AI 的上下文由 Claude Code 持有，Hub 管理本地展示会话。旧 Bridge 及其插件、打包和启动脚本已从本仓库删除。
+2. **本地 Hub** — 服务端实现在独立的 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。扩展经 HTTP/SSE 连接其 devtailor 通道（`127.0.0.1:34781`），由 Claude Code 的 **hub-channel** 接收消息、回复并调用浏览器工具。AI 的上下文由 Claude Code 持有，Hub 管理本地展示会话。
 
 整个流程大概是这样：
 
@@ -149,7 +149,6 @@ e2e 脚本需要本机 Chrome 和 playwright-core（路径用 `DEVTAILOR_PLAYWRI
 ### 开源协议
 
 Apache-2.0
-
 
 ## 标记工具条
 

@@ -1,9 +1,5 @@
 # DevTailor Browser Tool — 用户故事与历史设计
 
-> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
-
-> 当前实现：Bridge 本身就是 Claude Code 的 MCP stdio server（`devtailor-bridge/src/mcp-main.ts`），browser tool 作为 **MCP 工具**直接暴露（`src/mcp-browser-tools.ts`，由 `createBrowserToolDefinitions()` 生成 18 个，外加 `reply`），调用经 `BrowserActionRouter.run()` → SSE `browser_action` → 当前接管 tab。没有 MCP 的 HTTP endpoint，也没有 `/browser-tool` HTTP 路由（后者是无审批的 `run_js` 通道，已删除）。下文的「会话」一律指「Claude Code 通道」的展示会话语义（一个 Claude 会话 → 一个展示会话 → 一个当前接管 tab），以代码和 `docs/HANDOFF.md`「Claude Code 通道」为准。
-
 ## 一、定位
 
 Browser tool 不是把 DevTailor 做成通用浏览器自动化平台，但也不应该把页面操作限制得过死。
@@ -11,7 +7,6 @@ Browser tool 不是把 DevTailor 做成通用浏览器自动化平台，但也�
 它的主轴是：
 
 - 用户仍然通过 DevTailor 面板标记元素、截图、描述问题。
-- Bridge 仍然负责把当前这一次请求转给本地 agent runtime。
 - Browser 能力补齐一个短板：AI 修改代码后，可以在用户当前开发页面里查看状态、刷新、点击、输入少量文本，并截图确认，而不是完全依赖用户手动操作和描述渲染结果。
 
 换句话说，它是"当前 DevTailor 工作流的浏览器操作层"。它可以参考 Nanobrowser 这类本地浏览器 agent 的实用取向：操作在用户本机浏览器中发生，默认面向开发环境，权限边界主要放在当前会话 tab 上，而不是把每个点击都设计成重审批。
@@ -110,70 +105,7 @@ Browser tool 不是把 DevTailor 做成通用浏览器自动化平台，但也�
 
 ---
 
-## 四、技术方案对比
-
-### 方案 A: Bridge 内嵌 Browser MCP（推荐）
-
-Bridge 暴露一个偏实用的 browser tool 集合。Claude Code 通过 MCP 调用 Bridge，Bridge 通过现有 SSE 通道请求当前 DevTailor tab 执行截图、读取、点击或输入，扩展再把结果 POST 回 Bridge。
-
-```text
-Claude Code ──MCP──> Bridge ──SSE──> Extension ──> 当前 tab
-     ^                                      |
-     └──────────── tool result POST ───────┘
-```
-
-**Pros:**
-- 不需要额外 MCP 包或 Chrome 远程调试端口。
-- 直接使用用户正在看的 tab，符合 DevTailor 的"当前页面标记"模型。
-- 复用现有 `clientId -> 当前接管 tab` 绑定（Claude Code 经 MCP 工具调用，由 `BrowserActionRouter` 路由到 `activeClientId`），不需要重新设计页面身份。
-- 能力足够覆盖开发调试常见闭环，不需要用户反复手动恢复页面状态。
-
-**Cons:**
-- Bridge 需要维护 MCP tool call 与扩展回包的 requestId。
-- 扩展刷新、页面关闭、权限不足都需要明确错误处理。
-- 不能获得完整 DevTools 能力，这是有意取舍。
-
-### 方案 B: 使用 chrome-devtools-mcp
-
-Bridge 在 Claude Code 会话（channel 后端）里注册外部 `chrome-devtools-mcp`，让 agent 通过 CDP 操作浏览器。
-
-**Pros:**
-- DevTools 能力完整，console/network/storage/performance 都可读。
-- 不依赖内容脚本是否注入。
-
-**Cons:**
-- 用户安装和启动成本高。
-- 需要远程调试端口，和扩展的轻量路线冲突。
-- target/tab 归属容易偏离当前 DevTailor 会话。
-- 能力过宽，容易把产品带向通用浏览器 agent。
-
-### 方案 C: 扩展作为独立 MCP Server
-
-扩展自己提供 MCP server，Claude Code 直接连接扩展。
-
-**Pros:**
-- 概念上最直接。
-
-**Cons:**
-- content script 不能监听 TCP 端口。
-- 需要 native messaging 或额外宿主程序，复杂度高于收益。
-
----
-
-## 五、技术选型决策
-
-**选择方案 A：Bridge 内嵌 Browser MCP，按能力分层放权**
-
-决策理由：
-
-1. **贴合当前主轴**：DevTailor 的核心仍是"标记/截图/描述 -> AI 修改代码"，browser tool 负责把当前开发页面恢复到可验证状态并反馈结果。
-2. **最少用户负担**：不引入远程调试端口、额外 MCP 包、额外浏览器启动方式。
-3. **会话边界清晰**：沿用现有 `clientId` 和「Claude Code 通道的展示会话 → 当前接管 tab」绑定，避免操作错 tab。
-4. **渐进增强**：先做截图和只读状态，再加入点击、输入、console、reload 等开发调试高频能力。
-
----
-
-## 六、项目骨架
+## 四、项目骨架
 
 核心原则：**Browser tools 永远操作当前 DevTailor 会话 tab，AI 不传 tabId、clientId、pageUrl。**
 
@@ -182,17 +114,6 @@ Bridge 在 Claude Code 会话（channel 后端）里注册外部 `chrome-devtool
 ### 目录规划
 
 ```text
-devtailor-bridge/src/
-  index.ts
-  ws-server.ts
-  mcp-main.ts                 # Claude Code 拉起的 stdio MCP server + channel
-  claude-channel-session.ts   # channel turn 表 / reply / 超时 / 取消
-  prompt-builder.ts
-  types.ts
-  mcp-browser-tools.ts        # browser tool → MCP 工具定义（19 个）
-  browser-action-router.ts    # tool call -> 当前 client SSE action
-  browser-action-types.ts     # browser action request/result 类型
-
 content/modules/
   ws-client.js                # 继续负责 SSE 接收和 POST 回传
   browser-actions.js          # 执行 screenshot/snapshot/reload/click/type/fill/run_actions
@@ -217,20 +138,7 @@ content/modules/
   -> Bridge resolve MCP tool result
 ```
 
-> browser tool 出口（`BrowserActionRouter.run()` → SSE `browser_action` → 当前 tab）原有的两个运行时消费者（`RealAgentSession`、`ScreamAgentSession`）已随自带 AI runtime 一起删除；`POST /browser-tool` 也已删除（它是无审批的 `run_js` 通道）。现在 Claude Code 的 MCP 工具（`mcp-browser-tools.ts`）是唯一消费者，共用同一个 `BrowserActionRouter` 出口和 `createBrowserToolDefinitions()` schema，不要另起浏览器路由。截图类结果转为 MCP image content 并落盘 `.devtailor/images/shot-<ts>-<n>.<ext>`；错误统一 `isError: true`，`NO_ACTIVE_TAB` 提示用户先在扩展里“接管”页面。
-
 ### 当前 Tab 上下文
-
-Bridge 维护一个当前 browser context：
-
-```ts
-interface BrowserContextState {
-  activeClientId: string | null
-  activeProjectId: string | null
-  activeSessionId: string | null
-  lastSeenAt: number
-}
-```
 
 更新规则：
 
@@ -258,17 +166,6 @@ take_visible_screenshot({})
 click_page({ clientId: "tab_123", pageUrl: "http://localhost:5173", text: "登录" })
 ```
 
-### Bridge 模块职责
-
-| 模块 | 职责 |
-|---|---|
-| `mcp-browser-tools.ts` | 把 browser tool 定义为 Claude Code 可调用的 MCP 工具，做参数校验、超时、结果包装 |
-| `browser-action-router.ts` | 找到当前 active client，通过 SSE 下发 `browser_action`，等待 result |
-| `browser-action-types.ts` | 共享 action/result 类型，避免散落字符串 |
-| `ws-server.ts` | 复用现有 SSE 连接，增加 `browser_action_result` 接收入口 |
-| `claude-channel-session.ts` | channel 会话（turn 表 / `reply` / 超时）；不把 frontend history 当上下文 |
-| `background/service-worker.js` | 通过 `chrome.scripting.executeScript` 在当前 sender tab 执行 `run_js`，保持 Claude in Chrome 式真实浏览器执行路径 |
-
 ### Extension 模块职责
 
 | 模块 | 职责 |
@@ -278,6 +175,7 @@ click_page({ clientId: "tab_123", pageUrl: "http://localhost:5173", text: "登�
 | `browser-action-dom.js` | 页面元素定位和交互实现，支持 selector/text/role/label/nearText/elementId/point/markId |
 | `browser-console.js` | 缓存最近 console message，供 `get_console_logs` / `get_console_message` 使用 |
 | `screenshot.js` | 保持现有手动截图入口，同时提供可复用 capture visible tab 能力 |
+| `background/service-worker.js` | 通过 `chrome.scripting.executeScript` 在当前 sender tab 执行 `run_js`，保持 Claude in Chrome 式真实浏览器执行路径 |
 
 ### Action 消息格式
 
@@ -416,7 +314,7 @@ Browser tools 对 AI 暴露时，需要明确：
 
 ---
 
-## 七、Tool 设计
+## 五、Tool 设计
 
 ### P0 Tool 设计
 
@@ -762,7 +660,7 @@ interface DevTailorBrowserToolsP1 {
 
 ---
 
-## 八、多 Tab 隔离策略
+## 六、多 Tab 隔离策略
 
 按当前 DevTailor 会话绑定，不按 URL 猜测，不让 AI 传 tab 参数。
 
@@ -784,12 +682,10 @@ Browser tool 调用时，Bridge 必须知道当前展示会话对应的 active `
 
 ---
 
-## 九、实现计划
+## 七、实现计划
 
 ### Phase 1: 最小闭环
 
-- [x] Bridge 增加 browser tool request/response 通道，支持 requestId 超时。
-- [x] Bridge 增加 active browser context，只绑定当前已接管 DevTailor tab。
 - [x] 扩展处理 `browser_action` SSE 消息。
 - [x] 实现 `take_visible_screenshot`，复用现有截图模块。
 - [x] 实现 `get_page_snapshot`，读取 URL、title、viewport、交互元素摘要。
@@ -800,7 +696,6 @@ Browser tool 调用时，Bridge 必须知道当前展示会话对应的 active `
 
 - [x] content script 缓存最近 console message。
 - [x] 实现 `get_console_logs` / `get_console_message`。
-- [x] Bridge 对 browser action 做 requestId 匹配、超时和结构化错误包装。
 - [ ] 评估 `hover_page`：hover 后读取 tooltip、菜单、浮层状态并截图验证。
 
 ### Phase 3: 页面操作与批量执行
@@ -816,7 +711,7 @@ Browser tool 调用时，Bridge 必须知道当前展示会话对应的 active `
 
 ---
 
-## 十、反目标
+## 八、反目标
 
 短期不做：
 

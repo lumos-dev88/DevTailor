@@ -11,7 +11,3 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 tmp/
-
-# Claude Code plugin build output (npm run build:plugin / scripts/make-local-marketplace.sh)
-claude-plugin/server/
-claude-plugin-marketplace/

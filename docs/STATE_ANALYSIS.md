@@ -1,7 +1,5 @@
 # DevTailor 状态管理与时序现状
 
-> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
-
 > 本文记录当前状态边界、已完成修复和仍需关注的问题。历史 bug 只保留结论，不再把已修复问题列为待修事项。
 
 ## 当前核心规则
@@ -18,60 +16,51 @@
 
 ### 2026-06-08
 
-### 1. SSE 连接竞态条件
+#### 1. SSE 连接竞态条件
 
 - background 维护 `/events` SSE fetch stream，content script 收到 proxy open 后通过代理 `/health`，确保返回并设置 `projectInfo` 后再触发监听器。
 - 增加响应验证和错误处理。
 - 规则：连接状态、项目状态和会话恢复必须按顺序推进。
 
-### 2. `activeStreamId` 状态管理
+#### 2. `activeStreamId` 状态管理
 
 - 重构 `ensureStreamAtTail()`，明确返回是否创建新流。
 - 当旧流被其他消息插队时，先 `endStream()` 再创建新流。
 - 规则：同一时刻只能有一个 active stream，且必须位于消息尾部。
 
-### 3. 工具状态标记
+#### 3. 工具状态标记
 
-- 已移除：Claude 通道（以及 Placeholder 会话）不产生 `thinking` / `tool_call` / `tool_update`，Bridge 的 onThinking/onToolCall/onToolUpdate 回调、侧边栏 thinking 块与工具卡片（含 `chat-tools.js`）已整体删除。
+- 已移除：Claude 通道不产生 `thinking` / `tool_call` / `tool_update`，侧边栏 thinking 块与工具卡片（含 `chat-tools.js`）已整体删除。
 - 仍保留：取消时的 `tool_status { toolStatus: 'canceled' }`，前端只把它当作“本轮已取消”的收尾信号，不依赖任何 tool 消息。
-- 旧会话兼容：`ws-server.loadPersistedSessions()` 恢复 SQLite 历史时过滤掉 `type` 为 `thinking` / `tool` 的消息。
 - AI 实时状态（`agent_status` 的 `thinking/tool/waiting`）来自 hook 状态机，是另一条链路，不受影响。
 
-### 4. SSE 心跳机制
+#### 4. SSE 心跳机制
 
 - 添加 30 秒定时检测。
 - 收到 background proxy 转发的 SSE 消息时刷新 `lastHeartbeatTime`。
 - 超过 60 秒无消息时通知 background 断开旧 SSE proxy 并自动重连。
 
-### 5. 元素库 URL 过滤 API 废除
+#### 5. 元素库 URL 过滤 API 废除
 
 - 旧问题：前端 `/element-targets?url=...` 与 MCP 项目全量返回语义不一致。
 - 当前设计：`GET /element-targets` 统一返回项目全量；前端元素库和 MCP `get_element_targets` 保持一致。
 - 影响：不再出现“前端为空但 AI 能查到数据”的分叉。
-- 位置：`devtailor-bridge/src/ws-server.ts`、`content/modules/element-targets.js`。
+- 位置：`content/modules/element-targets.js`。
 
 ### 2026-06-09
 
-### 6. 持久化逻辑澄清
+#### 6. 持久化逻辑澄清
 
 - Display messages 由 Bridge 管理，通过 `session_snapshot` 事件恢复。
 - `chat-persistence.js` 只持久化轻量 UI 状态：待发送图片、截图引用、发送状态等。
 - 规则：不要把前端历史重新拼进 prompt，也不要让 `chrome.storage.local` 成为聊天记录权威来源。
 
-### 7. 队列管理增强
+#### 7. 发送与流式收尾
 
-- Review 请求队列由 Bridge 持有；前端发送不再维护待发送消息队列。
 - 发送即完成：`POST /review` 立即返回 202（`{ok,turnId,sessionId}`），不再有排队深度、429 队列满、`queue_status` 事件，也没有 `isProcessing`/processing 锁；`done` 事件不再发送（旧 `done` 若到达仍当作流式气泡收尾）。
 - 流式气泡无 `done` 收尾：下一条用户消息、新的 `displayMessage.id`、工具/审批/提问卡、`error`、`tool_status canceled` 触发 `endStream()`，所以不会永远「流式中」。
 - 标记时机：2xx 清除，失败恢复；503 `no_claude_instance` 作为失败提示（标记恢复）。
 - 前端仍可在连接断开时依靠 SSE/HTTP 恢复探测重连，但不要恢复旧的前端待发送队列。
-
-### 8. Runtime 上下文轻量压缩
-
-- `RealAgentSession` 保留本地 AI runtime 多轮上下文，但在写回 history 前执行 micro-compaction。
-- 规则：最近消息保持原样；旧的大型 `tool_result` content 只保留短 marker；旧图片 content block 替换为图片存在性 marker，再执行字符预算裁剪。
-- `OpenAICompatibleProvider` 会把上下文超限类 HTTP 错误标记为 `context_overflow` code，便于后续接入自动压缩/重试。
-- 规则：micro-compaction 不调用 LLM，不改变 display session 展示消息，只影响后续 runtime prompt history。
 
 ## 仍需关注
 

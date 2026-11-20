@@ -1,9 +1,5 @@
 # DevTailor 架构与时序分析
 
-> **旧 Bridge 历史说明**：文中 `devtailor-bridge/`、`claude-plugin/` 路径指已删除的旧 Bridge（可在 git 历史中查看，提交 `0569936` 之前）；现行实现在 `devtailor-hub` 仓库（`/Users/liguangzhen/代码/devtailor-hub`）。服务端行为请在 Hub 仓库修改。现行链路为扩展 → Hub 的 devtailor 通道（`127.0.0.1:34781`）→ Claude Code 的 hub-channel；发送即完成：`/review` 立即返回 202，每次 `reply` 是独立消息，无 `done` / 队列。下文旧 Bridge 的启动、路径和生命周期描述仅供历史参考。
-
-> **唯一后端是 Claude Code Channels**：Claude Code 以插件形式拉起 Bridge 的 stdio MCP server（`src/mcp-main.ts`，声明 `experimental['claude/channel']`），侧边栏经 HTTP/SSE `127.0.0.1:34781` 与 Bridge 通信，回复走 `reply` MCP 工具，浏览器工具走 MCP。下面的整体架构图和「发送消息流程」描述的就是当前 Channels 后端（Bridge 仍保存展示会话/消息，AI 上下文由 Claude Code 持有）；详见文末「Claude Code 通道（MCP stdio）」。历史备份分支：`backup/pre-channels-only`。
-
 ## 📐 整体架构
 
 ```
@@ -21,58 +17,7 @@
 │  └───────────────┘  └──────────────┘  │  - VisBug HitTest   │  │
 │                                        └─────────────────────────┘  │
 │                                                                   │
-└───────────────────────────────┬───────────────────────────────────┘
-                                │ background service worker proxy
-                                │ (SSE fetch stream + HTTP)
-                                │
-┌───────────────────────────────▼───────────────────────────────────┐
-│                       Bridge Server (Node.js)                     │
-│            http://127.0.0.1:34781 (loopback only)                 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  HTTP/SSE Routes                                         │   │
-│  │  Guard first: Host check + chrome-extension:// Origin    │   │
-│  │  - GET  /health        (minimal; details need Origin)    │   │
-│  │  - GET  /events        (SSE Stream)                      │   │
-│  │  - POST /review        (Send message)                    │   │
-│  │  - POST /activate      (Take over active tab)            │   │
-│  │  - POST /cancel        (Stop generation)                 │   │
-│  │  - POST /new-session   (Create/reuse blank session)      │   │
-│  │  - GET  /sessions      (List sessions)                   │   │
-│  │  - GET  /sessions/active (Current display session)       │   │
-│  │  - POST /sessions/load   (Switch session)                │   │
-│  │  - POST /sessions/delete (Delete session)                │   │
-│  │  - GET  /element-targets          (List all elements)    │   │
-│  │  - POST /element-targets           (Save element)        │   │
-│  │  - DELETE /element-targets/:id     (Delete element)      │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  State Management                                        │   │
-│  │  - clients: Map<clientId, SSEConnection>                 │   │
-│  │  - sessions: Map<sessionId, DisplaySession>              │   │
-│  │  - elementTargets: Map<targetId, ElementTarget>          │   │
-│  │  - store: SessionStore (SQLite persistence)              │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                   │
-└───────────────────────────────┬───────────────────────────────────┘
-                                │ in-process runtime boundary
-┌───────────────────────────────▼───────────────────────────────────┐
-│                   Agent Runtime Boundary                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  - The bridge ships no AI runtime; the AI is Claude Code         │
-│  - ClaudeChannelSession (MCP stdio server + claude/channel):     │
-│    review -> notifications/claude/channel, Claude -> `reply` tool│
-│  - index.ts debug mode: PlaceholderAgentSession                  │
-│  - 20 MCP tools: 19 browser tools (BrowserActionRouter) + reply │
-│  - Receives user messages + context (marks, intent, page URL)    │
-│  - Browser tools: routed through BrowserActionRouter to active tab│
-│  - Emits: stream (whole reply segments), tool_status, error;     │
-│    handleReview emits the single `done` per turn                 │
-│                                                                   │
-└─────────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -137,42 +82,14 @@ User types message
           ▼
 ┌────────────────────────────────────────────┐
 │ chatSend.executeSend()                     │
-│ 1. Mark requestInFlight = true             │
-│ 2. Prepare payload:                        │
+│ 1. Prepare payload:                        │
 │    {                                        │
 │      text,                                  │
 │      marks: [],                             │
 │      screenshot: base64?,                   │
 │      clientId                               │
 │    }                                        │
-│ 3. POST /review                             │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
-┌────────────────────────────────────────────┐
-│ Bridge: handleReview()                     │
-│ 1. Accept request into backend queue        │
-│ 2. Get/Create AgentSession when dequeued    │
-│ 3. session.sendReview(payload, context)     │
-│    (channel: returns 'pending' once the     │
-│    notification is written)                 │
-│ 4. Pipe runtime events + processing state   │
-│    → SSE clients                            │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
-┌────────────────────────────────────────────┐
-│ Agent Runtime Boundary                     │
-│ 1. Claude Code receives <channel> event     │
-│    (turn_id, page_url, image paths in       │
-│    .devtailor/images) and answers via the   │
-│    MCP `reply` tool (final:true -> done)    │
-│ 2. Browser tool routing via                 │
-│    BrowserActionRouter                      │
-│ 4. Stream events:                          │
-│    - stream { delta }                      │
-│    - tool_status { canceled } (cancel)     │
-│    - done { reason }                       │
+│ 2. POST /review                             │
 └─────────┬──────────────────────────────────┘
           │
           ▼ (SSE)
@@ -192,12 +109,9 @@ User types message
 │     - appendStream(delta)                  │
 │   case 'done':                             │
 │     - endStream()                          │
-│     - setRequestInFlight(false)            │
-│     - flushQueue()                         │
 │   case 'error':                            │
 │     - endStream()                          │
 │     - addMessage('error')                  │
-│     - setRequestInFlight(false)            │
 └─────────┬──────────────────────────────────┘
           │
           ▼
@@ -227,16 +141,6 @@ User clicks element in selector mode
 │ 1. Get name, description, pagePattern      │
 │ 2. Build payload via elementTargets        │
 │ 3. POST /element-targets                   │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
-┌────────────────────────────────────────────┐
-│ Bridge: handleElementTargetSave()          │
-│ 1. Validate payload                        │
-│ 2. Generate targetId (uuid)                │
-│ 3. Store in memory: elementTargets.set()   │
-│ 4. Persist to SQLite: store.save()         │
-│ 5. Return { ok: true, target }             │
 └────────────────────────────────────────────┘
 
 ─────────────────────────────────────────────
@@ -257,14 +161,6 @@ User opens element library
 └─────────┬──────────────────────────────────┘
           │
           ▼
-┌────────────────────────────────────────────┐
-│ Bridge: handleElementTargetsList()         │
-│ 1. Return project-wide element targets     │
-│ 2. Sort by updatedAt desc                  │
-│ 3. Return { ok: true, targets: [...] }    │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
 ┌────────────────────────┐
 │ renderElementLibrary() │
 │ Display list in card   │
@@ -273,33 +169,9 @@ User opens element library
 
 ### 4. 设计规范（DESIGN.md）流程
 
-```
-sidepanel/design-docs.js ──bridge proxy──▶ /design-docs (GET/POST/toggle/delete)
-                                              │ ws-server.handleDesignDocs → design-docs.ts
-                                              ▼
-              <项目目录>/.devtailor/design/<uuid>.md  +  settings.design_docs (元数据)
-                                              │
-review → buildPrompt(payload,{designDocPaths}) ┘  末尾 "## Design Spec" 只列启用文件的绝对路径
-        （ClaudeChannelHub.getDesignDocPaths）
-```
-
 模块边界：路径只由服务端 uuid 生成；扩展只管 UI，不持有文件内容；AI 自己读取文件。
 
 ### 5. AI 状态（hooks 上报 → 侧边栏状态标）
-
-```
-Claude Code hook 子进程 ──POST /agent-status (Authorization: Bearer <令牌>)──▶ WSServer.handleAgentStatus
-      （<项目>/.devtailor/agent-hook-token，0600）                                │
-                                                                                ▼
-                                                          AgentStatus.apply(event, payload, now)   ← src/agent-status.ts
-                                                                                │  （纯状态机，不持久化）
-ClaudeChannelHub ──onAgentStatus('turn_start'|'turn_end')──▶ WSServer.notifyAgentTurn ─┤
-   （review 通知写出成功 / 该轮 final·取消·超时·出错）                                      ▼
-                          SSE `agent_status {state,label,toolName,activeTools,since}` → 所有已连接客户端
-                                                                                │
-                                   新客户端连上（connected 之后）单发当前快照 ──┤
-                                   GET /health（扩展 Origin）附带 agentStatus ──┘
-```
 
 - 唯一不需要扩展 Origin 的路由是 `/agent-status`（调用方是 hook 子进程而不是浏览器）：只有「Origin 为空 + 令牌正确」的 POST 放行，Host 校验保留、响应不加 CORS 头、带浏览器 Origin 一律 403、非 POST 405。其余路由守卫不变。
 - 状态模型：`UserPromptSubmit`/`turn_start` → `thinking`，`PreToolUse` → `tool`（在飞 `toolUseId` 集合），`PostToolUse`/`PostToolUseFailure` → 在飞数减一（到 0 回 `thinking`），`Notification` → `waiting`，`Stop`/`turn_end` → `idle`，`SubagentStop` → 没有在飞工具时才回 `thinking`；10 分钟无事件按 `idle` 读。
@@ -450,17 +322,6 @@ events.onmessage = (event) => {
 - 前端曾通过 `/element-targets?url=...` 请求当前页目标。
 - 路径、query、hash 的匹配规则容易让 UI 和 MCP 返回结果不一致。
 
-**当前设计**：
-```javascript
-// Bridge: ws-server.ts
-private handleElementTargetsList(_url: URL, res: ServerResponse): void {
-  const targets = [...this.elementTargets.values()]
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map(target => this.publicElementTarget(target));
-  this.sendJson(res, 200, { ok: true, targets });
-}
-```
-
 ---
 
 ## ✅ 已修复
@@ -529,13 +390,12 @@ function persistNow() {
 }
 ```
 
-### 2. **后端队列管理**
+### 2. **发送与取消**
 
-**位置**：`devtailor-bridge/src/ws-server.ts`、`content/modules/chat-send.js`
+**位置**：`content/modules/chat-send.js`
 
 **状态**：
 - 前端不再维护待发送消息队列、重试计数或退避定时器。
-- active tab 连续调用 `/review` 时，Bridge 接收请求并进入后端 `Map<clientId, PendingReview[]>` 队列。
 - 发送即完成（Hub 新契约）：`/review` 立即返回 `202 {ok,turnId,sessionId}`，没有 `queued/queueDepth/isProcessing`，没有 429；无在线 Claude → 503 `no_claude_instance`。SSE 不再发 `done`/`queue_status`，也不再附带 `isProcessing`。
 - `chat-send.js` 的 `flushQueue()` / `clearQueue()` 仅保留兼容空实现。
 
@@ -622,19 +482,6 @@ function persistNow() {
 - 调试稍复杂
 - 某些第三方工具可能无法检测
 
-### ADR-003: 元素库数据存储在哪？
-
-**决策**：Bridge 内存 + SQLite 持久化
-
-**理由**：
-1. 跨标签页共享数据
-2. 页面刷新不丢失
-3. 按项目隔离
-
-**代价**：
-- 需要 Bridge 运行
-- 网络开销（虽然是本地）
-
 ---
 
 ## 🔍 调试技巧
@@ -663,47 +510,19 @@ await window.__domReview.elementTargets.listAllTargets()
 window.__domReview.wsClient.reconnect()
 ```
 
-### 5. 查看 Bridge 日志
-真实使用时日志直接打在启动 `scripts/claude-devtailor.sh` 的那个终端里（全部写 stderr）。只调试 Bridge 本身时：
-
-```bash
-cd devtailor-bridge
-npm run dev -- --dir /path/to/project   # 占位会话，不调用真实 AI
-```
-
 ---
 
 ## 📚 相关文档
 
 - [STATE_ANALYSIS.md](./STATE_ANALYSIS.md) - 状态管理与时序问题详细分析
 - [HANDOFF.md](./HANDOFF.md) - 交接文档，设计边界和防回归规则
-- 服务端文档：参阅 `devtailor-hub` 仓库 README；旧 Bridge 服务器文档可在提交 `0569936` 之前的 git 历史中查看。
 
 ---
 
-## 🔌 Claude Code 通道（MCP stdio，唯一后端）
+## 扩展通信
 
-```text
-扩展(SW 代理) ──SSE/HTTP──▶ WSServer(34781，安全守卫) ◀──同进程── Claude Code(stdin/stdout)
-                                  │                                       │
-                                  │                                       └─ 插件 mcpServers.devtailor
-                                  └─ BrowserActionRouter → SSE browser_action → 当前接管 tab
-数据流：/review → sendReview → notifications/claude/channel → Claude Code → reply → SSE stream/done → 侧边栏
-```
-
-- `src/mcp-main.ts` 是 Claude Code 拉起的 stdio MCP server，同进程运行 `WSServer`（HTTP/SSE，`127.0.0.1:34781`）。`src/mcp-server.ts` 声明 `experimental['claude/channel']` + `experimental['claude/channel/permission']` + `tools` 与 `instructions`，提供 18 个浏览器工具和 `reply`，并把 `permission_request` 转发到侧边栏审批卡（见下方「审批」）。
-- `ClaudeChannelHub`（进程级）持有 turn 表、超时/无响应计时器、取消通知和图片落盘；`ClaudeChannelSession`（每个展示会话一个）是 `AgentSession` 的薄封装。
-- 数据流：`/review` → `sendReview` → `notifications/claude/channel`；Claude → `reply` → `onStream`/`onDone` → SSE `stream`/`done`。`done` 仍只由 `handleReview` 发送一次；异步会话（`sendReview` 返回 `'pending'`）下 `handleReview` 等待 `onDone`/`onError`/`/cancel`。
-- 浏览器工具 → `BrowserActionRouter.run` → SSE `browser_action` → 当前接管 tab；元素库三工具本地处理。
-- 细节、reply 语义、取消与超时见 `docs/HANDOFF.md`「Claude Code 通道」；协议依据见 `docs/CLAUDE_CHANNEL_PROTOCOL.md`。
-
-
-## Claude Code 插件与扩展通信
-
-- Bridge 打包成 Claude Code 插件（`claude-plugin/`，MCP server = esbuild 单文件 `server/mcp-main.cjs`），由 `scripts/claude-devtailor.sh` 以 `--plugin-dir` + `--dangerously-load-development-channels plugin:devtailor@inline` 启动 Claude Code 会话；Bridge 随会话启动/退出。详见 `docs/HANDOFF.md`「Claude Code 通道」。
 - 扩展 → Bridge 的所有 HTTP/SSE 请求仍然只经 service worker（`fetchBridgeUrl`），并带 `X-DevTailor-Client: <extension id>`：真实 Chrome 里 SW 的 GET 不带 `Origin`，守卫靠这个头识别扩展（网页发该头需要预检，预检被守卫拒绝）。
 - `scripts/e2e-extension.mjs` 用真实 Chrome + 假 Claude（MCP 客户端）覆盖整条链路。
-
 
 ## 🧩 扩展侧：事件归约与渲染（侧边栏）
 
@@ -724,7 +543,6 @@ SSE(每个标签页一条, 经 service worker) ─┬─▶ 页内 ws-client（�
 - **侧边栏不开自己的 SSE**：它订阅 service worker 对所有扩展页的广播，所以会收到每个已连接标签页的流，靠 `tabId === 接管标签` 过滤去重。
 - **样式**：共享组件样式模块只依赖 `--dt-*` 令牌 + 半透明灰，明暗两套主题通用；侧边栏专属在 `sidepanel.css`，页内工具条样式在 `toolbar.js` 的样式串里。
 - **测试矩阵**：`npm run test:ext`（扩展纯逻辑测试）→ `npm run e2e:ext`（真实 Chrome + 临时 Hub + 假 MCP 客户端，需 Hub 仓库已装依赖且 34781 空闲）；服务端测试与真实 Claude 通道验证请按 `devtailor-hub` 仓库文档执行。
-
 
 ## 标记工具条与标记同步
 
