@@ -92,9 +92,9 @@ test('approval state machine: request -> submit -> result', () => {
   assert.strictEqual(rejected.status, 'rejected');
   // 409 = decided elsewhere / gone; other failures are retryable
   assert.strictEqual(core.reduceApproval(card, { type: 'submit_result', ok: false, status: 409 }).status, 'expired');
-  const retry = core.reduceApproval(card, { type: 'submit_result', ok: false, status: 0, error: '桥接未连接' });
+  const retry = core.reduceApproval(card, { type: 'submit_result', ok: false, status: 0, error: 'Hub 未连接' });
   assert.strictEqual(retry.status, 'pending');
-  assert.strictEqual(retry.error, '桥接未连接');
+  assert.strictEqual(retry.error, 'Hub 未连接');
 });
 
 test('approval state machine: observer, resolved, cancel, timeout', () => {

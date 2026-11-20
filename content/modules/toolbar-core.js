@@ -103,14 +103,14 @@
    */
   function takeoverModel({ status, active, releasing = false, startCommand = BRIDGE_START_COMMAND }) {
     if (releasing) {
-      return { key: 'releasing', tone: 'warn', label: '正在取消接管…', tip: '正在取消接管，稍候会自动重新连接桥接服务', action: 'none' };
+      return { key: 'releasing', tone: 'warn', label: '正在取消接管…', tip: '正在取消接管，稍候会自动重新连接 Hub', action: 'none' };
     }
     if (status !== 'connected') {
       return {
         key: 'offline',
         tone: 'error',
-        label: '桥接未连接',
-        tip: `桥接服务未连接：请在项目目录运行 ${startCommand}\n点击重试连接`,
+        label: 'Hub 未连接',
+        tip: `Hub 未连接：请确认 devtailor-hub 正在运行（\`fh hub status\`），并在项目目录运行 ${startCommand} 启动 Claude Code\n点击重试连接`,
         action: 'reconnect',
       };
     }

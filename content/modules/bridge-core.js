@@ -54,7 +54,7 @@
         text = '没有在线的 Claude Code 实例：请在项目目录运行 `claude-devtailor.sh`（devtailor-hub 仓库 scripts/ 下）启动 Claude Code 后重试。';
         break;
       case 'client_not_connected':
-        text = '当前标签页没有连接到桥接服务：请刷新页面或点击“连接当前页”。';
+        text = '当前标签页没有连接到 Hub：请刷新页面或点击“连接当前页”。';
         break;
       case 'auth_required':
         kind = 'auth';
@@ -282,7 +282,7 @@
     if (ctx.bridge === 'connecting') {
       // Retrying after a failed attempt means the bridge is most likely not running.
       if (ctx.retrying) return { key: 'offline', tone: 'error', text: errorInfo('bridge_offline').text };
-      return { key: 'connecting', tone: 'warn', text: '连接桥接服务中…' };
+      return { key: 'connecting', tone: 'warn', text: '连接 Hub 中…' };
     }
     if (ctx.authRequired) return { key: 'auth', tone: 'error', text: errorInfo('auth_required').text };
     if (!ctx.activeClient) return { key: 'inactive', tone: 'warn', text: '未接管当前标签：点击“连接当前页”' };

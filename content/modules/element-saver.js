@@ -511,7 +511,7 @@
 
       const elementTargets = window.__domReview.elementTargets;
       if (!elementTargets?.saveFromReview || !elementTargets?.buildTargetPayload) {
-        showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || '桥接服务未连接'}`);
+        showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || 'Hub 未连接'}`);
         return;
       }
 
@@ -546,7 +546,7 @@
     if (!review) return;
     const elementTargets = window.__domReview.elementTargets;
     if (!elementTargets?.saveFromReview || !elementTargets?.buildTargetPayload) {
-      showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || '桥接服务未连接'}`);
+      showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || 'Hub 未连接'}`);
       return;
     }
     pendingReview = review;
@@ -608,7 +608,7 @@
   function showLibraryCard() {
     const elementTargets = window.__domReview.elementTargets;
     if (!elementTargets?.listAllTargets) {
-      showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || '桥接服务未连接'}`);
+      showHint(`元素库不可用：${window.__domReview.bridgeCore?.errorInfo('bridge_offline').text || 'Hub 未连接'}`);
       return;
     }
     closeSaveCard();

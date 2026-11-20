@@ -752,13 +752,13 @@
   async function onStatusClick() {
     const ws = dr.wsClient;
     const m = takeoverState();
-    if (!ws) { toast('桥接客户端未加载，请刷新页面'); return; }
+    if (!ws) { toast('Hub 客户端未加载，请刷新页面'); return; }
     if (m.action === 'reconnect') {
       ws.reconnectNow();
       toast(m.tip.split('\n')[0]);
     } else if (m.action === 'activate') {
       const res = await ws.activate();
-      if (!res || res.ok === false) toast(res?.error || '连接当前页失败，请确认桥接服务正在运行');
+      if (!res || res.ok === false) toast(res?.error || '连接当前页失败，请确认 Hub 正在运行');
       refreshStatus();
     } else if (m.action === 'release') {
       // The bridge has no explicit release call: dropping this tab's event stream makes it
