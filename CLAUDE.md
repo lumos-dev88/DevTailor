@@ -66,8 +66,9 @@ npm test
 验证扩展侧改动（纯逻辑 Node 测试 + 真实 Chrome 端到端，后者用假 MCP 客户端、不碰真实会话，且要求 34781 端口空闲）：
 
 ```bash
-npm run test:ext   # = node --test '../tests/extension/*.test.js'
-npm run e2e:ext    # = npm run build:plugin && node ../scripts/e2e-extension.mjs
+# 在仓库根目录运行（现行链路；旧 Bridge 目录里的同名脚本是遗留）
+npm run test:ext   # = node --test 'tests/extension/*.test.js'
+npm run e2e:ext    # = node scripts/e2e-extension.mjs（真实 Chrome + 临时 Hub + 假 MCP 客户端；需 Hub 仓库已装依赖，且 34781 空闲，即要先停掉正在运行的 Hub）
 ```
 
 ## Credits

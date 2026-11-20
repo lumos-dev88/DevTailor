@@ -150,12 +150,14 @@ Bridge（Claude Code 以插件形式拉起的 stdio MCP server，同进程跑 WS
 如果你要修改本项目源码（尤其是标记工具条、侧边栏聊天、Bridge 通信、会话管理、页面截图等关键逻辑），请先阅读 [docs/HANDOFF.md](docs/HANDOFF.md) 中的防回归规则。
 
 ```bash
+# 仓库根目录（现行链路：扩展 → Hub）
+npm run test:ext                   # 扩展侧纯逻辑测试（tests/extension，node --test）
+npm run e2e:ext                    # 真实 Chrome 端到端：扩展 + 临时 Hub + 假 MCP 客户端（需 34781 空闲，且 Hub 仓库已装依赖）
+
+# 旧 Bridge（遗留，待删除）
 cd devtailor-bridge
 npm run build && npm test          # Bridge 单元/集成测试（含插件 stdio 冒烟测试）
-npm run test:ext                   # 扩展侧纯逻辑测试（tests/extension，node --test）
 npm run build:plugin               # 打包 Claude Code 插件（claude-plugin/server）
-npm run e2e:ext                    # = npm run build:plugin && node ../scripts/e2e-extension.mjs
-node ../scripts/e2e-extension.mjs  # 真实 Chrome 端到端：扩展 + 真 Bridge + 假 MCP 客户端，不碰真实会话
 ```
 
 e2e 脚本需要本机 Chrome 和 playwright-core（路径用 `DEVTAILOR_PLAYWRIGHT_CORE` 指定），且 34781 端口必须空闲。
