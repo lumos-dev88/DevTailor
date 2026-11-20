@@ -1119,6 +1119,16 @@ textarea::placeholder {
   pointer-events: auto;
 }
 
+.composer__send-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#cancel-btn[hidden] {
+  display: none;
+}
+
 .send-btn.dt-send-btn--stop {
   border-color: #dc2626;
   background: #dc2626;
@@ -1130,7 +1140,7 @@ textarea::placeholder {
   opacity: 0.6;
 }
 
-/* The send button doubles as 发送 / 取消 / 取消中… / 加载中: widen from a circle to a pill. */
+/* The send button and the (conditional) cancel button are pills, not circles. */
 .send-btn {
   width: auto;
   min-width: 34px;

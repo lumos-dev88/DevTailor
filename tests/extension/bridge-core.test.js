@@ -6,8 +6,10 @@ const render = require('../../content/modules/chat-render.js');
 
 // ---------------------------------------------------------------- error copy
 test('errorInfo maps bridge codes to actionable copy', () => {
-  assert.match(core.errorInfo('review_queue_full', { maxDepth: 5 }).text, /5/);
-  assert.match(core.errorInfo('review_queue_full').text, /结束后/);
+  assert.match(core.errorInfo('no_claude_instance').text, /Claude Code/);
+  assert.match(core.errorInfo('no_claude_instance').text, /claude-devtailor\.sh/);
+  // 429 / review_queue_full is gone: an unknown code falls back to the server message
+  assert.match(core.errorInfo('review_queue_full', { message: '服务端文案' }).text, /服务端文案/);
   assert.match(core.errorInfo('client_not_connected').text, /连接当前页/);
   assert.match(core.errorInfo('auth_required').text, /`claude`/);
   assert.strictEqual(core.errorInfo('auth_required').kind, 'auth');
@@ -27,8 +29,24 @@ test('parseProxyResponse: unreachable bridge, JSON error bodies, success', () =>
   const auth = core.parseProxyResponse({ ok: false, status: 401, body: JSON.stringify({ ok: false, code: 'auth_required', error: '登录失效' }) });
   assert.strictEqual(auth.code, 'auth_required');
   assert.strictEqual(core.failureInfo(auth).kind, 'auth');
-  const full = core.parseProxyResponse({ ok: false, status: 429, body: JSON.stringify({ ok: false, code: 'review_queue_full', maxDepth: 3 }) });
-  assert.match(core.failureInfo(full).text, /3/);
+  // Hub style: the error code lives in `error`, the human text in `message`
+  const noClaude = core.parseProxyResponse({ ok: false, status: 503, body: JSON.stringify({ ok: false, error: 'no_claude_instance', message: 'no live claude' }) });
+  assert.strictEqual(noClaude.ok, false);
+  assert.strictEqual(noClaude.code, 'no_claude_instance');
+  assert.strictEqual(noClaude.message, 'no live claude');
+  assert.match(core.failureInfo(noClaude).text, /Claude Code/);
+  // free-form `error` text (not a code) keeps working as the message
+  const freeform = core.parseProxyResponse({ ok: false, status: 500, body: JSON.stringify({ ok: false, error: '登录失效 了' }) });
+  assert.strictEqual(freeform.code, '');
+  assert.match(core.failureInfo(freeform).text, /登录失效/);
+  // 202 accepted
+  const accepted = core.parseProxyResponse({ ok: true, status: 202, body: JSON.stringify({ ok: true, turnId: 't1', sessionId: 's1' }) });
+  assert.strictEqual(accepted.ok, true);
+  assert.strictEqual(accepted.data.turnId, 't1');
+  // cancel with nothing to cancel is a success, not an error
+  const nothing = core.parseProxyResponse({ ok: true, status: 200, body: JSON.stringify({ ok: true, canceled: false, reason: 'nothing_to_cancel' }) });
+  assert.strictEqual(nothing.ok, true);
+  assert.strictEqual(nothing.data.canceled, false);
   const good = core.parseProxyResponse({ ok: true, status: 200, body: JSON.stringify({ ok: true, sessions: [] }) });
   assert.strictEqual(good.ok, true);
   const garbage = core.parseProxyResponse({ ok: false, status: 502, body: '<html>' });

@@ -54,8 +54,8 @@ Bridge 不再带任何自有 AI runtime：`ScreamAgentSession`、`RealAgentSessi
 - thinking / 工具卡片链路已删除（Claude 通道从不产生 `thinking`/`tool_call`/`tool_update`）：Bridge 侧 `onThinking`/`onToolCall`/`onToolUpdate`、`ToolCallInfo`/`ToolUpdateInfo`，侧边栏 `renderThinkingBlock`、旧工具卡片渲染、`bridge-core` 的 tool 归约函数和整个 `chat-tools.js` 都已移除。取消时的 `tool_status canceled` 仍保留，只作“本轮已取消”信号。`loadPersistedSessions()` 恢复旧会话时过滤 `thinking`/`tool` 类型消息。不要再为这两类事件加回渲染分支。
 - `prompt-builder.ts` 只保留 `buildPrompt(payload)`：页面 URL、用户意图、标记元素（selector/annotation/组件/样式/outerHTML/bbox）。系统提示、history、image block 都已删除；截图由 `ClaudeChannelSession` 落盘后以路径形式交给 Claude（见「Claude Code 通道」）。
 - `/review` 的 turn 生命周期：`handleReview` 是 `done` 的**唯一发送点**。同步会话：`sendReview` resolve 后发一次。异步会话（`'pending'`）：`handleReview` 等 `turn.completion`（由 `onDone`/`onError`/`/cancel` 触发）后发一次；`AgentCallbacks.onDone` 只记录 summary、解除等待，不直接发 `done`。`stopReason === 'error'` 或 `turn.errored` 时只发 `error`，不发 `done`；session 已经通过 `onError` 报过的失败，`handleReview` 的 catch 不再重复发 `error`。
-- `/cancel`：标记当前展示轮次已取消——发 `tool_status canceled` + `done(reason: cancelled)`，清空排队，丢弃该轮次之后 agent 的迟到输出，解除 `turn.completion`（串行队列释放），并调用该 display session 的 `cancelCurrentTurn()`（Claude 通道会推 `kind=cancel` 通知）。**不** stop/delete agent session。
-- `/review` 在异步会话下保持串行：`/review` 的上一轮在 Claude `final` / 取消之前，同一 client 的下一条排队等待。Bridge 不再有“无回复超时”兜底：Claude 一直不回复时该轮会一直占着队列，需要用户在侧边栏取消。
+- `/cancel`（扩展侧约定）：返回 `{ok:true,canceled:true}` 或 `{ok:true,canceled:false,reason:'nothing_to_cancel'}`（后者不是错误，侧边栏只提示「当前没有正在执行的任务」）；不再发 `done(cancelled)`，仍发 `tool_status canceled`。以下为旧 Bridge 行为（保留作历史参考）：标记当前展示轮次已取消——发 `tool_status canceled` + `done(reason: cancelled)`，清空排队，丢弃该轮次之后 agent 的迟到输出，解除 `turn.completion`（串行队列释放），并调用该 display session 的 `cancelCurrentTurn()`（Claude 通道会推 `kind=cancel` 通知）。**不** stop/delete agent session。
+- **发送即完成（像聊天，Hub 侧新契约）**：`POST /review` 立即返回 `202 {ok:true,turnId,sessionId}`，不再有 `queued/queueDepth/isProcessing`、不再有 429 队列满；无在线 Claude 实例 → `503 {ok:false,error:'no_claude_instance',message}`（扩展用 `bridge-core` 的 `errorInfo('no_claude_instance')` 提示，`parseProxyResponse` 把形如 `error:'snake_case'` 的值当作 code），SSE client 未连接 → 409。Hub 不再发 `done`、`queue_status`，SSE/health/sessions 不再带 `isProcessing/processingSessionId`。每条 reply 是一条独立 assistant 消息（SSE `stream` 带 `displayMessage.id`，每条不同），按 id 渲染成独立气泡。**扩展侧不再有任何「处理中」锁**：不要恢复 `sendInProgress`-until-done / `requestInFlight` / `meta.processing` / 加载点 / 发送按钮变「取消」。
 - SSE 断开：若断开的是 `activeClient`，宽限期（`WSServer.activeClientGraceMs`，默认 3s，覆盖页面刷新/SW 重启时同 clientId 的重连）后调用 `browserRouter.deactivate`，避免向已断开的客户端下发动作。宽限期内同 clientId 重连则保持接管。
 
 ## Claude Code 通道（唯一后端，`mcp-main`）
@@ -311,12 +311,11 @@ SessionStore(SQLite)
 重要行为：
 
 - 一个 display session 对应一个 agent session。
-- 同一 client 的请求串行处理。
-- `/review` 是后端队列入口：任意已连接 tab 连续发送时 Bridge 接收请求并返回 `queued/queueDepth/isProcessing`，前端不再维护待发送消息队列和重试队列。
-- 运行期 SSE 事件（stream/tool_status/done/error/queue_status）必须由 Bridge 附带 `isProcessing`、`processingSessionId`、`activeSessionId`，前端发送按钮状态以后端状态为准。
-- 前端进入异步 `/review` 前必须先设置发送中 single-flight 状态，不能在 `await wsClient.send()` 后才锁定，否则双击按钮或连按 Enter 会触发重复发送。
+- 发送即完成：`/review` 返回 202 即视为已受理，前端不维护待发送队列/重试队列，也不依赖 `isProcessing`/`queue_status`/`done`；可连续发送多条。
+- 前端 `sendInProgress` 只覆盖 `POST /review` 在途的短暂窗口（防双击 / 连按 Enter 重复提交，必须在 `await` 之前置位），请求一返回立刻放开；它不是「处理中」锁。
+- 流式气泡收尾（无 `done`）：下一条用户消息、新的 `displayMessage.id`、工具/审批/提问卡、`error`、`tool_status canceled` 都会 `endStream()`；旧 `done`/`queue_status` 事件仍被容忍（`done` 当作收尾、`queue_status` 忽略）。
 - 不要并发调用同一个 agent session 的 `sendReview()`。
-- 底部「停止」只用于取消当前展示轮次：`/cancel` 立即给 UI 发 `done(cancelled)` 解锁，不 stop agent session，并通过 `cancelCurrentTurn()` 通知 Claude。
+- 「取消」是输入框旁独立的条件按钮（`#cancel-btn`，仅在有未决审批/提问卡或工具 `running` 时显示），不占用发送按钮、不阻塞发送；`/cancel` 不 stop agent session，仅通知 Claude 停止当前轮次。`canceled:false`（`nothing_to_cancel`）不报错。
 - 空闲 session 会清理。
 - Browser action request/response 通过 requestId 匹配，超时要返回结构化错误。
 
@@ -542,6 +541,6 @@ Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid
 
 - 标记（`review-store.js`）和待发送截图（`marks-sync.js` 的 `shots`）原来只在页面内存里，刷新页面或开发服务器整页重载后全部丢失。现在 `marks-sync.js` 在每次变化后 400ms 防抖写入 `chrome.storage.session`（key `dt_state_<tabId>`，纯函数在 `marks-core.js` 的 `buildPersisted` / `restorePersisted`，有单测），内容脚本启动时 `init()` → `restore()` 取回。
 - 约束：只在**同源**时恢复；恢复时 `sent` 一律清为 false（发送它们的那一轮已经不存在）；用户在恢复完成前已经新增的内容优先，不合并；恢复完成前不写入，避免空状态覆盖。
-- 已发送标记的防重复（`marks-core.js` 的 `createSentTracker`，侧边栏 `executeSend` / `settleSentMarks` / `reconcileSentMarks`）：标记在 `POST /review` **之前**就乐观 `markSent`（只标 sent，不清截图），并登记进 tracker——SSE `done` 可能早于 HTTP 响应，登记晚了会漏清。`/review` 失败则 tracker 回滚并 `markUnsent`；成功后再清截图。多次发送的 id 累积，`done` 一次性 `clearSent`，`error` 把所有已登记 id 恢复为可发送。页面在本轮进行中重载时，内容脚本恢复的标记 `sent` 仍为 false（持久化语义不变，id 不变），侧边栏每次收到快照时对 tracker 里 `sent=false` 的 id 重新 `markSent`，所以它们不会进入下一次 payload，并在本轮 `done` 时被清掉。不要把「标记已发送」挪回 `/review` 成功之后。
+- 已发送标记的防重复（`marks-core.js` 的 `createSentTracker`，侧边栏 `executeSend` / `settleSentMarks` / `reconcileSentMarks`）：标记在 `POST /review` **之前**就乐观 `markSent`（只标 sent，不清截图），并登记进 tracker，防止并发 BUILD 重复带上。**时机（发送即完成）**：`/review` 返回 2xx 即 `settleSentMarks('done')` 清除标记（并消耗截图）；非 2xx / 网络错误则 tracker 回滚并 `markUnsent`，标记恢复可发送。不再等 `done`；旧 `done`/`error` 事件仍会调用 `settleSentMarks`，但此时 tracker 已空，是无副作用的容错。请求在途期间页面重载：内容脚本恢复的标记 `sent` 仍为 false（持久化语义不变，id 不变），侧边栏每次收到快照时对 tracker 里 `sent=false` 的 id 重新 `markSent`，2xx 后被清掉。不要把「标记已发送」挪回 `/review` 成功之后。
 - 容量：`storage.session` 配额约 10MB，持久化上限 7MB，超出按“最旧截图先丢”，仍写入失败则只保留标记；丢了截图会弹提示。关闭标签页时 service worker 删除该 tab 的存档；关闭浏览器即清空（session 语义，不跨浏览器会话）。
 - service worker 启动时必须 `chrome.storage.session.setAccessLevel('TRUSTED_AND_UNTRUSTED_CONTEXTS')`，否则内容脚本读写 `storage.session` 会被拒。

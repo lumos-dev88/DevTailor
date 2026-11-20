@@ -140,7 +140,7 @@ cd /absolute/path/to/your/project
               ↓ 扩展 service worker → http://127.0.0.1:34781（HTTP/SSE）
 Bridge（Claude Code 以插件形式拉起的 stdio MCP server，同进程跑 WSServer）
               ↓ notifications/claude/channel → Claude Code 会话（读代码 → 改代码 → 调用浏览器工具）
-              ↑ Claude 用 reply 工具回复 → SSE stream/done
+              ↑ Claude 用 reply 工具回复 → SSE stream
               ↑ Claude 调用浏览器工具 → BrowserActionRouter → SSE browser_action → 当前接管 tab
 你在侧边栏里看到流式回复、工具调用卡片和验证结果（权限确认在终端里）
 ```
@@ -188,4 +188,4 @@ Apache-2.0
 
 抽屉里每个标记一行：编号、元素简述、备注、组件文件。悬停高亮页面元素，点击滚动并闪烁；可展开详情、改备注（Enter 保存/Esc 取消）、存入元素库、删除；底部可“清空全部标记”（二次确认）和“在侧边栏发送”。
 
-标记会同步到侧边栏输入框上方的“标记托盘”，在侧边栏发送消息时随消息一起发给 Claude（选择器、备注、组件文件、截图），用户消息气泡下方会显示这些标记。历史会话里由 DevTailor 拼出的长 Markdown 会被紧凑显示为“意图文字 + 含 N 个标记”。发送的标记在本轮结束后自动清除；本轮失败则恢复为可再次发送。
+标记会同步到侧边栏输入框上方的“标记托盘”，在侧边栏发送消息时随消息一起发给 Claude（选择器、备注、组件文件、截图），用户消息气泡下方会显示这些标记。历史会话里由 DevTailor 拼出的长 Markdown 会被紧凑显示为“意图文字 + 含 N 个标记”。发送的标记在消息发送成功（服务端受理）后自动清除；发送失败则恢复为可再次发送。可以连续发送多条消息，每条回复是独立的气泡。

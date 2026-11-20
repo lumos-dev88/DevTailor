@@ -168,7 +168,8 @@ test('handleCommand ignores messages that are not ours', () => {
   assert.strictEqual(marksCore.handleCommand(null, page.ctx), undefined);
 });
 
-/** The side panel's send/settle flow (sidepanel.js executeSend / settleSentMarks / reconcileSentMarks). */
+/** The side panel's send/settle flow (sidepanel.js executeSend / settleSentMarks / reconcileSentMarks).
+ * Chat-style: a 2xx /review response clears the marks; a non-2xx / network error rolls them back. */
 function createPanelFlow(page) {
   const tracker = marksCore.createSentTracker();
   const flow = {
@@ -182,6 +183,8 @@ function createPanelFlow(page) {
         if (markIds.length) { tracker.rollback(markIds); await page.controller.markUnsent(markIds); }
         return { ok: false, markIds };
       }
+      // 2xx from POST /review = accepted: clear the sent marks right away (no `done` wait).
+      await flow.settle('done');
       return { ok: true, markIds };
     },
     settle(outcome) {
@@ -198,11 +201,11 @@ function createPanelFlow(page) {
   return flow;
 }
 
-test('done arriving before the /review response still clears the sent marks', async () => {
+test('a 2xx /review response clears the sent marks immediately (no done event involved)', async () => {
   const page = createPage();
   page.store.add(review('a'));
   const flow = createPanelFlow(page);
-  const r = await flow.send(async () => { await flow.settle('done'); return true; }); // SSE done beats the HTTP response
+  const r = await flow.send(async () => true);
   assert.strictEqual(r.ok, true);
   assert.deepStrictEqual(storeMarks(page), []);
   assert.deepStrictEqual(flow.tracker.ids(), []);
@@ -228,47 +231,59 @@ test('a failed /review rolls the marks back to sendable', async () => {
   assert.deepStrictEqual((await page.controller.buildPayload()).markIds, ['a']);
 });
 
-test('a turn error makes the carried marks sendable again', async () => {
+test('legacy tracker path: settle(error) still makes carried marks sendable again', async () => {
   const page = createPage();
   page.store.add(review('a'));
   const flow = createPanelFlow(page);
-  await flow.send(async () => true);
+  flow.tracker.begin(['a']);
+  await page.controller.markSent(['a'], false);
   assert.strictEqual(storeMarks(page)[0][3], true);
   await flow.settle('error');
   assert.strictEqual(storeMarks(page)[0][3], false);
 });
 
-test('sent ids accumulate across sends and one done clears them all', async () => {
+test('consecutive sends are independent: each accepted /review clears only its own marks', async () => {
+  const page = createPage();
+  page.store.add(review('a'));
+  const flow = createPanelFlow(page);
+  await flow.send(async () => true);
+  assert.deepStrictEqual(storeMarks(page), []);
+  page.store.add(review('b'));
+  const r2 = await flow.send(async () => true);
+  assert.deepStrictEqual(r2.markIds, ['b']);
+  assert.deepStrictEqual(storeMarks(page), []);
+  assert.deepStrictEqual(flow.tracker.ids(), []);
+});
+
+test('a failed send does not clear marks even after an earlier accepted send', async () => {
   const page = createPage();
   page.store.add(review('a'));
   const flow = createPanelFlow(page);
   await flow.send(async () => true);
   page.store.add(review('b'));
-  const r2 = await flow.send(async () => true);
-  assert.deepStrictEqual(r2.markIds, ['b']);
-  assert.deepStrictEqual(flow.tracker.ids().sort(), ['a', 'b']);
-  await flow.settle('done');
-  assert.deepStrictEqual(storeMarks(page), []);
+  const r = await flow.send(async () => false);
+  assert.strictEqual(r.ok, false);
+  assert.deepStrictEqual(storeMarks(page), [['b', 1, '', false]]);
 });
 
-test('a page reload mid-turn restores marks unsent; the panel re-marks them sent and done clears them', async () => {
+test('a page reload while /review is in flight restores marks unsent; the panel re-marks them and the 2xx clears them', async () => {
   const page = createPage();
   page.store.add(review('a'));
   const flow = createPanelFlow(page);
-  await flow.send(async () => true);
-  // reload: persisted -> restored with sent=false, same ids
-  const saved = marksCore.buildPersisted({ origin: 'http://localhost:3000', marks: page.store.getAll(), shots: [] });
-  const restored = marksCore.restorePersisted(saved, 'http://localhost:3000');
-  assert.strictEqual(restored.marks[0].sent, false);
-  assert.strictEqual(restored.marks[0].id, 'a');
-  page.store.clear();
-  restored.marks.forEach((m) => page.store.add(m));
-  page.broadcast();
-  assert.deepStrictEqual(flow.tracker.staleIds(page.tray.getState().marks), ['a']);
-  await flow.reconcile();
-  assert.strictEqual(storeMarks(page)[0][3], true);
-  assert.deepStrictEqual((await page.controller.buildPayload()).markIds, []);
-  assert.deepStrictEqual(flow.tracker.staleIds(page.tray.getState().marks), []);
-  await flow.settle('done');
+  await flow.send(async () => {
+    // reload mid-request: persisted -> restored with sent=false, same ids
+    const saved = marksCore.buildPersisted({ origin: 'http://localhost:3000', marks: page.store.getAll(), shots: [] });
+    const restored = marksCore.restorePersisted(saved, 'http://localhost:3000');
+    assert.strictEqual(restored.marks[0].sent, false);
+    assert.strictEqual(restored.marks[0].id, 'a');
+    page.store.clear();
+    restored.marks.forEach((m) => page.store.add(m));
+    page.broadcast();
+    assert.deepStrictEqual(flow.tracker.staleIds(page.tray.getState().marks), ['a']);
+    await flow.reconcile();
+    assert.strictEqual(storeMarks(page)[0][3], true);
+    assert.deepStrictEqual((await page.controller.buildPayload()).markIds, []);
+    return true;
+  });
   assert.deepStrictEqual(storeMarks(page), []);
 });

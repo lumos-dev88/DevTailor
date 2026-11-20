@@ -50,9 +50,8 @@
         kind = 'offline';
         text = `桥接服务未连接：请在项目目录运行 \`${BRIDGE_START_COMMAND}\` 启动 DevTailor 桥接服务`;
         break;
-      case 'review_queue_full':
-        kind = 'limit';
-        text = `排队的消息过多${ctx.maxDepth ? `（最多 ${ctx.maxDepth} 条）` : ''}，请等当前回复结束后再发送。`;
+      case 'no_claude_instance':
+        text = '没有在线的 Claude Code 实例：请在项目目录运行 `scripts/claude-devtailor.sh` 启动 Claude Code 后重试。';
         break;
       case 'client_not_connected':
         text = '当前标签页没有连接到桥接服务：请刷新页面或点击“连接当前页”。';
@@ -79,23 +78,23 @@
     }
     const status = Number(res.status || 0);
     const reachable = status > 0;
+    // Hub style errors: `{ ok:false, error:'no_claude_instance', message }` (error is the code).
+    const errorIsCode = Boolean(data) && !str(data.code) && /^[a-z][a-z0-9_]*$/.test(str(data.error));
     return {
       ok: Boolean(res.ok) && (data == null || data.ok !== false),
       status,
       reachable,
       data,
-      code: reachable ? str(data && data.code) : 'bridge_offline',
-      message: str(data && data.error) || str(res.error),
+      code: reachable ? (errorIsCode ? str(data.error) : str(data && data.code)) : 'bridge_offline',
+      message: errorIsCode ? (str(data.message) || str(res.error)) : (str(data && data.error) || str(res.error)),
     };
   }
 
   /** Error copy for a failed (parsed) response. */
   function failureInfo(parsed) {
-    const data = parsed.data || {};
     return errorInfo(parsed.code, {
       message: parsed.message,
       status: parsed.status,
-      maxDepth: data.maxDepth,
     });
   }
 

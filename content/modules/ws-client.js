@@ -411,16 +411,16 @@
   async function send(payload, options = {}) {
     if (status !== 'connected') {
       connect();
-      return { ok: false, queued: false, status, code: 'bridge_offline', error: window.__domReview.bridgeCore.errorInfo('bridge_offline').text };
+      return { ok: false, status, code: 'bridge_offline', error: window.__domReview.bridgeCore.errorInfo('bridge_offline').text };
     }
     const body = typeof payload === 'string' ? JSON.parse(payload) : payload;
     const res = await call('/review', { method: 'POST', body: { ...body, clientId, tabId: clientId } });
     if (!res.ok) {
       const info = window.__domReview.bridgeCore.failureInfo(res);
       if (!res.reachable && options.reconnectOnError !== false) reconnectSoon();
-      return { ok: false, queued: false, status, code: info.code, error: info.text };
+      return { ok: false, status, code: info.code, error: info.text };
     }
-    return { ok: true, queued: Boolean(res.data?.queued), queueDepth: res.data?.queueDepth || 0 };
+    return { ok: true, turnId: res.data?.turnId || null, sessionId: res.data?.sessionId || null };
   }
 
   async function cancel() {

@@ -114,11 +114,15 @@
             </button>
           </div>
           <input id="image-file-input" type="file" accept="image/*" multiple hidden>
-          <button type="submit" class="send-btn" id="send-btn" title="发送" aria-label="发送" disabled>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M8 3.2V12.8M8 3.2L4.4 6.8M8 3.2L11.6 6.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
+          <div class="composer__send-group">
+            <!-- 仅在有未决审批/提问或工具运行中时显示；不阻塞发送 -->
+            <button type="button" class="send-btn dt-send-btn--stop" id="cancel-btn" title="取消当前任务" aria-label="取消当前任务" hidden>取消</button>
+            <button type="submit" class="send-btn" id="send-btn" title="发送" aria-label="发送" disabled>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M8 3.2V12.8M8 3.2L4.4 6.8M8 3.2L11.6 6.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
     </form>

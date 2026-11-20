@@ -2,8 +2,12 @@
  * DevTailor — conversation reducer
  *
  * Turns bridge SSE events into display messages in a message store plus a small `meta`
- * record (session id/title, processing flag, auth state, queue depth). The side panel is
- * the only chat surface.
+ * record (session id/title, auth state). The side panel is the only chat surface.
+ *
+ * Chat-style model: sending is fire-and-forget; there is no "processing" lock, no queue, and no
+ * required `done` event. Each assistant reply is its own bubble (keyed by displayMessage.id); the
+ * live stream is closed by the next user message, a new reply id, a tool/approval card, an error
+ * or a canceled tool_status. A legacy `done` event is still accepted as a close signal.
  *
  * `store` is any object shaped like content/modules/message-store.js:
  *   append / update(id, patch|fn) / find / findIndex / findLast / filter / remove /
@@ -31,9 +35,7 @@
       cwd: null,
       origin: null,
       isTemporary: false,
-      processing: false,
       authRequired: false,
-      queueDepth: 0,
     };
   }
 
@@ -52,7 +54,6 @@
 
     const meta = initialMeta();
     let activeStreamId = null;
-    let activeLoadingId = null;
     let counter = 0;
     let metaDirty = false;
 
@@ -70,24 +71,10 @@
 
     // ---------------------------------------------------------------- loading / stream
 
-    function startLoading(statusText) {
-      if (activeLoadingId) {
-        if (statusText) store.update(activeLoadingId, { statusText });
-        return;
-      }
-      const id = uid('loading');
-      activeLoadingId = id;
-      store.append({ id, role: 'assistant', type: 'loading', content: '', statusText: statusText || '…', timestamp: now() });
-      onChange('append');
-    }
+    // Legacy no-op kept for callers: the loading placeholder no longer exists.
+    function removeLoading() { return false; }
 
-    function removeLoading() {
-      if (!activeLoadingId) return false;
-      const removed = store.remove(activeLoadingId);
-      activeLoadingId = null;
-      return removed;
-    }
-
+    /** Close the live stream bubble (it stays in the transcript; it just stops being "streaming"). */
     function endStream() {
       activeStreamId = null;
       removeLoading();
@@ -145,7 +132,7 @@
 
     function handleApprovalRequest(ev) {
       if (!ev.approvalId) return;
-      removeLoading();
+      endStream();
       const id = core.approvalMessageId(ev.approvalId);
       if (store.find((m) => m.id === id)) updateApproval(id, { type: 'request', ev });
       else store.append(core.createApproval(ev, { observing: false, now: now() }));
@@ -197,6 +184,7 @@
     }
 
     function addUserMessage({ content, images = [], image = null, marks = [] }) {
+      endStream(); // a new user message closes the previous reply bubble
       const msg = {
         id: uid('user'),
         role: 'user',
@@ -217,13 +205,12 @@
       const incoming = ev.displayMessage;
       if (!incoming || incoming.role !== 'user' || !incoming.id) return;
       if (!isCurrentSessionEvent(ev)) return;
+      endStream();
       if (!store.find((m) => m.id === incoming.id)) {
         const optimistic = store.findLast((m) => m.role === 'user' && m.optimistic && matchesOptimistic(m, incoming));
         if (optimistic) store.update(optimistic.id, (m) => { Object.assign(m, incoming, { optimistic: false }); });
         else store.append({ ...incoming, optimistic: false });
       }
-      meta.processing = Boolean(ev.isProcessing);
-      touchMeta();
       onChange('user');
     }
 
@@ -275,7 +262,6 @@
         meta.sessionId = null;
         meta.title = null;
       }
-      meta.processing = Boolean(body.isProcessing);
       touchMeta();
       emitMeta();
       if (Array.isArray(body.messages)) onChange('history');
@@ -283,13 +269,11 @@
 
     function resetTranscriptState() {
       activeStreamId = null;
-      activeLoadingId = null;
       store.replaceAll([]);
     }
 
     function reset() {
       resetTranscriptState();
-      meta.processing = false;
       touchMeta();
       emitMeta();
       onChange('reset');
@@ -301,13 +285,18 @@
       switch (ev.type) {
         case 'stream':
           if (!isCurrentSessionEvent(ev)) return true;
-          if (ev.isProcessing === true) { meta.processing = true; touchMeta(); }
-          if (ev.displayMessage?.id && ev.displayMessage.type === 'stream') {
-            const incoming = ev.displayMessage;
+          if (ev.displayMessage?.id && ev.displayMessage.role !== 'user') {
+            // Every reply is its own bubble keyed by displayMessage.id. A new id closes the previous
+            // stream; the same id (cumulative snapshots) only ever grows the existing bubble.
+            const incoming = { ...ev.displayMessage, type: ev.displayMessage.type || 'stream' };
             removeLoading();
+            if (activeStreamId && activeStreamId !== incoming.id) endStream();
+            const text = typeof incoming.content === 'string' ? incoming.content : '';
+            incoming.content = text;
             const existing = store.find((m) => m.id === incoming.id);
-            if (!existing) store.append({ ...incoming });
-            else if (incoming.content.length > existing.content.length) store.update(incoming.id, incoming);
+            if (!existing) store.append(incoming);
+            else if (text.length > String(existing.content || '').length) store.update(incoming.id, incoming);
+            if (incoming.type === 'stream') activeStreamId = incoming.id;
             onChange('stream');
           } else {
             appendStream(ev.delta || '');
@@ -315,7 +304,7 @@
           return true;
         case 'tool_status':
           if (!isCurrentSessionEvent(ev)) return true;
-          if (ev.toolStatus === 'canceled') endStream();
+          if (ev.toolStatus === 'canceled' || ev.toolName) endStream(); // a tool call card closes the reply bubble
           onChange('tool');
           // 新形态（带 toolName 的 running/success/error/timeout）额外交给侧边栏的极简状态条；
           // 旧形态（canceled，无 toolName）保持原行为：只 endStream()、不往状态条上抛。
@@ -333,7 +322,6 @@
           } else {
             if (DONE_NOTICES[ev.reason]) addNotice(DONE_NOTICES[ev.reason], 'warn');
           }
-          meta.processing = false;
           meta.authRequired = false;
           touchMeta();
           onChange('done');
@@ -347,7 +335,6 @@
           const info = core.errorEventInfo(ev);
           if (ev.code === 'auth_required') meta.authRequired = true;
           addNotice(info.text, 'error', { code: info.code });
-          meta.processing = false;
           touchMeta();
           onChange('error');
           onError(ev, info);
@@ -378,20 +365,16 @@
           resetTranscriptState();
           meta.sessionId = ev.sessionId || null;
           meta.title = null;
-          meta.processing = false;
           meta.authRequired = false;
           if (ev.reason && ev.reason !== 'user_requested') addNotice('会话已重建，可以继续发送消息。', 'info');
           touchMeta();
           onChange('reset');
           return true;
-        case 'queue_status':
-          meta.queueDepth = ev.queueDepth || 0;
-          touchMeta();
+        case 'queue_status': // legacy: the server no longer queues; ignore
           return true;
         case 'connected':
           if (ev.activeSessionId && !meta.sessionId) meta.sessionId = ev.activeSessionId;
           if (ev.activeSessionTitle && ev.activeSessionId === meta.sessionId && !meta.title) meta.title = ev.activeSessionTitle;
-          if (typeof ev.isProcessing === 'boolean') meta.processing = ev.isProcessing;
           touchMeta();
           return true;
         default:
@@ -410,7 +393,6 @@
     return {
       meta,
       handle,
-      startLoading,
       removeLoading,
       endStream,
       addNotice,

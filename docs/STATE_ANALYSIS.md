@@ -59,8 +59,9 @@
 ### 7. 队列管理增强
 
 - Review 请求队列由 Bridge 持有；前端发送不再维护待发送消息队列。
-- Bridge 对每个 client 设置等待队列上限，超过上限返回 HTTP 429 和结构化 `{ ok: false, queueDepth, maxDepth }`，避免异常重复发送无限堆积。
-- 运行期通过 `queue_status` SSE 事件同步后端队列深度和处理状态。
+- 发送即完成：`POST /review` 立即返回 202（`{ok,turnId,sessionId}`），不再有排队深度、429 队列满、`queue_status` 事件，也没有 `isProcessing`/processing 锁；`done` 事件不再发送（旧 `done` 若到达仍当作流式气泡收尾）。
+- 流式气泡无 `done` 收尾：下一条用户消息、新的 `displayMessage.id`、工具/审批/提问卡、`error`、`tool_status canceled` 触发 `endStream()`，所以不会永远「流式中」。
+- 标记时机：2xx 清除，失败恢复；503 `no_claude_instance` 作为失败提示（标记恢复）。
 - 前端仍可在连接断开时依靠 SSE/HTTP 恢复探测重连，但不要恢复旧的前端待发送队列。
 
 ### 8. Runtime 上下文轻量压缩

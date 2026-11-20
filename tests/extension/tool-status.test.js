@@ -338,6 +338,24 @@ test('sidepanel.js wires the new tool_status shape and clears on done / disconne
   assert.match(js, /kind === 'reset'\) toolStatus\.clear\(\)/);
 });
 
+test('sidepanel.js has no processing lock: send never disables for a running turn, cancel is a separate conditional button', () => {
+  const js = read('sidepanel/sidepanel.js');
+  const html = read('sidepanel/sidepanel.html');
+  assert.doesNotMatch(js, /requestInFlight|stopInFlight|meta\.processing|startLoading|queue_status|review_queue_full/);
+  assert.doesNotMatch(js, /取消中…'\s*:\s*'取消'[\s\S]{0,40}sendBtn/);
+  // handleSend no longer redirects to handleStop while a turn runs
+  const handleSend = /async function handleSend\(\) \{[\s\S]*?\n  \}\n/.exec(js);
+  assert.ok(handleSend);
+  assert.doesNotMatch(handleSend[0], /handleStop/);
+  // the send button is only disabled by the in-flight POST or by an empty composer
+  assert.match(js, /sendBtn\.disabled = sendInProgress \|\| !\(connected && \(hasText \|\| hasImages \|\| hasPageContext\)\)/);
+  // separate cancel button, hidden by default
+  assert.match(html, /id="cancel-btn"[^>]*\bhidden\b/);
+  assert.match(js, /cancelBtn\.hidden = !cancellable/);
+  // nothing_to_cancel is not an error path
+  assert.match(js, /res\.data\.canceled === false/);
+});
+
 test('every id queried by sidepanel.js with $() exists in sidepanel.html', () => {
   const html = read('sidepanel/sidepanel.html');
   const js = read('sidepanel/sidepanel.js');

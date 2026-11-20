@@ -18,6 +18,7 @@
   const composer = $('#composer');
   const promptEl = $('#prompt');
   const sendBtn = $('#send-btn');
+  const cancelBtn = $('#cancel-btn');
   const attachBtn = $('#btn-attach');
   const imageFileInput = $('#image-file-input');
   const screenshotPreview = $('#screenshot-preview');
@@ -57,9 +58,10 @@
   let clientId = null;
   let bridgeReachable = false;
   let sseConnected = false;
+  // 发送即完成（像聊天）：没有「处理中」锁。sendInProgress 只在 POST /review 在途的几十毫秒内
+  // 防重复提交（连按 Enter / 双击），请求一返回立即放开，可以连续发多条。
   let sendInProgress = false;
-  let stopInFlight = false;
-  let requestInFlight = false;
+  let cancelInFlight = false;
   let pollTimer = null;
   let imageManager = null;
   let syncedSessionKey = null;
@@ -120,7 +122,7 @@
     await markTray.follow(tabId);
   }
 
-  /** The turn that carried the marks ended: drop them (done) or make them sendable again (error). */
+  /** Sent marks are settled: drop them (accepted) or make them sendable again (error; legacy path). */
   function settleSentMarks(outcome) {
     const { clear, unsend } = sentTracker.settle(outcome);
     if (clear) markTray.controller.clearSent();
@@ -336,10 +338,6 @@
     sessionTitleEl.title = metaNow.sessionId ? `${metaNow.title || '新会话'}\n${metaNow.sessionId}` : '';
     renderPromptCtx(metaNow);
 
-    if (metaNow.processing !== requestInFlight) {
-      requestInFlight = metaNow.processing;
-      if (!requestInFlight) stopInFlight = false;
-    }
     renderStatusBanner();
     updateSendState();
   }
@@ -355,19 +353,21 @@
     const hasPageContext = markTray.hasContent();
     const connected = Boolean(clientId);
 
-    if (sendInProgress) {
-      sendBtn.disabled = true;
-      sendBtn.textContent = '发送中';
-      sendBtn.classList.remove('dt-send-btn--stop');
-    } else if (requestInFlight) {
-      sendBtn.disabled = stopInFlight;
-      sendBtn.textContent = stopInFlight ? '取消中…' : '取消';
-      sendBtn.classList.toggle('dt-send-btn--stop', true);
-    } else {
-      sendBtn.disabled = !(connected && (hasText || hasImages || hasPageContext));
-      sendBtn.textContent = '发送';
-      sendBtn.classList.remove('dt-send-btn--stop');
-    }
+    sendBtn.disabled = sendInProgress || !(connected && (hasText || hasImages || hasPageContext));
+
+    // 取消按钮不参与发送：只在「有可取消的东西」时出现（未决审批/提问卡，或工具正在运行）。
+    const cancellable = connected && hasCancellable();
+    cancelBtn.hidden = !cancellable;
+    cancelBtn.disabled = cancelInFlight;
+    cancelBtn.textContent = cancelInFlight ? '取消中…' : '取消';
+  }
+
+  function hasCancellable() {
+    if (toolStatus.getState().state === 'running') return true;
+    return messageStore.filter((m) => (
+      (m.type === 'approval' && !m.observing && !window.__domReview.bridgeCore.isApprovalFinal(m))
+      || (m.type === 'question' && m.status === 'pending' && !m.observing)
+    )).length > 0;
   }
 
   function escapeHtml(str) {
@@ -604,11 +604,18 @@
       syncedSessionKey = null;
       toolStatus.clear();
     }
-    if (conversation.handle(msg)) return;
+    try {
+      if (conversation.handle(msg)) return;
+      projectSseMessage(msg);
+    } finally {
+      updateSendState(); // cancel button follows pending approvals / questions / running tools
+    }
+  }
 
+  function projectSseMessage(msg) {
     switch (msg.type) {
       case 'question_request': {
-        conversation.removeLoading();
+        conversation.endStream();
         const questions = Array.isArray(msg.questions) ? msg.questions : [];
         const existing = messageStore.find(m => m.type === 'question' && m.questionId === msg.questionId);
         if (existing) {
@@ -750,8 +757,9 @@
       tabId: clientId,
     };
 
-    // Mark optimistically BEFORE the request: the turn's `done` may beat the HTTP response, and the
-    // marks must never be picked up by the next BUILD. Screenshots are consumed only on success.
+    // Mark optimistically BEFORE the request so the marks are never picked up by a concurrent BUILD.
+    // 2xx from POST /review = the message is accepted: marks are cleared right away (no `done` wait).
+    // Failure (non-2xx / network): roll back and make them sendable again. Screenshots are consumed on success.
     if (markIds.length) {
       sentTracker.begin(markIds);
       await markTray.controller.markSent(markIds, false);
@@ -773,17 +781,14 @@
       designDocs: (designDocs.getState().docs || []).filter((d) => d.enabled).length,
     };
     renderPromptCtx(meta);
-    // Keep the sent marks visible ("已发送") until the turn finishes; screenshots are consumed now.
+    // Accepted: screenshots are consumed and the sent marks are cleared now (the user bubble keeps a copy).
     if (pageImages.length) await markTray.controller.markSent([], true);
+    settleSentMarks('done');
     return { ok: true, markCount: markIds.length, imageCount: allImages.length, marks: sentMarks, images: allImages };
   }
 
   async function handleSend() {
     if (sendInProgress) return;
-    if (requestInFlight) {
-      handleStop();
-      return;
-    }
 
     const text = promptEl.value.trim();
     const pendingImages = imageManager?.getImages?.() || [];
@@ -819,9 +824,6 @@
         imageManager?.clear?.();
         promptEl.value = '';
         promptEl.style.height = 'auto';
-        meta.processing = true;
-        conversation.startLoading();
-        applyMeta(meta);
       }
     } finally {
       sendInProgress = false;
@@ -830,29 +832,32 @@
     }
   }
 
+  /** 取消当前任务（不阻塞发送）。nothing_to_cancel 不是错误：只给个轻提示。 */
   async function handleStop() {
-    if (stopInFlight || !clientId) return;
+    if (cancelInFlight || !clientId) return;
 
-    stopInFlight = true;
+    cancelInFlight = true;
     updateSendState();
-    showHint('正在取消…', 'info');
-
-    const res = await call('/cancel', { method: 'POST', body: { clientId, tabId: clientId } });
-    if (!res.ok) {
-      stopInFlight = false;
-      showHint(core.failureInfo(res).text);
-      updateSendState();
-      return;
-    }
-    // Stay in "取消中…" until the bridge's done(cancelled) arrives (it forces one after ~5s).
-    if (!res.data.canceled) {
-      stopInFlight = false;
-      meta.processing = false;
+    try {
+      const res = await call('/cancel', { method: 'POST', body: { clientId, tabId: clientId } });
+      if (!res.ok) {
+        showHint(core.failureInfo(res).text);
+        return;
+      }
       conversation.endStream();
-      applyMeta(meta);
-      showHint('当前没有正在执行的任务');
+      toolStatus.clear();
+      if (res.data && res.data.canceled === false) {
+        showHint('当前没有正在执行的任务', 'info');
+      } else {
+        showHint('已取消', 'info');
+      }
+    } finally {
+      cancelInFlight = false;
+      updateSendState();
     }
   }
+
+  cancelBtn.addEventListener('click', handleStop);
 
   /* ── Design spec (DESIGN.md) ──────────────────── */
   const designDocs = window.__sidepanelDesignDocs.create({
@@ -872,10 +877,6 @@
   async function startNewSession() {
     if (!clientId) {
       showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
-      return;
-    }
-    if (meta.processing) {
-      showHint('当前正在回复，请等完成或取消后再新建会话', 'info');
       return;
     }
     newSessionBtn.disabled = true;

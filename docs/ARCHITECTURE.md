@@ -534,14 +534,14 @@ function persistNow() {
 **状态**：
 - 前端不再维护待发送消息队列、重试计数或退避定时器。
 - active tab 连续调用 `/review` 时，Bridge 接收请求并进入后端 `Map<clientId, PendingReview[]>` 队列。
-- `/review` 返回 `queued`、`queueDepth`、`isProcessing`，运行期 SSE 事件附带 `isProcessing`、`processingSessionId`、`activeSessionId`。
+- 发送即完成（Hub 新契约）：`/review` 立即返回 `202 {ok,turnId,sessionId}`，没有 `queued/queueDepth/isProcessing`，没有 429；无在线 Claude → 503 `no_claude_instance`。SSE 不再发 `done`/`queue_status`，也不再附带 `isProcessing`。
 - `chat-send.js` 的 `flushQueue()` / `clearQueue()` 仅保留兼容空实现。
 
 **当前要点**：
-1. **权威状态在后端**：`processing`、`processingDisplaySessions` 和 `queues` 由 Bridge 维护。
+1. **没有「处理中」状态**：扩展不维护 processing 锁，发送按钮只受输入内容、连接状态和 `/review` 在途窗口影响。
 2. **前端只提交当前输入**：未连接或未接管时提示用户，不缓存消息。
-3. **连续发送可排队**：同一 active client 的第二条及之后 `/review` 会返回 `queued: true`。
-4. **停止会清空后端队列**：`/cancel` 清理当前 client 的 pending queue，并取消当前 turn。
+3. **连续发送**：可以连续发多条，每条都是独立的 202；每条 reply 是独立 assistant 气泡（按 `displayMessage.id`）。
+4. **取消**：`/cancel` 取消当前 turn；返回 `canceled:false`（`nothing_to_cancel`）不是错误。侧边栏的取消按钮仅在有未决审批/提问或工具运行时出现，不阻塞发送。
 
 ---
 
@@ -716,7 +716,7 @@ SSE(每个标签页一条, 经 service worker) ─┬─▶ 页内 ws-client（�
                         侧边栏（keyed 增量渲染, 不限条数；页内不再有聊天）
 ```
 
-- **一份归约器（只有侧边栏使用）**：把 SSE 事件写进注入的消息 store（`message-store.js` 同形接口），并维护 `meta`（`sessionId/title/mode/processing/attach`）；界面只订阅 store/meta 变化渲染。纯逻辑和归约器都有 Node 测试（`tests/extension/`，`npm run test:ext`）。
+- **一份归约器（只有侧边栏使用）**：把 SSE 事件写进注入的消息 store（`message-store.js` 同形接口），并维护 `meta`（`sessionId/title/cwd/origin/authRequired` 等；没有 processing）；界面只订阅 store/meta 变化渲染。纯逻辑和归约器都有 Node 测试（`tests/extension/`，`npm run test:ext`）。
 - **会话来源**：会话列表 `GET /sessions`，当前会话 `GET /sessions/active`（Bridge 持久化的展示会话与消息，没有独立的 transcript 回放接口）；刷新/重连后按 `active_session_sync` + `/sessions/active` 重同步（见 `docs/HANDOFF.md`「Transport」）。
 - **审批**：`approval_request` / `approval_pending` / `approval_resolved` 进同一个状态机，`POST /approval-decision` 回传。Claude Code 的权限转发（permission relay）是唯一生产调用方：`permission_request` → 审批卡（没有选项列表时用默认「允许 / 拒绝」）→ `approved`/`rejected` → `notifications/claude/channel/permission`；无客户端/超时/取消不发裁决，交给终端对话框。`QuestionRouter` 仍只保留传输层。
 - **侧边栏不开自己的 SSE**：它订阅 service worker 对所有扩展页的广播，所以会收到每个已连接标签页的流，靠 `tabId === 接管标签` 过滤去重。
@@ -738,6 +738,6 @@ SSE(每个标签页一条, 经 service worker) ─┬─▶ 页内 ws-client（�
 - 侧边栏 → 内容脚本（`chrome.tabs.sendMessage`）：`DT_GET_MARKS`（打开/切换标签时拉取）、`DT_REMOVE_MARK`、`DT_CLEAR_MARKS`、`DT_LOCATE_MARK`、`DT_REMOVE_SCREENSHOT`、`DT_GET_SCREENSHOT_THUMBS`、`DT_BUILD_PAYLOAD`（返回 `{pageUrl, items, screenshots, markIds}`，复用 `prompt-builder.js` 的 `buildPayload`）、`DT_MARKS_SENT/UNSENT/CLEAR_SENT`。托盘从不修改自己的副本，只应用页面回的快照。
 - 工具条 → service worker：`OPEN_SIDE_PANEL {focusInput}`（service worker 调 `chrome.sidePanel.open({tabId})`）；侧边栏加载后发 `DT_SIDEPANEL_READY` 询问是否需要聚焦输入框。
 
-发送：侧边栏 `executeSend` 先 `DT_BUILD_PAYLOAD`，再 `POST /review {pageUrl, userIntent, items, screenshots}`。发送后标记标为“已发送”（保留显示，不会进入下一次 payload），本轮 `done` 后清除，`error` 后恢复为未发送。用户消息气泡带 `marks`（编号 chip + 简述 + 截图缩略图）；历史回放里 `marksCore.parseDevTailorPrompt` 识别 prompt-builder 的 Markdown（`## Current Page` / `## User Intent` / `### N \`selector\``）并紧凑渲染，识别失败显示原文。
+发送：侧边栏 `executeSend` 先 `DT_BUILD_PAYLOAD`，再 `POST /review {pageUrl, userIntent, items, screenshots}`。发送前标记乐观标为“已发送”（不会进入并发 BUILD），`POST /review` 返回 2xx 即清除，非 2xx/网络错误则恢复为未发送（不再等 `done`）。用户消息气泡带 `marks`（编号 chip + 简述 + 截图缩略图）；历史回放里 `marksCore.parseDevTailorPrompt` 识别 prompt-builder 的 Markdown（`## Current Page` / `## User Intent` / `### N \`selector\``）并紧凑渲染，识别失败显示原文。
 
 取消接管：桥接没有显式释放接口，工具条断开本标签的事件流，桥接约 3 秒后释放；侧边栏打开时它自己的事件流也挂着同一个 clientId，释放可能不生效，工具条会提示“关闭侧边栏后可取消接管”。
