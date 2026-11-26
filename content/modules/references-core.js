@@ -389,8 +389,10 @@
   };
 
   if (typeof module === 'object' && module.exports) module.exports = api;
-  if (typeof window !== 'undefined') {
-    window.__domReview = window.__domReview || {};
-    window.__domReview.referencesCore = api;
+  // Register on `self` first: the service worker imports this module too and has no `window`.
+  const root = typeof self !== 'undefined' ? self : (typeof window !== 'undefined' ? window : null);
+  if (root) {
+    root.__domReview = root.__domReview || {};
+    root.__domReview.referencesCore = api;
   }
 })();

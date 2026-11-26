@@ -318,3 +318,15 @@ test('resolveSentReferences: accepted only when referencesAccepted equals the se
   assert.deepStrictEqual(core.resolveSentReferences({ ok: true, data: {} }, []),
     { keep: true, accepted: false, reason: 'unsupported', count: 0 });
 });
+
+test('registers on self, so the service worker (no window) gets referencesCore', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../../content/modules/references-core.js'), 'utf8');
+  // The SW context: `self` exists, `window` and `module` do not. The message handler reads
+  // referencesCore.MSG at guard time, so a missing registration throws on every message.
+  const sandbox = { self: {} };
+  vm.runInNewContext(source, sandbox);
+  assert.ok(sandbox.self.__domReview?.referencesCore?.MSG?.ADD, 'self.__domReview.referencesCore must be registered');
+});
