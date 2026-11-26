@@ -19,6 +19,9 @@
     let references = [];
     let collapsed = false;
     let editingId = null;
+    // The initial synchronous render() runs before `create()` returns, when the caller's
+    // `const referencesTray` is still in its TDZ — a callback that touches it would throw.
+    let ready = false;
 
     function applyList(list) {
       const next = Array.isArray(list) ? list : [];
@@ -124,7 +127,7 @@
       const empty = references.length === 0;
       els.root.hidden = empty;
       els.clear.hidden = empty;
-      onCountChange?.(references.length);
+      if (ready) onCountChange?.(references.length);
       if (empty) return;
       const capped = references.length >= core.MAX_REFERENCES;
       els.title.textContent = `参考 ${references.length}${capped ? '（已达上限）' : ''}`;
@@ -177,6 +180,7 @@
 
     initEvents();
     render();
+    ready = true;
 
     return {
       applyList,

@@ -70,6 +70,21 @@
   let disconnectedAt = 0;
   let syncSerial = 0;
 
+  /* ── References tray (全局待发送参考元素, owned by the service worker) ── */
+  // Must be created before markTray: markTray's onChange calls updateSendState(), which reads
+  // referencesTray — creating it later would leave that read in the temporal dead zone.
+  const referencesTray = window.__sidepanelReferencesTray.create({
+    els: {
+      root: $('#ref-tray'),
+      toggle: $('#ref-tray-toggle'),
+      title: $('#ref-tray-title'),
+      clear: $('#ref-tray-clear'),
+      body: $('#ref-tray-body'),
+    },
+    send: (message) => runtimeMessage(message),
+    onCountChange: () => updateSendState(),
+  });
+
   /* ── Mark tray (page marks + screenshots of the followed tab) ── */
   const sentTracker = window.__domReview.marksCore.createSentTracker(); // marks carried by in-flight turn(s)
   let reconciling = false;
@@ -88,19 +103,6 @@
       reconcileSentMarks(state);
       updateSendState();
     },
-  });
-
-  /* ── References tray (全局待发送参考元素, owned by the service worker) ── */
-  const referencesTray = window.__sidepanelReferencesTray.create({
-    els: {
-      root: $('#ref-tray'),
-      toggle: $('#ref-tray-toggle'),
-      title: $('#ref-tray-title'),
-      clear: $('#ref-tray-clear'),
-      body: $('#ref-tray-body'),
-    },
-    send: (message) => runtimeMessage(message),
-    onCountChange: () => updateSendState(),
   });
 
   function applyReferences(message) {
