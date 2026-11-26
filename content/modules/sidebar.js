@@ -1,11 +1,11 @@
 /**
  * DevTailor — Page highlights for marks
  *
- * Draws the persistent dashed outline around every marked element and offers the batch actions
- * (undo last, discard all). Mark editing lives in badges.js and the toolbar drawer (toolbar.js);
- * the name `sidebar` is historical.
+ * Draws the persistent dashed outline around every marked element. Mark viewing/editing/deletion
+ * lives in badges.js (in-place note card) and the side panel's mark tray; the name `sidebar` is
+ * historical.
  *
- * Depends on: store (review-store.js), badges (badges.js), hitTest
+ * Depends on: store (review-store.js), hitTest
  * Registers: window.__domReview.sidebar
  */
 (() => {
@@ -102,7 +102,8 @@
   }
 
   function render() {
-    // The toolbar re-renders itself from store changes; nothing to do here.
+    // Kept for historical call sites; highlights are refreshed from content-script on store changes.
+    updatePersistentHighlights();
   }
 
   function updatePersistentHighlights() {
@@ -154,39 +155,10 @@
     });
   }
 
-  function clearMarks() {
-    const { store, badges } = window.__domReview;
-    if (store.getAll().length === 0) return;
-    store.clear();
-    badges.reindex();
-    render();
-    updatePersistentHighlights();
-  }
-
-  function undoLast() {
-    const { store, badges } = window.__domReview;
-    const marks = store.getAll();
-    const last = marks[marks.length - 1];
-    if (!last) return;
-    store.remove(last.id);
-    badges.reindex();
-    render();
-    updatePersistentHighlights();
-  }
-
-  function syncCommentsFromUI() {
-    window.__domReview.badges?.syncSelectedComment?.();
-  }
-
   // Wire scroll/resize to update highlight positions
   function startListening() {
     window.addEventListener('scroll', updateHighlightPositions, true);
     window.addEventListener('resize', updateHighlightPositions);
-  }
-
-  function stopListening() {
-    window.removeEventListener('scroll', updateHighlightPositions, true);
-    window.removeEventListener('resize', updateHighlightPositions);
   }
 
   startListening();
@@ -194,9 +166,6 @@
   window.__domReview.sidebar = {
     render,
     updatePersistentHighlights,
-    syncCommentsFromUI,
-    undoLast,
-    discardBatch: clearMarks,
     getMarkCount() {
       return getMarks().length;
     }

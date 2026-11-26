@@ -128,7 +128,6 @@
       --dt-font-size: 13px;
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    .dt-hidden { display: none !important; }
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--dt-bg-hover); border-radius: 3px; }

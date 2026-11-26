@@ -6,7 +6,7 @@
 
 DevTailor 是 **浏览器页面 ↔ Claude Code 的前端开发桥接工具**。
 
-**Chrome 扩展**：在真实页面里提供页内“标记工具条”（选取/标记/搜索/截图/接管状态）、元素标记、截图、元素库、browser tool 调用；聊天、会话、审批、模式、计划、用量只在侧边栏。
+**Chrome 扩展**：在真实页面里提供页内“标记工具条”（选取 `V` / 截图 `S` / 接管状态点 / 打开侧边栏，可拖动、贴左悬浮）、元素标记、截图、元素库数据（供 browser tool 使用）、browser tool 调用；标记的查看/编辑/删除和清空、聊天、会话、审批、模式、计划、用量只在侧边栏的标记托盘与聊天里。
 
 核心目标：用户在页面上指出问题，Agent 获得 DOM、截图、标记元素、控制台信息和浏览器操作能力，完成“理解页面 → 修改代码 → 回到页面验证”的闭环。
 
@@ -15,11 +15,13 @@ DevTailor 是 **浏览器页面 ↔ Claude Code 的前端开发桥接工具**。
 协议依据见 `docs/CLAUDE_CHANNEL_PROTOCOL.md`（以官方文档为准）。
 
 - `/cancel`（扩展侧约定）：返回 `{ok:true,canceled:true}` 或 `{ok:true,canceled:false,reason:'nothing_to_cancel'}`（后者不是错误，侧边栏只提示「当前没有正在执行的任务」）；不再发 `done(cancelled)`，仍发 `tool_status canceled`。
-- **发送即完成（像聊天，Hub 侧新契约）**：`POST /review` 立即返回 `202 {ok:true,turnId,sessionId}`，不再有 `queued/queueDepth/isProcessing`、不再有 429 队列满；无在线 Claude 实例 → `503 {ok:false,error:'no_claude_instance',message}`（扩展用 `bridge-core` 的 `errorInfo('no_claude_instance')` 提示，`parseProxyResponse` 把形如 `error:'snake_case'` 的值当作 code），SSE client 未连接 → 409。Hub 不再发 `done`、`queue_status`，SSE/health/sessions 不再带 `isProcessing/processingSessionId`。每条 reply 是一条独立 assistant 消息（SSE `stream` 带 `displayMessage.id`，每条不同），按 id 渲染成独立气泡。**扩展侧不再有任何「处理中」锁**：不要恢复 `sendInProgress`-until-done / `requestInFlight` / `meta.processing` / 加载点 / 发送按钮变「取消」。
+- **发送即完成（像聊天，Hub 侧新契约）**：`POST /review` 立即返回 `202 {ok:true,turnId,sessionId}`，不再有 `queued/queueDepth/isProcessing`、不再有 429 队列满；无在线 Claude 实例 → `503 {ok:false,error:'no_claude_instance',message}`；选定实例离线 → `503` 且 `code:'instance_offline'`（扩展用 `bridge-core` 显示对应中文提示，`parseProxyResponse` 把形如 `error:'snake_case'` 的值当作 code），SSE client 未连接 → 409。Hub 不再发 `done`、`queue_status`，SSE/health/sessions 不再带 `isProcessing/processingSessionId`。每条 reply 是一条独立 assistant 消息（SSE `stream` 带 `displayMessage.id`，每条不同），按 id 渲染成独立气泡。**扩展侧不再有任何「处理中」锁**：不要恢复 `sendInProgress`-until-done / `requestInFlight` / `meta.processing` / 加载点 / 发送按钮变「取消」。
 
 **通知**：`kind: 'review'`，meta 键 `kind/turn_id/page_url/client_id/has_images/image_count/image_paths`（键只含字母数字下划线，值都是字符串）；`turn_id` 为 12 位十六进制（uuid 去横线截断），避免 Bridge 重启后复用旧 id。content 为 `buildPrompt` 文本 + `## Screenshots` 路径清单。
 
 **图片**：`.devtailor/images/<turn_id>-<n>.<ext>`，单张 ≤ 8MB（超限、非 png/jpeg/webp/gif、非 base64 的跳过并在 content 文本里说明），文件名只含 `[A-Za-z0-9_-]` 并校验解析后路径在目录内。不使用入站 MCP image content。工具返回的截图（`take_visible_screenshot`、`run_actions` 里的截图等 `data:image/...` 字符串）会被替换成短提示，作为 MCP `image` content 返回，并落盘 `shot-<ts>-<n>.<ext>` 备用；一次结果最多返回 8 张。
+
+**参考元素字段（供 Hub 实现）**：`/review` 的 `payload.references` 是可选数组，每项 `{id,url,title,selector,note,styles,html,screenshot?}`（`screenshot` 为 `data:image/(png|jpeg|webp);base64`）。Hub 成功接收后在 2xx JSON body 回 `referencesAccepted: <number>`（必须等于本次条数），扩展据此清掉待发送列表；不回该字段表示旧版本不支持。详见「参考元素（references）」。
 
 **浏览器工具**：`createBrowserToolDefinitions()` 的 19 个工具原样暴露（`parameters` → `inputSchema`），加 `reply` 共 20 个，列表不随运行状态变化。结果统一为文本 JSON `{ok, result|error}`，失败 `isError: true`；`NO_ACTIVE_TAB` 带 `error.hint: '请先在浏览器扩展里点击“接管”当前页面'`。元素库三工具走 `BrowserActionRouter` 的本地 handler（无需接管 tab）。`request_user_assistance` 保持 5 分钟语义（stdio 工具调用默认超时约 28 小时、idle 30 分钟，不需要额外配 `timeout`）。
 
@@ -57,7 +59,7 @@ Claude Code ← notifications/claude/channel/permission {request_id, behavior: '
 - **扩展客户端头（真实 Chrome 实测后补充）**：Chrome 里 service worker 对已授权 host 的 **GET 不带 `Origin`**（和网页 no-cors GET 一样，`scripts/e2e-extension.mjs` 里的 “finding” 断言实测 403 `missing_origin`；POST 才带 Origin）。所以扩展的所有 Bridge 请求在 `service-worker.js` 的 `fetchBridgeUrl` 里统一加 `X-DevTailor-Client: <chrome.runtime.id>`；守卫对「无 Origin 但带合法该头」的请求视为受信（等同扩展 Origin，`/health` 也返回完整路由信息）。安全性依据：网页发自定义头必须先预检，而预检 OPTIONS 带网页 Origin 会被守卫拒绝；`no-cors` 请求不允许带自定义头。带网页 Origin 的请求不会因为带这个头而放行。`DEVTAILOR_EXTENSION_ID` 对该头的值同样生效（注意：其他扩展可以伪造这个头，Origin 则不能；威胁模型是“恶意网页”，不是“恶意扩展”）。不要删除这个头，也不要让 content script 直接 fetch。
 - **CORS**：不再返回 `Access-Control-Allow-Origin: *`；仅当 Origin 通过校验时回显该 Origin 并带 `Vary: Origin`。OPTIONS 预检同样先过守卫。被拒请求不带任何 CORS 头。
 - 被拒请求在 stderr 记一行：`[Guard] <时间> denied <METHOD> <path> reason=<原因> origin=<scheme://host>`，不记录 body/token。
-- `GET /health`：无 Origin（或 Origin 不合法）只返回 `{ ok, protocolVersion }`；带合法扩展 Origin 才额外返回 `projectId/projectName/bridgeInstanceId/agentKey/agentLabel/activeClientId/activeSessionId/agentStatus`。**不再返回 pid、会话标题、agentSessionId。**
+- `GET /health`：无 Origin（或 Origin 不合法）只返回 `{ ok, protocolVersion }`；带合法扩展身份时额外返回 `instances: [{instanceId,name,lastActiveAt}]`、`defaultInstanceId`、active client/session 等运行元数据。扩展不再读取或发送项目身份。**不返回 pid、会话标题、agentSessionId。**
 - `POST /browser-tool` 已删除（它是无审批的 `run_js` 通道）。浏览器动作只能经 `BrowserActionRouter`（扩展 SSE `browser_action` → `POST /browser-action-result`）。
 - **MCP 走 stdio，不经 HTTP 守卫**：MCP 协议在 stdio 上，没有 MCP 的 HTTP 端点，也没有 Bearer 令牌。守卫只保护扩展用的 HTTP/SSE 路由。
 - **唯一例外：`/agent-status`**（Claude Code hook 上报，见「AI 状态（hooks 上报）」）。只有「Origin 为空 + 合法令牌」的 `POST /agent-status` 能过守卫；带任何浏览器 Origin（含 `null`）一律 403，Host 校验与「响应不带 CORS 头」不变，其它方法回 405。不要把这个例外扩展到别的路由。
@@ -109,7 +111,7 @@ Claude Code ← notifications/claude/channel/permission {request_id, behavior: '
 - `chat-images.js`：截图/粘贴图片、待发送缩略图。
 - 侧边栏的纯逻辑、渲染、事件归约器、共享样式、meta 控件绑定这五个模块（`content/modules/` 下的侧边栏专用文件），只由侧边栏使用（页内聊天已删除）。
 
-侧边栏在 `sidepanel.html` 里按序加载这些模块；内容脚本只加载工具条相关模块（`manifest.json` 的 content_scripts 列表）。
+侧边栏在 `sidepanel.html` 里按序加载这些模块。`manifest.json` 不注册静态 `content_scripts`；工具条模块仅在用户显式接管页面后由 service worker 按固定顺序注入。
 
 ## Transport
 
@@ -143,17 +145,18 @@ Claude Code ← notifications/claude/channel/permission {request_id, behavior: '
 - 手动或动态重注入 content scripts 前必须先调用旧 `window.__domReview.wsClient.disconnect()`（若存在），避免旧 background SSE proxy 残留，导致 Bridge 继续把 browser action 指令路由到旧 tab 连接。
 - background 访问 Bridge 时应支持 `localhost:34781` 和 `127.0.0.1:34781` fallback；SSE 成功连接后，`review`、session、Browser action result、元素库等 HTTP API 应复用同一个当前可用 Bridge URL。fallback 初始连接要有短超时并优先尝试上次成功地址，避免页面刷新后卡在不可用 loopback hostname 上。
 
-## 项目身份与 Tab 接管
+## 全局按需注入、实例选择与 Tab 接管
 
 规则：
 
-- 会话展示数据按项目和 runtime key 隔离，不按端口隔离。
-- `clientId = tab_{tabId}` 只用于 live routing 和 browser action 指令路由。
-- 浏览器 tab 是可替换的调试页面，不是会话所有者。
-- 新 tab 连接后默认只是在线，必须显式点击「接管」才会覆盖旧激活 tab。
-- 刷新当前已接管 tab 不应丢失 active ownership。
-- 已连接 tab 都可以发送 chat review；接管只决定 browser actions / browser tools 作用到哪个 tab。
-- Browser actions 只能作用于当前项目已接管 tab。
+- 没有网址白名单，也没有静态 content script。任意普通 http/https 页面只有在 popup、侧边栏或快捷键显式接管后才注入；Chrome 内置页和扩展商店明确提示不可注入。
+- `chrome.storage.session` 保存曾注入 tab 与当前 active tab（另有全局 `dt_references`）。导航完成后只给曾注入 tab 补注入；仅当前 active tab 自动重新 `/activate`，其他 tab 不得抢回；自动重注入不能把非归属页变成接管页。
+- tab 关闭时清理 session 状态；注入与状态 mutation 都要去重/串行，保证 MV3 worker 回收后仍可恢复。
+- MAIN world 控制台捕获从按需注入时开始；注入前日志丢失是已知限制。
+- `clientId = tab_{tabId}` 只用于 live routing 和 browser action 指令路由。浏览器 tab 是可替换的调试页面，不是会话所有者。
+- 侧边栏实例下拉第一项为“自动（默认实例名）”，自动模式不发实例头；具体选择持久化到 `chrome.storage.local`，所有 HTTP/SSE 请求由 worker 统一附加 `X-DevTailor-Instance`。
+- worker 的第一条 Hub 请求必须等待实例选择从 storage 恢复。所选实例离线时保留选择，健康连接仍视为在线，仅 `/review` 的 `instance_offline` 显示“所选 Claude Code 实例已离线，请在侧边栏重新选择”。
+- Browser actions 只能作用于当前已接管 tab。
 
 ## 会话与上下文规则
 
@@ -181,7 +184,7 @@ Bridge 拥有展示会话：
 - stream/tool_status/error 等运行事件必须携带 display `sessionId`；前端只接收当前会话的运行事件，避免新建/切换后旧 turn 回流污染当前 UI。
 - 用户主动新建会话的 `session_reset` 只清空当前展示，不插入“会话已重建”提示；Bridge 重启等异常 reset 才展示提示。
 - 会话标题优先采用 agent runtime 的 `session_info` 更新，Bridge 持久化后通过 SSE `session_info` 同步给前端；首条用户消息截断标题只是 fallback。
-- 前端发送只依赖 Bridge 连接状态，不依赖当前 tab 是否已接管；未接管时仍可发送消息，browser tools 如需页面操作会继续路由到当前已接管 tab，若没有 active tab 则返回结构化错误。
+- 前端发送只依赖 Bridge 连接状态，不依赖当前 tab 是否已接管；未接管时仍可发送消息（标记不会随消息发送，用 R 添加为参考），browser tools 如需页面操作会继续路由到当前已接管 tab，若没有 active tab 则返回结构化错误。
 
 前端 `chrome.storage.local` 只适合缓存草稿、待发送图片、控件状态等轻量 UI 状态。不要让它成为聊天记录的权威来源，也不要把它当作 Agent 上下文。
 
@@ -256,17 +259,11 @@ Bridge 拥有展示会话：
 
 元素库是“用户和 Agent 共管的可复用页面目标”，不是标记列表。
 
-入口：
+**页内工具条与侧边栏都没有元素库入口**（原「存元素」「打开元素库」按钮和 `element-saver.js` 已删除）。元素库只通过 browser tool 使用：
 
-- 顶部「存元素」按钮打开元素库卡片。
-- 卡片内可以查看、搜索、刷新、删除项目元素目标。
-- 点击「选择元素」进入一次性元素保存流程。
-
-数据：
-
-- 存储在 Bridge 的 `element_targets` 表。
-- 前端通过 `/element-targets` GET/POST/DELETE 管理；元素库卡片展示项目全量。
-- Browser tools 可通过 `get_element_targets` 获取项目全量，通过 `targetId` / `targetName` 使用。
+- 存储在 Bridge 的 `element_targets` 表；`/element-targets` GET/POST/DELETE 由 `content/modules/element-targets.js` 提供。
+- Browser tools 可通过 `get_element_targets` 获取项目全量，通过 `targetId` / `targetName` 使用；`save_element_target` / `delete_element_target` 走同一条本地链路（`content/modules/browser-actions.js`）。
+- 不要重新引入页面内的元素库浏览器 UI。
 
 定位策略：
 
@@ -319,12 +316,52 @@ Bridge 拥有展示会话：
 
 规则：
 
-- 标记后自动打开描述卡片并聚焦。
-- 关闭/折叠/流程推进时保存描述，并恢复选择下一个元素。
+- 标记后自动打开描述卡片并聚焦（就地出现在元素旁，`badges.js`）。
+- 关闭/折叠/流程推进时保存描述，并恢复选择下一个元素；Esc 丢弃备注。
 - 恢复时短暂 suppress click，避免关闭卡片那一下被复用为新标记。
 - 按住 Alt 时进入 pass-through：隐藏 hover overlay，不拦截页面点击，允许操作页面弹窗/输入框；松开 Alt 后恢复选择。
+- 悬停高亮框和标签用 mark 颜色；有 padding/margin 时叠加绿色 padding 盒与橙色 margin 盒（VisBug 风格），覆盖层 `pointer-events: none`，自身 UI 永不可选中。
+- 点击页面上的编号徽标可再次编辑备注或删除该标记。
+- 备注输入尊重输入法组合（`event.isComposing`）；Enter 保存、Esc 取消。
 - Chat 输入、图片预览等 chat-only 状态不能取消页面标记流程。
 - 发送前必须同步打开中的标记描述，避免用户刚输入的说明丢失。
+
+## 页内工具条与侧边栏标记托盘
+
+页内工具条（`content/modules/toolbar.js` + 纯逻辑 `toolbar-core.js`）有五个按钮：选取（`V`）、参考元素（`R`）、截图（`S`）、接管状态点、打开侧边栏。它是贴左悬浮、可水平/垂直拖动的紧凑圆角竖条，位置按站点持久化在 `chrome.storage.local`（`dt_toolbar:<origin>`），旧存储值（只有 `top`、或还带已废弃的 `open`）继续兼容。
+
+- 原整页抽屉/标记列表、展开收起、搜索（含 `/` 快捷键）已从工具条删除；标记的查看、编辑备注、删除、清空全部、点击定位都迁到侧边栏标记托盘（`sidepanel/mark-tray.js`）。
+- 快捷键只在无修饰键、非输入法组合、且焦点不在 input/textarea/select/contenteditable（沿 `composedPath()` 与深层 `activeElement` 判断）时触发，未命中时不吞页面按键；`Esc` 退出选取/参考模式。
+- 每个按钮悬停显示说明卡（名称 + 一句说明 + 快捷键），图标沿用内联 SVG 风格。
+- **不抢接管**：别的标签页已是接管页时，`Ctrl/Cmd+Shift+X` 只注入并显示/收起当前页工具条（`handleToggleCommand` 里 `activeTabId` 不属于本 tab 的分支），不改写归属；popup / 侧边栏显式「接管当前页」仍走 `TAKEOVER_TAB` 正常切换接管。没有任何有效接管时保持原行为（接管当前页）。刷新/导航后的自动重注入仍只补注入，`afterRelease` 的「释放接管后不再自动接管」语义不能回归。
+- **取消接管**：点状态点 release 分支会通过 `RELEASE_TAKEOVER` 通知后台，后台经 `mutateInjectionSession` 调用 `injection-state.afterRelease`——仅当 `dt_active_tab` 归属本标签时清掉归属，保留 `dt_injected_tabs` 注入记录。这样刷新后只会补注入，不会自动重新接管。随后仍断开并延迟重连事件流，让 Hub 释放客户端。
+- **Ctrl/Cmd+Shift+X**：未接管＝注入并接管；已接管＝切换工具条显示/隐藏（`background/service-worker.js` 的 `handleToggleCommand`）；别的标签页在接管时＝只补注入 + 显示/收起工具条，不抢接管。manifest 的 command 描述同步为这个语义。
+
+## 参考元素（references）
+
+**分工**：`content/modules/references-core.js` 是纯逻辑（列表上限 8、URL/字段脱敏、消息校验、`resolveSentReferences`），**service worker 是参考列表的唯一写入者**；`content/modules/references.js` 只做采集；`sidepanel/references-tray.js` 只做展示与写回。不要把这个边界打破（例如在 content script 里直接改列表或持久化）。
+
+- 存储：`chrome.storage.session` 的 `dt_references`（全局，不按标签页），每次变更经 `mutateReferences` 串行执行后广播 `DT_REFERENCES_UPDATED`；非法消息/超限内容由 core 的校验函数拒绝，配额写入失败返回明确错误（页面 toast 提示且不静默丢弃）。
+- 采集：复用选取覆盖层的点选思路，但与 V 模式互斥（进入一个会退出另一个），参考模式的覆盖层是紫色 `#7c3aed`；点选后弹备注框（Enter 保存、Esc 取消不添加、`event.isComposing` 时忽略），保存后继续可点下一个，再按 `R` 或 Esc 退出。
+- 内容脱敏（core 的 `pickStyles` / `sanitizeElementHtml`）：样式走固定白名单；HTML 去 `script/style/iframe` 内容、`on*`、`srcdoc`、超长 `data:` 串和所有表单输入值（input value、textarea、selected/checked、password/hidden、contenteditable 文字）。按钮 / option 的**可见文案保留**：它是元素的标识（截图里本来就有），删掉参考就认不出指的是谁。
+- 截图：截可见区域后按元素矩形裁剪（CSS 坐标→物理像素的实际比例换算），长边 ≤800px 转 JPEG；拍摄时隐藏 DevTailor 自己的 UI/覆盖层并临时遮住元素内输入文字，**异常路径也必须恢复**；恢复的是隐藏前那一份 inline `display`（值 + priority），不是无条件 `removeProperty`——否则 Enter 保存时刚关掉的备注框会被重新显示。只截发起请求的标签页：`DT_REFERENCE_TAB_CHECK` 确认发送方就是前台标签页才截，否则保留其余字段、不截图。
+- 侧边栏「参考」分区（`#ref-tray`）有参考就显示（即使没有接管页、没有标记）：缩略图、来源（域名+路径，`title` 放完整 URL）、备注，可编辑备注 / 删除单条 / 清空全部，监听 UPDATED 实时刷新。来自页面的字符串一律 `textContent`/`title` 渲染，`img src` 只接受 core 校验过的 `data:image/(png|jpeg|webp);base64`。
+
+### /review 契约：references 与 referencesAccepted
+
+`POST /review` 的请求体 `payload` 新增可选数组字段 `references`（元素对象见 `references-core.SEND_FIELDS`：`id/url/title/selector/note/styles/html/screenshot?`，永远不含 `createdAt`）。它**独立于** `items`（标记）与 `screenshots`（截图），Hub 不要把它们混在一起处理。
+
+响应（`/review` 的 2xx JSON body）新增数字字段 **`referencesAccepted`**：
+
+- 等于本次发送的 `references.length` → Hub 已接收这些参考；扩展据此发 `DT_REFERENCES_ACCEPTED`（带本次 id）移除它们，发送期间新增的 id 保留；
+- 成功但没有该字段 → 旧 Hub：参考全部保留，侧边栏提示「当前 Hub 版本不支持参考元素，参考未被接收」；
+- 失败（非 2xx / 网络错误）→ 全部保留，不提示额外信息。
+
+Hub 端实现见 `docs/ARCHITECTURE.md`。扩展侧只有参考、没有标记和文字时也允许发送（用户气泡显示「参考 N」）。
+
+## 侧边栏标记托盘
+
+`sidepanel/mark-tray.js` 镜像页面 store 的快照（`marks-core.createTrayModel` / `createTrayController`），提供：点击 chip 定位元素、编辑备注（Enter 保存 / Esc 取消）、删除单个标记、清除已发送、清空全部标记、移除截图。写回统一走 `DT_*` 命令（新增 `DT_UPDATE_MARK`）。
 
 ## DevTailor UI 穿透规则
 
@@ -356,18 +393,19 @@ Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid
 
 ## 重要文件
 
-- `content/content-script.js`：模块装配、工具栏事件、标记/元素库入口。
-- `content/modules/shadow-ui.js`：Shadow DOM 面板和样式。
-- `content/modules/toolbar.js` / `toolbar-core.js`：页内标记工具条（DOM 接线 / 纯逻辑）。
-- `content/modules/marks-core.js` / `marks-sync.js`：标记搜索、广播载荷、DevTailor prompt 解析（纯逻辑）/ 内容脚本侧同步。
-- `sidepanel/mark-tray.js`：侧边栏标记托盘。
+- `content/content-script.js`：模块装配、工具栏事件。
+- `content/modules/shadow-ui.js`：Shadow DOM 宿主和样式变量。
+- `content/modules/toolbar.js` / `toolbar-core.js`：页内标记工具条（DOM 接线 / 纯逻辑：位置 clamp、快捷键判定、审批计数、接管模型）。
+- `content/modules/marks-core.js` / `marks-sync.js`：标记描述/快照/命令、广播载荷、DevTailor prompt 解析（纯逻辑）/ 内容脚本侧同步。
+- `content/modules/references-core.js` / `references.js`：参考元素（纯逻辑 + 采集），见「参考元素」。
+- `sidepanel/mark-tray.js`：侧边栏标记托盘（查看、编辑备注、删除、清空全部、点击定位）。
+- `sidepanel/references-tray.js`：侧边栏参考分区（缩略图/来源/备注、编辑、删除、清空）。
 - `sidepanel/design-docs.js`：侧边栏设计规范（DESIGN.md）管理。
 
 - `content/modules/ws-client.js`：SSE 客户端、接管、会话切换、Browser action 处理。
 - `content/modules/browser-actions.js`：browser action 分发。
 - `content/modules/browser-action-dom.js`：DOM 查询、点击、填写、按键、断言、snapshot、run_js。
-- `content/modules/element-targets.js`：元素库 HTTP API 和 target 解析。
-- `content/modules/element-saver.js`：元素库卡片和选择保存流程。
+- `content/modules/element-targets.js`：元素库 HTTP API 和 target 解析（供 browser tool 使用）。
 - `docs/CLAUDE_CHANNEL_PROTOCOL.md`：实际依赖的官方协议点与来源。
 
 ## 常见错误
@@ -379,12 +417,18 @@ Mermaid 当前未启用。若以后启用，只渲染明确的 `language-mermaid
 - 不要把前端展示历史重新发给 Agent。
 - 不要恢复 `POST /browser-tool`、`ACAO: *` 或放宽 Origin/Host 守卫；不要向 stdout 打印（stdout 留给 MCP 协议）。
 - 不要让 `reply` 工具之外的终端输出被当成给用户的回复。
-- 不要让刷新页面清空项目会话或 active ownership。
+- 不要让刷新页面清空项目会话或 active ownership；但也不要绕过 `RELEASE_TAKEOVER` / `afterRelease`，让“取消接管”后刷新又自动接管。
 - 不要把图片 base64 塞入 Markdown 文本。
 - 不要移除 Markdown sanitizer。
 - 不要让 DevTailor 面板拦截 Agent 的坐标/grid 点击。
 - 不要让元素库退化成只保存 CSS selector。
 - 不要恢复 `/element-targets?url=...` 当前页过滤；元素库查询统一项目全量。
+
+## 参考元素的存储边界
+
+- 参考列表是**全局**的（`dt_references`，不按标签页），和按 tab 持久化的标记/截图分开；关闭浏览器即清空。
+- 只有 service worker 写它（串行 `mutateReferences`），content script 只发 ADD，侧边栏只发 UPDATE_NOTE / REMOVE / CLEAR / ACCEPTED；不要在别处直接 `chrome.storage.session.set('dt_references')`。
+- 发送成功后的移除只针对本次 id（`acceptSent`），发送期间新增的参考必须保留；`referencesAccepted` 缺失或不等都不移除。
 
 ## 标记与截图的刷新保留
 

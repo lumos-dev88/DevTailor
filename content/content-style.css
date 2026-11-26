@@ -1,10 +1,10 @@
-/* DevTailor — Host page styles (injected via manifest) */
+/* DevTailor — Host page styles (injected with the on-demand content scripts) */
 
-/* Hover highlight during marking mode — handled by selector-mode.js overlay */
+/* Hover highlight during marking mode — selector-mode.js overlay */
 
-/* Persistent highlight for marked elements — handled by sidebar.js overlay */
+/* Persistent highlight for marked elements — sidebar.js overlay */
 
-/* Flash animation for list-click navigation */
+/* Flash animation after locating a mark */
 [data-dom-review-flash] {
   animation: dt-flash-element 0.6s ease;
 }

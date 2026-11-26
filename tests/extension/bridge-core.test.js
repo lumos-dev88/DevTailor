@@ -7,7 +7,8 @@ const render = require('../../content/modules/chat-render.js');
 // ---------------------------------------------------------------- error copy
 test('errorInfo maps bridge codes to actionable copy', () => {
   assert.match(core.errorInfo('no_claude_instance').text, /Claude Code/);
-  assert.match(core.errorInfo('no_claude_instance').text, /`claude-devtailor\.sh`.*devtailor-hub/);
+  assert.doesNotMatch(core.errorInfo('no_claude_instance').text, /项目目录/);
+  assert.match(core.errorInfo('instance_offline').text, /所选 Claude Code 实例已离线，请在侧边栏重新选择/);
   // 429 / review_queue_full is gone: an unknown code falls back to the server message
   assert.match(core.errorInfo('review_queue_full', { message: '服务端文案' }).text, /服务端文案/);
   assert.match(core.errorInfo('client_not_connected').text, /连接当前页/);
@@ -35,6 +36,10 @@ test('parseProxyResponse: unreachable bridge, JSON error bodies, success', () =>
   assert.strictEqual(noClaude.code, 'no_claude_instance');
   assert.strictEqual(noClaude.message, 'no live claude');
   assert.match(core.failureInfo(noClaude).text, /Claude Code/);
+  const instanceOffline = core.parseProxyResponse({ ok: false, status: 503, body: JSON.stringify({ ok: false, code: 'instance_offline' }) });
+  assert.strictEqual(instanceOffline.code, 'instance_offline');
+  assert.match(core.failureInfo(instanceOffline).text, /所选 Claude Code 实例已离线/);
+  assert.match(core.errorEventInfo({ code: 'instance_offline' }).text, /侧边栏重新选择/);
   // free-form `error` text (not a code) keeps working as the message
   const freeform = core.parseProxyResponse({ ok: false, status: 500, body: JSON.stringify({ ok: false, error: '登录失效 了' }) });
   assert.strictEqual(freeform.code, '');

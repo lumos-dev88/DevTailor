@@ -127,7 +127,7 @@ content/modules/
 ```text
 用户当前 tab 打开 DevTailor
   -> content script 建立 SSE: /events?clientId=tab_xxx
-  -> 用户点击「连接当前页」或已接管 tab 刷新重连
+  -> 用户点击「接管当前页」（按需注入）或已接管 tab 刷新后自动补注入并重连
   -> Bridge 记录 activeClientId = tab_xxx
   -> Claude Code 调 browser tool，例如 get_page_snapshot({})
   -> Claude Code 使用 snapshot 和 locator，例如 click_page({ role: "button", text: "登录" })
@@ -199,7 +199,7 @@ type BridgeLocalBrowserAction =
   | 'delete_element_target'
 ```
 
-元素库是项目级全量库，`get_element_targets` 默认返回项目全量，不做当前页路径过滤。
+元素库是项目级全量库，`get_element_targets` 默认返回项目全量，不做当前页路径过滤。页内工具条与侧边栏都没有元素库浏览器 UI（原「存元素」「打开元素库」入口已删除）；保存/删除/使用统一由 browser tool 经扩展本地 handler（`content/modules/browser-actions.js` → `element-targets.js`）完成。
 
 HTTP 回传：
 

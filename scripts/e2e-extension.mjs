@@ -12,7 +12,7 @@
  *   DEVTAILOR_E2E_HEADLESS     "0" for a headed window (default: headless=new)
  */
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import net from 'node:net';
@@ -163,6 +163,23 @@ class ShadowPanel {
     const rootId = await this.root();
     const { nodeId } = await this.cdp.send('DOM.querySelector', { nodeId: rootId, selector });
     return nodeId || null;
+  }
+  async nodes(selector) {
+    const rootId = await this.root();
+    const { nodeIds } = await this.cdp.send('DOM.querySelectorAll', { nodeId: rootId, selector });
+    return nodeIds || [];
+  }
+  async attr(selector, attribute) {
+    const nodeId = await this.node(selector);
+    if (!nodeId) return null;
+    try {
+      const { attributes } = await this.cdp.send('DOM.getAttributes', { nodeId });
+      const list = Array.isArray(attributes) ? attributes : [];
+      for (let i = 0; i + 1 < list.length; i += 2) if (list[i] === attribute) return list[i + 1];
+      return null;
+    } catch {
+      return null;
+    }
   }
   async center(selector) {
     const nodeId = await this.node(selector);
@@ -360,7 +377,7 @@ async function checkGuard(page, channelEvents, resources) {
       && (neg.health.rejected || neg.health.body === JSON.stringify(health.data)), JSON.stringify(health.data));
 }
 
-async function checkExtension({ chromium, scratch, projectId, resources, mcp, channelEvents, testUrl }) {
+async function checkExtension({ chromium, scratch, resources, mcp, channelEvents, testUrl }) {
   const { context, extensionId } = await launchChrome(chromium, join(scratch, 'profile'), resources);
   const sw = await waitFor(() => context.serviceWorkers().find(worker =>
     worker.url().startsWith(`chrome-extension://${extensionId}/`)), { what: 'extension service worker' });
@@ -373,11 +390,11 @@ async function checkExtension({ chromium, scratch, projectId, resources, mcp, ch
   record('guard: raw service-worker GET /sessions without client header returns 403', rawSw === 403, `status=${rawSw}`);
   const health = await waitFor(async () => {
     const res = await swRequest('/health');
-    return res.data.projects?.some(project => project.projectId === projectId) && res;
-  }, { what: 'fake Claude project registration in /health' });
-  record('extension proxy: trusted /health exposes Hub and registered project',
-    health.status === 200 && health.data.ok === true && !!health.data.hubInstanceId
-      && health.data.projectId === projectId && health.data.projectName === 'project');
+    return Array.isArray(res.data.instances) && res.data.instances.length > 0 && res;
+  }, { what: 'fake Claude instance registration in /health' });
+  record('extension proxy: trusted /health exposes online instances and a default',
+    health.status === 200 && health.data.ok === true
+      && health.data.instances.some(instance => instance.instanceId === health.data.defaultInstanceId));
   const sessions = await swRequest('/sessions');
   record('extension proxy: trusted GET /sessions returns 200',
     sessions.status === 200 && sessions.data.ok === true && Array.isArray(sessions.data.sessions));
@@ -394,14 +411,32 @@ async function checkExtension({ chromium, scratch, projectId, resources, mcp, ch
   const beforeTakeover = await callTool('get_page_snapshot');
   record('tool: get_page_snapshot without takeover reports NO_ACTIVE_TAB',
     beforeTakeover.isError === true && JSON.stringify(beforeTakeover.content).includes('NO_ACTIVE_TAB'));
+  const injectedBeforeTakeover = await page.evaluate(() => Boolean(window.__domReview));
+  record('content script: untouched page has no DevTailor injection', injectedBeforeTakeover === false);
+  const takeover = await sw.evaluate(async url => {
+    const [tab] = await chrome.tabs.query({ url });
+    return takeoverTab(tab?.id || null);
+  }, testUrl);
+  record('on-demand takeover: worker injects and activates the page', takeover.ok === true, takeover.error || '');
   const cdp = await context.newCDPSession(page);
   await cdp.send('DOM.enable');
   const panel = new ShadowPanel(cdp);
-  await waitFor(() => panel.node('#dt-tb'), { what: 'in-page toolbar' });
-  record('content script: in-page toolbar injected', true);
-  await waitFor(() => panel.node('#dt-status[data-state="idle"]'), { what: 'toolbar connected to Hub' });
-  record('in-page toolbar: connected to Hub before takeover', true);
-  await panel.click('#dt-status');
+  await waitFor(() => panel.node('#dt-tb'), { what: 'in-page toolbar after takeover' });
+  record('content script: in-page toolbar injected only after takeover', true);
+  // The compact bar has exactly the five controls and no drawer/grip/search/library buttons.
+  const railIds = [];
+  for (const nodeId of await panel.nodes('#dt-tb .dt-b')) {
+    const { attributes } = await cdp.send('DOM.getAttributes', { nodeId });
+    const list = Array.isArray(attributes) ? attributes : [];
+    const id = list[list.indexOf('id') + 1];
+    if (id) railIds.push(id);
+  }
+  railIds.sort();
+  record('content script: toolbar keeps only pick / reference / screenshot / status / side panel',
+    JSON.stringify(railIds) === JSON.stringify(['dt-pick', 'dt-reference', 'dt-shot', 'dt-sidepanel', 'dt-status']),
+    railIds.join(','));
+  await waitFor(() => panel.attr('#dt-tb', 'class').then((c) => /is-ready/.test(c || '')),
+    { what: 'toolbar revealed after the saved position loads' });
   await waitFor(() => panel.node('#dt-status[data-state="taken"]'), { what: 'tab takeover' });
   const { data: taken } = await swRequest('/health');
   const clientId = taken.activeClientId;
@@ -525,8 +560,8 @@ async function checkExtension({ chromium, scratch, projectId, resources, mcp, ch
     !late.isError && lateStream.turnId === third.data.turnId && lateStream.sessionId === third.data.sessionId);
 
   await mcp.close();
-  await waitFor(async () => (await swRequest('/health')).data.projects?.length === 0,
-    { what: 'Hub sees fake Claude disconnect' });
+  await waitFor(async () => (await swRequest('/health')).data.instances?.length === 0,
+    { what: 'Hub sees fake Claude instance disconnect' });
   const offlineText = 'E2E review with no online Claude';
   const offline = await send(offlineText, { accepted: false });
   await waitFor(async () => (await traffic()).events.find(event =>
@@ -555,7 +590,6 @@ async function main() {
     const scratch = realpathSync(scratchDir);
     const projectDir = join(scratch, 'project');
     mkdirSync(projectDir);
-    const projectId = createHash('sha256').update(projectDir).digest('hex').slice(0, 12);
     const env = await startHub(scratch, resources);
     console.log(`temporary Hub: ${env.FORGE_HUB_URL}, DevTailor: ${DEVTAILOR_URL}`);
     console.log(`chrome: ${CHROME} (${HEADLESS ? 'headless=new' : 'headed'})`);
@@ -567,7 +601,7 @@ async function main() {
     record('mcp: tools/list includes reply and all three browser tools', missing.length === 0, missing.join(', '));
     resources.testServer = await startTestServer();
     const testUrl = `http://127.0.0.1:${resources.testServer.address().port}/`;
-    await checkExtension({ chromium, scratch, projectId, resources, mcp, channelEvents, testUrl });
+    await checkExtension({ chromium, scratch, resources, mcp, channelEvents, testUrl });
   } catch (err) {
     if (resources.hubLog) console.error(resources.hubLog.trimEnd());
     if (resources.clientLog) console.error(resources.clientLog.trimEnd());

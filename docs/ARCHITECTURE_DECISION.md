@@ -18,6 +18,10 @@ DevTailor content UI 采用分层隔离策略：
 
 ## 当前实现边界
 
+### 全局按需注入
+
+`manifest.json` 不包含静态 `content_scripts`。popup、侧边栏“接管当前页”和 `Ctrl/Cmd+Shift+X` 统一请求 service worker：按 MAIN console bridge → MAIN framework bridge → CSS → isolated modules 的顺序注入，再连接并 `/activate`。未接管网页没有 DevTailor 页面脚本。已接管 tab 的刷新/跳转由 `chrome.storage.session` 状态恢复；非 active tab 只补注入，不抢控制权。控制台捕获只能覆盖注入后的日志。
+
 ### Chrome Side Panel
 
 sidePanel 适合作为 Chat 主体验容器：
@@ -30,12 +34,11 @@ sidePanel 适合作为 Chat 主体验容器：
 
 ### Shadow DOM 主 UI
 
-`shadow-ui.js` 创建 DevTailor 宿主和面板，负责：
+`shadow-ui.js` 创建 DevTailor 宿主与共享样式变量，负责：
 
-- 顶部工具栏。
-- Chat 面板。
-- 接管状态栏。
-- 大部分按钮和面板样式。
+- Shadow DOM 宿主（`#dom-review-host`）与 `:host` 设计变量。
+- 页内标记工具条的挂载点（`toolbar.js`）。
+- UI 事件边界：宿主导出事件停止冒泡，非文本控件不抢页面焦点。
 
 规则：
 
@@ -45,19 +48,32 @@ sidePanel 适合作为 Chat 主体验容器：
 - 面板和 FAB 的视口边界 clamp 必须允许四边贴边，边距为 `0`；不要为顶部预留默认安全距离。
 - 面板坐标中的 `0` 是合法值，读取 `left/top` 时只能在解析结果不是数字时使用初始默认值，不能用 `parseFloat(...) || DEFAULT_POSITION.*` 这类会把 `0` 当作缺省值的写法。
 
+### 页内工具条形态
+
+`toolbar.js` 在 Shadow DOM 里渲染贴左悬浮的紧凑圆角竖条（VisBug 式），共五个按钮：选取（`V`）、参考元素（`R`）、截图（`S`）、接管状态点、打开侧边栏。它不再有整页抽屉，也不托管标记/参考列表——标记与参考的查看/编辑/删除/清空都归侧边栏（`mark-tray.js` / `references-tray.js`）。
+
+- 拖动：按住按钮以外的空白处在视口内水平/垂直移动；位置按站点持久化，旧存储值继续兼容。
+- 快捷键判定是纯逻辑（`toolbar-core.matchShortcut` / `isEditableEvent`）：无修饰键、非输入法组合、焦点不在可编辑元素（含 shadow DOM 深层 activeElement）才生效，未命中不吞页面按键。
+- 说明卡用按钮内的 `.dt-tip`（hover/focus 显示），不额外注入浮层。
+
 ### 普通 DOM overlay
 
 普通 DOM 仍适用于：
 
-- 元素选择高亮。
+- 元素选择高亮（含 padding/margin 盒模型层）。
 - VisBug 风格 hit-test 辅助层。
-- 小型 badge 或临时 overlay。
+- 标记编号徽标与就地备注卡。
 
 规则：
 
 - 使用 `dt-*` 命名空间。
 - 使用高 z-index，但避免覆盖 DevTailor 主面板最高层。
-- 选择/标记流程必须忽略 DevTailor 自身 UI。
+- 覆盖层 `pointer-events: none`，只让真实可见、可操作的卡片恢复点击。
+- 选择/标记流程必须忽略 DevTailor 自身 UI（`visbug-hit-test.js` 的 `isOwnElement` 同时认识选取与参考两套 overlay/popup 的 id）。
+
+### 参考元素采集
+
+参考元素复用选取的点选思路，但作为独立模式：进入参考模式会退出标记模式（反之亦然），覆盖层用紫色 `#7c3aed` 与标记配色区分；备注框 Enter 保存 / Esc 取消并尊重 IME 组合。截图前临时隐藏 DevTailor 的 UI 与覆盖层、遮住元素内输入文字，并在所有路径（含异常）恢复；只截发起请求且在前台的标签页。脱敏（样式白名单、HTML 清洗、URL 敏感参数）全部在纯逻辑 `references-core.js` 里，便于单测。
 
 ### iframe 预留
 

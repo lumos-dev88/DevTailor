@@ -1,17 +1,26 @@
 {
   "manifest_version": 3,
   "name": "DevTailor",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Mark elements and capture page context, then let your local Claude Code session see, edit and verify the page",
-  "permissions": ["activeTab", "storage", "scripting", "sidePanel"],
-  "host_permissions": ["*://localhost/*", "*://127.0.0.1/*", "<all_urls>"],
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "*://localhost/*",
+    "*://127.0.0.1/*",
+    "<all_urls>"
+  ],
   "commands": {
     "toggle-sidebar": {
       "suggested_key": {
         "default": "Ctrl+Shift+X",
         "mac": "Command+Shift+X"
       },
-      "description": "Toggle the DevTailor marks drawer"
+      "description": "Take over this page with DevTailor, or inject and show/hide its toolbar when another tab is taken over"
     }
   },
   "action": {
@@ -29,51 +38,6 @@
   "side_panel": {
     "default_path": "sidepanel/sidepanel.html"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://localhost/*", "*://127.0.0.1/*"],
-      "js": ["content/modules/browser-console-bridge.js"],
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
-    {
-      "matches": ["*://localhost/*", "*://127.0.0.1/*"],
-      "js": ["content/modules/framework-bridge.js"],
-      "run_at": "document_idle",
-      "world": "MAIN"
-    },
-    {
-      "matches": ["*://localhost/*", "*://127.0.0.1/*"],
-      "js": [
-        "content/modules/review-store.js",
-        "content/modules/marks-core.js",
-        "content/modules/toolbar-core.js",
-        "content/modules/element-targets.js",
-        "content/modules/selector-generator.js",
-        "content/modules/framework-detector.js",
-        "content/modules/context-capture.js",
-        "content/modules/visbug-hit-test.js",
-        "content/modules/shadow-ui.js",
-        "content/modules/element-saver.js",
-        "content/modules/badges.js",
-        "content/modules/sidebar.js",
-        "content/modules/bridge-core.js",
-        "content/modules/prompt-builder.js",
-        "content/modules/browser-console.js",
-        "content/modules/browser-action-dom.js",
-        "content/modules/browser-actions.js",
-        "content/modules/ws-client.js",
-        "content/modules/marks-sync.js",
-        "content/modules/screenshot.js",
-        "content/modules/selector-mode.js",
-        "content/modules/toolbar.js",
-        "content/modules/export-import.js",
-        "content/content-script.js"
-      ],
-      "css": ["content/content-style.css"],
-      "run_at": "document_idle"
-    }
-  ],
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",

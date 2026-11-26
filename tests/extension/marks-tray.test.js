@@ -98,6 +98,23 @@ test('thumbnails are fetched on demand; the broadcast never carries pixels', asy
   assert.deepStrictEqual(await page.controller.thumbs(['s1', 'ghost']), { s1: 'data:image/jpeg;base64,THUMBPIXELS' });
 });
 
+test('the tray can edit a note and clear every mark through the page', async () => {
+  const page = createPage();
+  page.store.add(review('a'));
+  page.store.add(review('b'));
+  const res = await page.controller.updateMark('a', { comment: '换成主色' });
+  assert.strictEqual(res.updated, true);
+  assert.strictEqual(page.store.get('a').comment, '换成主色');
+  assert.strictEqual(page.tray.getState().marks[0].comment, '换成主色');
+
+  const missing = await page.controller.updateMark('ghost', { comment: 'x' });
+  assert.strictEqual(missing.updated, false);
+
+  await page.controller.clearMarks();
+  assert.deepStrictEqual(page.store.getAll(), []);
+  assert.deepStrictEqual(page.tray.getState().marks, []);
+});
+
 test('locate is forwarded to the page', async () => {
   const page = createPage();
   page.store.add(review('a'));
@@ -160,6 +177,40 @@ test('broadcasts for another tab are ignored; switching tabs clears the previous
   assert.strictEqual(page.tray.getState().status, 'loading');
   page.tray.follow(null);
   assert.strictEqual(page.tray.getState().status, 'idle');
+});
+
+/** The send contract for 参考元素 (references-core + the side panel's executeSend decisions). */
+function createReferenceFlow(list) {
+  const references = list || [];
+  let sentIds = [];
+  return {
+    references,
+    async get() {
+      return { ok: true, references: this.references };
+    },
+    async postReview(ids) {
+      sentIds = ids.slice();
+      // Hub acked exactly what we sent
+      return { ok: true, status: 202, data: { referencesAccepted: ids.length } };
+    },
+    get sentIds() { return sentIds; },
+  };
+}
+
+test('reference send: payload carries a separate references field and only removes accepted ids', async () => {
+  const coreRef = require('../../content/modules/references-core.js');
+  const flow = createReferenceFlow([
+    { id: 'r1', url: 'https://e.com/a', title: 'A', selector: '#a', note: '', styles: {}, html: '<div id="a"></div>', screenshot: '' },
+    { id: 'r2', url: 'https://e.com/b', title: 'B', selector: '#b', note: '', styles: {}, html: '<div id="b"></div>', screenshot: '' },
+  ]);
+  const list = await flow.get();
+  const sent = coreRef.toSendReferences(list.references);
+  assert.strictEqual(sent.length, 2);
+  assert.ok(sent.every((ref) => !('createdAt' in ref)));
+  const res = await flow.postReview(sent.map((ref) => ref.id));
+  const verdict = coreRef.resolveSentReferences({ ok: true, status: 202, data: res.data }, flow.sentIds);
+  assert.deepStrictEqual([verdict.keep, verdict.accepted], [false, true]);
+  assert.deepStrictEqual(coreRef.acceptSent(list.references, flow.sentIds).length, 0);
 });
 
 test('handleCommand ignores messages that are not ours', () => {

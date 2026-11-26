@@ -1,9 +1,9 @@
 /**
  * DevTailor — Toolbar core (pure logic, no DOM)
  *
- * Persisted toolbar state (drawer open/closed + vertical position, per origin) with tolerant
- * parsing, drag-position clamping, the pending-approval counter behind the red dot, and the
- * takeover status model of the status dot.
+ * Persisted floating-bar position (per origin) with tolerant parsing, viewport clamping, the
+ * pending-approval counter behind the red dot, shortcut matching, and the takeover status model of
+ * the status dot.
  *
  * Browser: window.__domReview.toolbarCore. Node (tests): module.exports.
  */
@@ -12,10 +12,14 @@
 
   const STATE_VERSION = 1;
   const STORAGE_PREFIX = 'dt_toolbar:';
-  const COLLAPSED_WIDTH = 44;
-  const EXPANDED_WIDTH = 320;
+  const BAR_WIDTH = 48;
   const APPROVAL_TTL_MS = 300000; // same as the bridge's approval timeout
   const BRIDGE_START_COMMAND = 'claude-devtailor.sh';
+
+  // Page shortcuts live on the toolbar (V = pick, S = screenshot, R = reference elements). A hit
+  // only fires when it is a plain key press on a non-editable target; anything else is left to the page.
+  // `x` is deliberately not bound here: Ctrl/Cmd+Shift+X lives in the manifest command.
+  const SHORTCUTS = { v: 'pick', s: 'screenshot', r: 'reference' };
 
   // ---------------------------------------------------------------- state
 
@@ -23,8 +27,12 @@
     return `${STORAGE_PREFIX}${String(origin || 'unknown')}`;
   }
 
+  /**
+   * Old states stored only a vertical `top`; the floating bar now also remembers `left`.
+   * `{ open }` is not used anymore but stays tolerated so old values still load.
+   */
   function defaultState() {
-    return { open: false, top: null };
+    return { open: false, top: null, left: null };
   }
 
   /** Accepts the stored value (object or JSON string) and never throws; anything odd falls back. */
@@ -34,34 +42,98 @@
       try { value = JSON.parse(value); } catch { return defaultState(); }
     }
     if (!value || typeof value !== 'object' || Array.isArray(value)) return defaultState();
-    const top = typeof value.top === 'number' && Number.isFinite(value.top) ? Math.round(value.top) : null;
-    return { open: value.open === true, top };
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null);
+    return { open: value.open === true, top: num(value.top), left: num(value.left) };
   }
 
   function serializeState(state) {
     const s = parseState(state);
-    return { v: STATE_VERSION, open: s.open, top: s.top };
+    // `open` is legacy (the drawer is gone); it is kept in the parsed shape for old reads only.
+    return { v: STATE_VERSION, open: false, top: s.top, left: s.left };
   }
 
   // ------------------------------------------------------------- position
 
-  /** Keep a toolbar of `height` fully on screen. 0 is a legal value (it may touch the top edge). */
-  function clampTop(top, viewportHeight, height) {
+  /** Keep a box of `width x height` fully inside the viewport. 0 is a legal edge value. */
+  function clampPosition({ left, top }, viewportWidth, viewportHeight, width, height) {
+    const vw = Number.isFinite(viewportWidth) ? viewportWidth : 0;
     const vh = Number.isFinite(viewportHeight) ? viewportHeight : 0;
+    const w = Number.isFinite(width) ? width : 0;
     const h = Number.isFinite(height) ? height : 0;
-    const max = Math.max(0, vh - h);
-    const t = Number.isFinite(top) ? top : 0;
-    return Math.round(Math.min(Math.max(0, t), max));
+    const clamp = (value, viewport, size) => {
+      const max = Math.max(0, viewport - size);
+      const n = Number.isFinite(value) ? value : 0;
+      return Math.round(Math.min(Math.max(0, n), max));
+    };
+    return { left: clamp(left, vw, w), top: clamp(top, vh, h) };
   }
 
-  /** Vertically centered, slightly above the middle. */
-  function defaultTop(viewportHeight, height) {
-    return clampTop(((viewportHeight - height) / 2) - viewportHeight * 0.06, viewportHeight, height);
+  /** Docked to the left edge, vertically centred a little above the middle. */
+  function defaultPosition(viewportWidth, viewportHeight, width, height) {
+    return clampPosition(
+      { left: 0, top: ((viewportHeight - height) / 2) - viewportHeight * 0.06 },
+      viewportWidth, viewportHeight, width, height
+    );
   }
 
-  function resolveTop(state, viewportHeight, height) {
-    const top = state && typeof state.top === 'number' ? state.top : defaultTop(viewportHeight, height);
-    return clampTop(top, viewportHeight, height);
+  function resolvePosition(state, viewportWidth, viewportHeight, width, height) {
+    const s = state && typeof state === 'object' ? state : {};
+    const def = defaultPosition(viewportWidth, viewportHeight, width, height);
+    return clampPosition(
+      { left: typeof s.left === 'number' ? s.left : def.left, top: typeof s.top === 'number' ? s.top : def.top },
+      viewportWidth, viewportHeight, width, height
+    );
+  }
+
+  // ----------------------------------------------------------- shortcuts
+
+  const EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
+
+  /**
+   * Walk from `node` through shadow roots (the page's and nested ones) to the deepest active
+   * element; a closed root reports its host, which is still the element to check for editability.
+   */
+  function deepActiveElement(documentRef, node) {
+    let current = node;
+    let guard = 0;
+    while (current && current.shadowRoot && current.shadowRoot.activeElement && guard++ < 16) {
+      current = current.shadowRoot.activeElement;
+    }
+    return current || (documentRef && documentRef.activeElement) || null;
+  }
+
+  /**
+   * True when `event` came from a text-editing context. The caller passes the composed path so a
+   * page inside (or outside) any shadow boundary is handled: the first element of the path wins,
+   * then the deepest `activeElement` is checked as a fallback.
+   */
+  function isEditableEvent(event, documentRef = typeof document !== 'undefined' ? document : null) {
+    if (!event) return false;
+    const path = Array.isArray(event.composedPath) ? event.composedPath() : [];
+    for (const node of path) {
+      if (typeof node?.matches === 'function' && node.matches(EDITABLE_SELECTOR)) return true;
+    }
+    return isEditableTarget(documentRef && documentRef.activeElement, documentRef);
+  }
+
+  /** True when the element (or the deepest active descendant) accepts text input. */
+  function isEditableTarget(node, documentRef = typeof document !== 'undefined' ? document : null) {
+    if (!node || typeof node !== 'object') return false;
+    const target = deepActiveElement(documentRef, node);
+    if (!target || typeof target.matches !== 'function') return false;
+    return Boolean(target.matches(EDITABLE_SELECTOR));
+  }
+
+  /**
+   * Plain-key shortcut hit? `modifierKeys` are ctrl/meta/alt. A composing IME must not swallow
+   * the key. Returns the action name ('pick' | 'screenshot' | 'reference') or null (page keeps it).
+   */
+  function matchShortcut(key, { modifierKeys = [], composing = false } = {}) {
+    if (composing) return null;
+    if (Array.isArray(modifierKeys) && modifierKeys.some(Boolean)) return null;
+    if (typeof key !== 'string') return null;
+    const normalized = key.length === 1 ? key.toLowerCase() : key;
+    return SHORTCUTS[normalized] || null;
   }
 
   // ------------------------------------------------------------ approvals
@@ -122,17 +194,22 @@
 
   const api = {
     STATE_VERSION,
-    COLLAPSED_WIDTH,
-    EXPANDED_WIDTH,
+    BAR_WIDTH,
     APPROVAL_TTL_MS,
     BRIDGE_START_COMMAND,
+    SHORTCUTS,
+    EDITABLE_SELECTOR,
     stateKey,
     defaultState,
     parseState,
     serializeState,
-    clampTop,
-    defaultTop,
-    resolveTop,
+    clampPosition,
+    defaultPosition,
+    resolvePosition,
+    deepActiveElement,
+    isEditableEvent,
+    isEditableTarget,
+    matchShortcut,
     createApprovalTracker,
     takeoverModel,
   };

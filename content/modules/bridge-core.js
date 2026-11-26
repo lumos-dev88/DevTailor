@@ -50,8 +50,11 @@
         kind = 'offline';
         text = 'Hub 未连接：请确认 devtailor-hub 正在运行（终端执行 `fh hub status` 查看）。';
         break;
+      case 'instance_offline':
+        text = '所选 Claude Code 实例已离线，请在侧边栏重新选择';
+        break;
       case 'no_claude_instance':
-        text = '没有在线的 Claude Code 实例：请在项目目录运行 `claude-devtailor.sh`（devtailor-hub 仓库 scripts/ 下）启动 Claude Code 后重试。';
+        text = '没有在线的 Claude Code 实例，请启动 Claude Code 后重试。';
         break;
       case 'client_not_connected':
         text = '当前标签页没有连接到 Hub：请刷新页面或点击“连接当前页”。';

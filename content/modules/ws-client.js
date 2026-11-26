@@ -30,10 +30,7 @@
   let clientIdPromise = null;
   let listeners = [];
   let statusListeners = [];
-  let projectListeners = [];
   let sessionListeners = [];
-  let projectInfo = null;
-  let lastSentProjectId = null;
   let sessionId = null;
   let sessionTitle = null;
   let activeClientId = null;
@@ -160,62 +157,6 @@
     return /^tab_\d+$/.test(String(id || ''));
   }
 
-  /**
-   * Bridge/Hub requests must carry the project they belong to (X-DevTailor-Project).
-   * The service worker owns the header; we only tell it which project /health reported,
-   * and only when that id changes. Failures stay silent: the header is an optimization
-   * for a Hub fronting several projects, never a reason to break the page.
-   */
-  function syncProjectIdToBackground(info) {
-    const projectId = typeof info?.projectId === 'string' ? info.projectId : '';
-    // A Hub serving several projects with no single top-level project: stay header-less
-    // and let the Hub apply its own fallback rules.
-    if (!projectId && Array.isArray(info?.projects) && info.projects.length > 1) return;
-    if (projectId === lastSentProjectId) return;
-    // Nothing learned yet and nothing to report (a bridge that answers /health without
-    // details): no point in a message, the header stays off.
-    if (!projectId && lastSentProjectId === null) return;
-    lastSentProjectId = projectId;
-    try {
-      chrome.runtime.sendMessage({ type: 'SET_PROJECT_ID', projectId }, () => {
-        void chrome.runtime.lastError;
-      });
-    } catch {
-      // Extension context invalidated (page reload/extension update) — ignore.
-    }
-  }
-
-  function setProjectInfo(info) {
-    if (!info) return;
-    syncProjectIdToBackground(info);
-    if (!info.projectId) return;
-    const next = {
-      projectId: info.projectId,
-      projectName: info.projectName || 'project',
-      bridgeInstanceId: info.bridgeInstanceId || null,
-      agentKey: info.agentKey || null,
-      agentLabel: info.agentLabel || null,
-    };
-    if (
-      projectInfo &&
-      projectInfo.projectId === next.projectId &&
-      projectInfo.projectName === next.projectName &&
-      projectInfo.bridgeInstanceId === next.bridgeInstanceId &&
-      projectInfo.agentKey === next.agentKey &&
-      projectInfo.agentLabel === next.agentLabel
-    ) {
-      return;
-    }
-    projectInfo = next;
-    projectListeners.forEach(fn => {
-      try { fn(projectInfo); } catch (e) { if (!isExtensionContextInvalidated(e)) console.warn('[DevTailor] SSE project listener error:', e); }
-    });
-  }
-
-  function getProjectInfo() {
-    return projectInfo;
-  }
-
   function getClientId() {
     return clientId;
   }
@@ -251,7 +192,6 @@
         return;
       }
       if (msg.type === 'connected') {
-        setProjectInfo(msg);
         setActiveClient(msg.activeClientId || null);
         if (msg.activeSessionId || msg.activeSessionTitle) {
           setSessionInfo(msg.activeSessionId || null, msg.activeSessionTitle || null);
@@ -546,14 +486,6 @@
     return () => { statusListeners = statusListeners.filter(fn => fn !== callback); };
   }
 
-  function onProjectChange(callback) {
-    projectListeners.push(callback);
-    if (projectInfo) {
-      try { callback(projectInfo); } catch (e) { if (!isExtensionContextInvalidated(e)) console.warn('[DevTailor] SSE project listener error:', e); }
-    }
-    return () => { projectListeners = projectListeners.filter(fn => fn !== callback); };
-  }
-
   function onSessionChange(callback) {
     sessionListeners.push(callback);
     if (sessionId) {
@@ -636,17 +568,12 @@
         .then(async response => {
           if (!response.ok) return;
           const info = await response.json();
-          // setProjectInfo forwards the project id to the background (header) even when
-          // /health carries no top-level projectId.
-          setProjectInfo(info);
-          if (info?.projectId) {
-            backend = typeof info.backend === 'string' ? info.backend : backend;
-            if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
-              setActiveClient(info.activeClientId || null);
-            }
-            if (info.activeSessionId || info.activeSessionTitle) {
-              setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
-            }
+          backend = typeof info.backend === 'string' ? info.backend : backend;
+          if (Object.prototype.hasOwnProperty.call(info, 'activeClientId')) {
+            setActiveClient(info.activeClientId || null);
+          }
+          if (info.activeSessionId || info.activeSessionTitle) {
+            setSessionInfo(info.activeSessionId || null, info.activeSessionTitle || null);
           }
           await syncActiveSession(reconnect ? 'reconnect' : 'initial', { reconnect, disconnectedMs });
         })
@@ -690,14 +617,12 @@
     request: bridgeFetch,
     isActive: () => isActiveClient,
     getActiveClientId: () => activeClientId,
-    getProjectInfo,
     getClientId,
     getSessionId,
     getSessionTitle,
     setSessionInfo,
     onMessage,
     onStatusChange,
-    onProjectChange,
     onSessionChange,
     reconnectNow,
   };

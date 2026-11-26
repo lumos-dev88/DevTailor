@@ -6,8 +6,9 @@
 
 - 浏览器扩展与 Bridge 使用 SSE + HTTP POST，但网络连接由 `background/service-worker.js` 统一代理；content script 通过 `chrome.runtime.sendMessage` / `chrome.tabs.sendMessage` 与 background 通信。`content/modules/ws-client.js` 是历史命名，不是 WebSocket 实现。
 - Bridge 拥有 display session 和本地 agent session 绑定；前端展示历史不再作为常规 Agent 上下文来源。
-- 当前可操作 tab 由 Bridge 的 `BrowserActionRouter.activeClientId` 管理；新 tab 在线不自动抢占，用户需要显式「连接当前页」。
-- 发送 chat review 不要求当前 tab 已接管；接管状态只影响 browser tool/action 路由目标。
+- 当前可操作 tab 由 Bridge 的 `BrowserActionRouter.activeClientId` 管理。扩展只在用户从 popup、侧边栏或快捷键显式接管后注入任意 http/https 页面；新 tab 和曾注入的非 active tab 都不会自动抢占。
+- worker 用 `chrome.storage.session` 保存曾注入 tab 和 active tab。导航完成时补注入，且只有 active tab 重新 activate；关闭 tab 清理。页内工具条「取消接管」经 `RELEASE_TAKEOVER` → `injection-state.afterRelease` 清掉归属（仅当归属本标签），保留曾注入记录，所以刷新后只补注入、不自动重新接管。实例选择保存在 `chrome.storage.local`，worker 恢复完成前不发 Hub 请求。
+- 发送 chat review 需要一个已接管 tab；接管状态同时决定标记来源和 browser tool/action 路由目标。
 - Browser tool 操作只发往当前已接管 tab；Agent 不传 `tabId`、`clientId` 或 `pageUrl`。
 - 元素库是项目级全量库；`GET /element-targets` 和 browser tool `get_element_targets` 都返回项目全量。
 - 旧的 `/element-targets?url=...` 当前页过滤 API 已废除，不应恢复。

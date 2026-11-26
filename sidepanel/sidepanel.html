@@ -13,8 +13,11 @@
         <span class="status-dot__pip" id="bridge-pip"></span>
         <span id="bridge-status">检查中…</span>
       </button>
-      <span class="topbar__project" id="project-name" title="项目">-</span>
+      <select class="topbar__instance" id="instance-select" title="Claude Code 实例" aria-label="Claude Code 实例">
+        <option value="">自动（检查中…）</option>
+      </select>
       <div class="topbar__actions">
+        <button class="topbar-btn" id="btn-takeover" type="button" title="向当前网页注入 DevTailor 并接管">接管当前页</button>
         <button class="topbar-btn" id="btn-new-session" type="button" title="新建会话">新会话</button>
       </div>
     </div>
@@ -90,8 +93,21 @@
           <span id="mark-tray-title">页面标记</span>
         </button>
         <button type="button" class="mark-tray__link" id="mark-tray-clear-sent" hidden>清除已发送</button>
+        <button type="button" class="mark-tray__link mark-tray__link--danger" id="mark-tray-clear-all" hidden>清空全部标记</button>
       </div>
       <div class="mark-tray__body" id="mark-tray-body"></div>
+    </section>
+
+    <!-- References tray: pending 参考元素 (independent of marks; shown whenever there are any) -->
+    <section class="ref-tray" id="ref-tray" hidden aria-label="待发送的参考元素">
+      <div class="mark-tray__head">
+        <button type="button" class="mark-tray__toggle" id="ref-tray-toggle" aria-expanded="true" aria-controls="ref-tray-body">
+          <span class="mark-tray__chev" aria-hidden="true"></span>
+          <span id="ref-tray-title">参考 0</span>
+        </button>
+        <button type="button" class="mark-tray__link mark-tray__link--danger" id="ref-tray-clear" hidden>清空参考</button>
+      </div>
+      <div class="mark-tray__body" id="ref-tray-body"></div>
     </section>
 
     <!-- Composer -->
@@ -139,11 +155,14 @@
   <script src="../content/modules/chat-scroll.js"></script>
   <script src="../content/modules/message-store.js"></script>
   <script src="../content/modules/bridge-core.js"></script>
+  <script src="../background/instance-header.js"></script>
   <script src="../content/modules/marks-core.js"></script>
   <script src="../content/modules/chat-render.js"></script>
   <script src="../content/modules/chat-styles.js"></script>
   <script src="../content/modules/chat-conversation.js"></script>
+  <script src="../content/modules/references-core.js"></script>
   <script src="mark-tray.js"></script>
+  <script src="references-tray.js"></script>
   <script src="design-docs.js"></script>
   <script src="tool-status.js"></script>
   <script src="sidepanel.js"></script>

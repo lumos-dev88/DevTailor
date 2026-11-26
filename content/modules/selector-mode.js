@@ -20,6 +20,9 @@
   let lastPoint = null;
   let candidateCount = 0;
   let overlay = null;
+  let marginBox = null;
+  let paddingBox = null;
+  let contentBox = null;
   let label = null;
   let hint = null;
   let suppressClickUntil = 0;
@@ -31,6 +34,11 @@
     '#3b82f6', '#ef4444', '#f59e0b', '#22c55e', '#a855f7',
     '#06b6d4', '#f97316', '#ec4899', '#84cc16'
   ];
+
+  // VisBug-style box-model colours: the content box follows the mark colour, padding is green and
+  // margin orange, so a hover also shows the spacing around the element.
+  const PADDING_COLOR = 'rgba(34, 197, 94, 0.14)';
+  const MARGIN_COLOR = 'rgba(245, 158, 11, 0.10)';
 
   function hitTest() {
     return window.__domReview.hitTest;
@@ -67,20 +75,32 @@
     overlay.id = 'dom-review-selector-overlay';
     overlay.style.cssText = [
       'position: fixed',
+      'inset: 0',
       'z-index: 2147483646',
       'pointer-events: none',
+      'display: none',
+      'font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    ].join(';');
+
+    // margin / padding layers are pseudo-element free: three stacked boxes sharing one position.
+    marginBox = document.createElement('div');
+    marginBox.style.cssText = 'position:absolute;pointer-events:none;display:none;background:rgba(245,158,11,0.10);';
+    paddingBox = document.createElement('div');
+    paddingBox.style.cssText = 'position:absolute;pointer-events:none;display:none;background:rgba(34,197,94,0.14);';
+    contentBox = document.createElement('div');
+    contentBox.style.cssText = [
+      'position: absolute',
       'border: 2px solid #3b82f6',
       'background: rgba(59, 130, 246, 0.08)',
       'box-shadow: 0 0 0 1px rgba(255,255,255,0.75), 0 8px 24px rgba(15,23,42,0.18)',
       'border-radius: 3px',
-      'display: none',
-      'box-sizing: border-box'
+      'box-sizing: border-box',
+      'pointer-events: none',
     ].join(';');
-
     label = document.createElement('div');
     label.style.cssText = [
       'position: absolute',
-      'left: -2px',
+      'left: 0',
       'top: -24px',
       'max-width: 260px',
       'padding: 3px 7px',
@@ -91,9 +111,13 @@
       'white-space: nowrap',
       'overflow: hidden',
       'text-overflow: ellipsis',
-      'box-shadow: 0 6px 16px rgba(15,23,42,0.22)'
+      'box-shadow: 0 6px 16px rgba(15,23,42,0.22)',
+      'pointer-events: none',
     ].join(';');
-    overlay.appendChild(label);
+    contentBox.appendChild(label);
+    overlay.appendChild(marginBox);
+    overlay.appendChild(paddingBox);
+    overlay.appendChild(contentBox);
     document.documentElement.appendChild(overlay);
   }
 
@@ -162,16 +186,56 @@
     const rect = hoveredElement.getBoundingClientRect();
     const color = getNextMarkColor();
     overlay.style.display = 'block';
-    overlay.style.borderColor = color;
-    overlay.style.background = rgba(color, 0.08);
+
+    const style = getComputedStyle(hoveredElement);
+    const pad = ['top', 'right', 'bottom', 'left'].reduce(
+      (sum, side) => sum + (parseFloat(style[`padding${side[0].toUpperCase()}${side.slice(1)}`]) || 0),
+      0
+    );
+    const showBoxModel = pad > 0 || ['marginTop', 'marginRight', 'marginBottom', 'marginLeft']
+      .some((prop) => Math.abs(parseFloat(style[prop]) || 0) > 0);
+
+    const place = (box, left, top, width, height, border) => {
+      box.style.left = `${left}px`;
+      box.style.top = `${top}px`;
+      box.style.width = `${Math.max(0, width)}px`;
+      box.style.height = `${Math.max(0, height)}px`;
+      if (border) box.style.borderColor = border;
+      box.style.display = '';
+    };
+
+    if (showBoxModel) {
+      const m = {
+        top: parseFloat(style.marginTop) || 0,
+        right: parseFloat(style.marginRight) || 0,
+        bottom: parseFloat(style.marginBottom) || 0,
+        left: parseFloat(style.marginLeft) || 0,
+      };
+      const p = {
+        top: parseFloat(style.paddingTop) || 0,
+        right: parseFloat(style.paddingRight) || 0,
+        bottom: parseFloat(style.paddingBottom) || 0,
+        left: parseFloat(style.paddingLeft) || 0,
+      };
+      // margin box (outermost, orange) -> padding box (green) -> content box (blue)
+      place(marginBox, rect.left - m.left, rect.top - m.top, rect.width + m.left + m.right, rect.height + m.top + m.bottom);
+      place(paddingBox, rect.left - p.left, rect.top - p.top, rect.width + p.left + p.right, rect.height + p.top + p.bottom);
+      place(contentBox, rect.left, rect.top, rect.width, rect.height, color);
+      paddingBox.style.background = PADDING_COLOR;
+      marginBox.style.background = MARGIN_COLOR;
+      contentBox.style.background = rgba(color, 0.08);
+      contentBox.style.borderColor = color;
+    } else {
+      marginBox.style.display = 'none';
+      paddingBox.style.display = 'none';
+      place(contentBox, rect.left, rect.top, Math.max(1, rect.width), Math.max(1, rect.height), color);
+      contentBox.style.background = rgba(color, 0.08);
+    }
+
     label.style.background = color;
-    overlay.style.left = `${Math.max(0, rect.left)}px`;
-    overlay.style.top = `${Math.max(0, rect.top)}px`;
-    overlay.style.width = `${Math.max(1, rect.width)}px`;
-    overlay.style.height = `${Math.max(1, rect.height)}px`;
     label.textContent = quickMark
-      ? `${describeElement(hoveredElement)} · 快速标记`
-      : describeElement(hoveredElement);
+      ? `${describeElement(hoveredElement)} · ${Math.round(rect.width)}×${Math.round(rect.height)} · 快速标记`
+      : `${describeElement(hoveredElement)} · ${Math.round(rect.width)}×${Math.round(rect.height)}`;
 
     if (rect.top < 28) {
       label.style.top = 'auto';

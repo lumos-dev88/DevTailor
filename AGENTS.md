@@ -1,6 +1,8 @@
 # DevTailor Agent 笔记
 
 > **链路现状**：扩展 → devtailor-hub（`127.0.0.1:34781`）→ Claude Code hub-channel；服务端改动在 Hub 仓库做。
+>
+> **全局接管规则**：扩展不注册静态 content script，也不维护网址白名单。只有用户从 popup、侧边栏或快捷键显式“接管当前页”后，才向任意 http/https 页面按需注入；Hub 请求按侧边栏选择的 Claude Code 实例路由。
 
 在修改 chat、bridge、channel 会话、persistence、SSE、image、Markdown、Browser MCP 或元素库逻辑之前，请先阅读：
 

@@ -1,23 +1,19 @@
 /**
  * DevTailor — Orchestrator
  *
- * Wires all modules together. Runs last in content_scripts injection order.
+ * Wires all modules together. Runs last in the service worker's on-demand injection order.
  *
- * The page-side UI is only the marks toolbar (toolbar.js). Chat, sessions, approvals, mode, plan and
- * usage live in the side panel; marks flow there through marks-sync.js.
+ * The page-side UI is only the compact marks toolbar (toolbar.js): pick (V), reference elements
+ * (R), screenshot (S), takeover dot and open-side-panel. Mark viewing/editing/deletion and the
+ * reference list moved to the side panel (mark-tray.js / references-tray.js); chat, sessions,
+ * approvals, mode, plan and usage also live there. Marks flow to the side panel through
+ * marks-sync.js; references go straight to the service worker (references-core.js).
  */
 (() => {
   'use strict';
   const { store, ui, selector, selectorGen, contextCapture, badges, sidebar } = window.__domReview;
 
-  // Check if extension is enabled before initializing
-  chrome.storage.sync.get('dr_enabled', (result) => {
-    if (result.dr_enabled === false) {
-      console.log('[DevTailor] Extension is disabled.');
-      return;
-    }
-    bootstrap();
-  });
+  bootstrap();
 
   function bootstrap() {
     const toolbar = window.__domReview.toolbar;
@@ -40,8 +36,6 @@
     }
 
     function enterOrAdvanceMarkMode() {
-      // Picking and saving to the library are exclusive page-click modes.
-      if (window.__domReview.elementSaver?.isActive()) window.__domReview.elementSaver.disable();
       if (!selector.isActive()) {
         selector.enable();
         return;
@@ -58,7 +52,7 @@
 
     selector.onStateChange?.(syncMarkModeUi);
 
-    // 2. Toolbar "选取" -> explicit mark workflow states
+    // 2. Toolbar "选取" (button or V) -> explicit mark workflow states
     toolbar?.init({
       onPick: () => {
         if (!selector.isActive() || selector.isPaused?.()) {
@@ -70,10 +64,13 @@
       },
     });
 
-    // 3. Persistent highlights, element library, side-panel sync
+    // 3. Persistent highlights + side-panel sync
     sidebar.updatePersistentHighlights();
-    window.__domReview.elementSaver?.init();
     window.__domReview.marksSync?.init();
+
+    // 3b. Reference elements are captured straight to the service worker; the toolbar only mirrors
+    // the mode and the pending count (the badge refresh comes from DT_REFERENCES_UPDATED).
+    window.__domReview.references?.onChange?.(() => toolbar?.syncReferenceMode?.());
 
     // 4. Render badges for restored reviews (with retries for SPA)
     badges.render();

@@ -6,7 +6,8 @@
   const statusDot = $('#status-dot');
   const bridgePip = $('#bridge-pip');
   const bridgeStatus = $('#bridge-status');
-  const projectName = $('#project-name');
+  const instanceSelect = $('#instance-select');
+  const takeoverBtn = $('#btn-takeover');
   const runtimeLabel = $('#runtime-label');
   const activeTab = $('#active-tab');
   const metaStrip = $('#meta-strip');
@@ -78,6 +79,7 @@
       toggle: $('#mark-tray-toggle'),
       title: $('#mark-tray-title'),
       clearSent: $('#mark-tray-clear-sent'),
+      clearAll: $('#mark-tray-clear-all'),
       body: $('#mark-tray-body'),
     },
     sendToTab: (tabId, message) => chrome.tabs.sendMessage(tabId, message),
@@ -87,6 +89,24 @@
       updateSendState();
     },
   });
+
+  /* ── References tray (全局待发送参考元素, owned by the service worker) ── */
+  const referencesTray = window.__sidepanelReferencesTray.create({
+    els: {
+      root: $('#ref-tray'),
+      toggle: $('#ref-tray-toggle'),
+      title: $('#ref-tray-title'),
+      clear: $('#ref-tray-clear'),
+      body: $('#ref-tray-body'),
+    },
+    send: (message) => runtimeMessage(message),
+    onCountChange: () => updateSendState(),
+  });
+
+  function applyReferences(message) {
+    if (!message || message.type !== window.__domReview.referencesCore.MSG.UPDATED) return;
+    referencesTray.applyList(Array.isArray(message.references) ? message.references : []);
+  }
 
   /** A reloaded page restores marks as unsent while their turn is still running: mark them sent again. */
   function reconcileSentMarks(state) {
@@ -161,25 +181,25 @@
     }
   }
 
-  /**
-   * Tell the service worker which project /health reported so it can attach
-   * X-DevTailor-Project to every Bridge/Hub request. Only on change; silent on failure.
-   * /health with several projects and no top-level projectId stays header-less
-   * (the Hub applies its own fallback rules).
-   */
-  let lastSentProjectId = null;
-  function syncProjectIdToBackground(body) {
-    const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
-    if (!projectId && Array.isArray(body?.projects) && body.projects.length > 1) return;
-    if (projectId === lastSentProjectId) return;
-    // Nothing learned yet and nothing to report: the header already defaults to off.
-    if (!projectId && lastSentProjectId === null) return;
-    lastSentProjectId = projectId;
-    try {
-      chrome.runtime.sendMessage({ type: 'SET_PROJECT_ID', projectId }, () => {
-        void chrome.runtime.lastError;
-      });
-    } catch { /* service worker not reachable */ }
+  let selectedInstanceId = '';
+
+  function runtimeMessage(message) {
+    return new Promise(resolve => chrome.runtime.sendMessage(message, response => resolve(
+      response || { ok: false, error: chrome.runtime.lastError?.message || '扩展后台不可用' }
+    )));
+  }
+
+  function renderInstanceSelect(health) {
+    const model = window.__domReview.instanceHeader.instanceOptions(health, selectedInstanceId);
+    instanceSelect.replaceChildren(...model.options.map(item => {
+      const option = document.createElement('option');
+      option.value = item.value;
+      option.textContent = item.label;
+      option.dataset.offline = String(item.offline);
+      return option;
+    }));
+    instanceSelect.value = model.selected;
+    instanceSelect.title = model.options.find(item => item.value === model.selected)?.label || '自动选择实例';
   }
 
   /** JSON call parsed with bridgeCore: { ok, status, reachable, data, code, message }. */
@@ -265,7 +285,6 @@
       toolStatus.clear();
       setPip('offline');
       bridgeStatus.textContent = '未连接';
-      projectName.textContent = '-';
       runtimeLabel.textContent = '-';
       activeTab.textContent = '-';
       clientId = null;
@@ -278,10 +297,9 @@
     }
     bridgeReachable = true;
     designDocs.setConnected(true);
-    syncProjectIdToBackground(body);
+    renderInstanceSelect(body);
     if (!sseConnected) setPip('online');
     bridgeStatus.textContent = sseConnected ? 'SSE 已连接' : '已连接';
-    projectName.textContent = body.projectName || '-';
     runtimeLabel.textContent = body.agentLabel || body.agentKey || '-';
     activeTab.textContent = body.activeClientId || '未接管';
     clientId = body.activeClientId || null;
@@ -289,7 +307,7 @@
     updateSendState();
     followTray();
 
-    const key = JSON.stringify([body.projectId, body.bridgeInstanceId, clientId]);
+    const key = JSON.stringify([body.defaultInstanceId, clientId]);
     const activeSessionChanged = Boolean(body.activeSessionId && body.activeSessionId !== meta.sessionId);
     if (options.forceSessionSync || syncedSessionKey !== key || activeSessionChanged) {
       await syncActiveSession(key, options);
@@ -315,6 +333,26 @@
   statusDot.addEventListener('click', () => {
     metaStrip.classList.toggle('is-open');
     refreshStatus({ forceSessionSync: true, syncReason: 'manual' });
+  });
+
+  instanceSelect.addEventListener('change', async () => {
+    selectedInstanceId = instanceSelect.value;
+    const result = await runtimeMessage({ type: 'SET_INSTANCE_SELECTION', instanceId: selectedInstanceId });
+    if (!result.ok) showHint(result.error || '保存实例选择失败');
+    await refreshStatus({ forceSessionSync: true, syncReason: 'instance' });
+  });
+
+  takeoverBtn.addEventListener('click', async () => {
+    takeoverBtn.disabled = true;
+    const tabId = await activeBrowserTabId();
+    const result = await runtimeMessage({ type: 'TAKEOVER_TAB', tabId });
+    takeoverBtn.disabled = false;
+    if (!result.ok) {
+      showHint(result.error || '接管当前页失败。');
+      return;
+    }
+    showHint('已接管当前页，可以开始标记。', 'info');
+    await refreshStatus({ forceSessionSync: true, syncReason: 'takeover' });
   });
 
   function renderPromptCtx(metaNow) {
@@ -350,7 +388,9 @@
   function updateSendState() {
     const hasText = promptEl.value.trim().length > 0;
     const hasImages = (imageManager?.count?.() || 0) > 0;
-    const hasPageContext = markTray.hasContent();
+    // References count as page context on their own: a message with only references is sendable.
+    const hasReferences = referencesTray.count() > 0;
+    const hasPageContext = markTray.hasContent() || hasReferences;
     const connected = Boolean(clientId);
 
     sendBtn.disabled = sendInProgress || !(connected && (hasText || hasImages || hasPageContext));
@@ -690,6 +730,10 @@
       markTray.model.applyUpdate(message);
       return;
     }
+    if (message && message.type === window.__domReview.referencesCore.MSG.UPDATED) {
+      applyReferences(message);
+      return;
+    }
     if (message && message.type === 'DT_SIDEPANEL_FOCUS_INPUT') {
       focusComposer();
       return;
@@ -733,7 +777,7 @@
   /* ── Send flow ─────────────────────────────────── */
   async function executeSend(text, images) {
     if (!clientId) {
-      showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
+      showHint(bridgeReachable ? '未接管当前标签：请点击侧边栏顶部“接管当前页”。' : core.errorInfo('bridge_offline').text);
       return { ok: false };
     }
 
@@ -744,6 +788,12 @@
     const markIds = parts ? parts.markIds : [];
     const sentMarks = markTray.model.getState().marks.filter((m) => markIds.includes(m.id));
 
+    // 参考元素 come from the global list, never from the page's marks/screenshots.
+    const referencesCore = window.__domReview.referencesCore;
+    const referenceList = await runtimeMessage({ type: referencesCore.MSG.GET });
+    const sentReferences = referencesCore.toSendReferences(referenceList && referenceList.ok ? referenceList.references : []);
+    const sentReferenceIds = sentReferences.map((ref) => ref.id);
+
     const payload = {
       type: 'review',
       payload: {
@@ -752,6 +802,7 @@
         items: parts ? parts.items : [],
         screenshots: allImages,
         screenshot: allImages[0] || null,
+        references: sentReferences,
       },
       clientId,
       tabId: clientId,
@@ -777,14 +828,34 @@
     lastPromptCtx = {
       sessionId: meta.sessionId,
       marks: markIds.length,
+      references: sentReferenceIds.length,
       images: allImages.length,
       designDocs: (designDocs.getState().docs || []).filter((d) => d.enabled).length,
     };
     renderPromptCtx(meta);
+    // 参考元素：只有 Hub 明确回 referencesAccepted == 发送条数 才算接收。
+    const resolved = referencesCore.resolveSentReferences(res, sentReferenceIds);
+    if (sentReferenceIds.length) {
+      if (!resolved.keep) {
+        await runtimeMessage({ type: referencesCore.MSG.ACCEPTED, ids: sentReferenceIds });
+      } else if (resolved.reason === 'unsupported') {
+        showHint('当前 Hub 版本不支持参考元素，参考未被接收', 'info');
+      } else if (resolved.reason === 'count_mismatch') {
+        showHint(`Hub 只接收了 ${resolved.count} 个参考元素，剩余保留待发`);
+      }
+    }
     // Accepted: screenshots are consumed and the sent marks are cleared now (the user bubble keeps a copy).
     if (pageImages.length) await markTray.controller.markSent([], true);
     settleSentMarks('done');
-    return { ok: true, markCount: markIds.length, imageCount: allImages.length, marks: sentMarks, images: allImages };
+    return {
+      ok: true,
+      markCount: markIds.length,
+      referenceCount: sentReferenceIds.length,
+      acceptedReferences: Boolean(sentReferenceIds.length && !resolved.keep),
+      imageCount: allImages.length,
+      marks: sentMarks,
+      images: allImages,
+    };
   }
 
   async function handleSend() {
@@ -792,10 +863,10 @@
 
     const text = promptEl.value.trim();
     const pendingImages = imageManager?.getImages?.() || [];
-    if (!text && pendingImages.length === 0 && !markTray.hasContent()) return;
+    if (!text && pendingImages.length === 0 && !markTray.hasContent() && referencesTray.count() === 0) return;
 
     if (!clientId) {
-      showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
+      showHint(bridgeReachable ? '未接管当前标签：请点击侧边栏顶部“接管当前页”。' : core.errorInfo('bridge_offline').text);
       return;
     }
 
@@ -807,7 +878,11 @@
       const result = await executeSend(text, pendingImages);
       if (result.ok) {
         const optimisticContent = text
-          || (result.markCount ? `发送 ${result.markCount} 个标记` : `发送 ${result.imageCount} 张图片`);
+          || (result.markCount
+            ? `发送 ${result.markCount} 个标记${result.referenceCount ? ` · 参考 ${result.referenceCount}` : ''}`
+            : (result.referenceCount
+              ? `发送参考 ${result.referenceCount}`
+              : `发送 ${result.imageCount} 张图片`));
         // The bridge echoes the user message to every UI (display_message); it may beat this response.
         const echoed = messageStore.findLast(item =>
           item.role === 'user' &&
@@ -876,7 +951,7 @@
   /* ── New session (POST /new-session) ──────────── */
   async function startNewSession() {
     if (!clientId) {
-      showHint(bridgeReachable ? '未接管当前标签：请先在页面里点击“连接当前页”。' : core.errorInfo('bridge_offline').text);
+      showHint(bridgeReachable ? '未接管当前标签：请点击侧边栏顶部“接管当前页”。' : core.errorInfo('bridge_offline').text);
       return;
     }
     newSessionBtn.disabled = true;
@@ -1060,7 +1135,7 @@
     if (tabId === markTray.model.getState().tabId) markTray.follow(null);
   });
 
-  // "在侧边栏发送" in the page toolbar opens this panel and asks for the composer focus.
+  // The side panel opens itself (toolbar button / shortcut) and may be asked to focus the composer.
   try {
     chrome.runtime.sendMessage({ type: 'DT_SIDEPANEL_READY' }, (res) => {
       void chrome.runtime.lastError;
@@ -1071,7 +1146,11 @@
   /* ── Init ──────────────────────────────────────── */
   applyMeta(meta);
   updateSendState();
-  refreshStatus({ forceSessionSync: true, syncReason: 'initial' });
+  referencesTray.refresh();
+  runtimeMessage({ type: 'GET_INSTANCE_SELECTION' }).then(result => {
+    selectedInstanceId = result.instanceId || '';
+    refreshStatus({ forceSessionSync: true, syncReason: 'initial' });
+  });
   pollTimer = setInterval(refreshStatus, 30000);
   window.addEventListener('beforeunload', () => {
     if (pollTimer) clearInterval(pollTimer);

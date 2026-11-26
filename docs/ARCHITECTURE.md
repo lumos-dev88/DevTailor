@@ -11,9 +11,9 @@
 │  │  Popup        │  │  Background  │  │  Content Script     │  │
 │  │  (popup.js)   │  │  (service-   │  │  (Shadow DOM UI)    │  │
 │  │               │  │   worker.js) │  │                     │  │
-│  │  - 启用/禁用  │  │              │  │  - Chat Panel       │  │
-│  │  - 站点管理   │  │  - 权限管理  │  │  - Element Saver    │  │
-│  │  - 面板尺寸   │  │  - 注入脚本  │  │  - Selector Mode    │  │
+│  │  - 接管当前页 │  │              │  │  - Marks Toolbar    │  │
+│  │  - 打开侧栏   │  │  - 按需注入  │  │  - Badges / 备注    │  │
+│  │               │  │  - Hub 代理  │  │  - Selector Mode    │  │
 │  └───────────────┘  └──────────────┘  │  - VisBug HitTest   │  │
 │                                        └─────────────────────────┘  │
 │                                                                   │
@@ -24,48 +24,25 @@
 
 ## 🔄 关键数据流
 
-### 1. 初始化流程
+### 1. 按需注入与初始化流程
 
-```
-┌────────────────────┐
-│ Page Load          │
-└─────────┬──────────┘
-          │
-          ▼
-┌────────────────────────────────────────────┐
-│ content-script.js (Orchestrator)           │
-│ 1. Check extension enabled                 │
-│ 2. ui.init() - Create Shadow DOM           │
-│ 3. sidebar.render()                        │
-│ 4. chatPanel.init()                        │
-│ 5. elementSaver.init()                     │
-│ 6. Wire Bridge proxy listeners             │
-│ 7. badges.render()                         │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
-┌────────────────────────────────────────────┐
-│ chatPanel.init()                           │
-│ 1. wsClient.connect()                      │
-│ 2. Register listeners:                     │
-│    - onProjectChange()                     │
-│    - onSessionChange()                     │
-│    - onStatusChange()                      │
-│ 3. wsClient.onMessage(handleBridgeMessage) │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
-┌────────────────────────────────────────────┐
-│ wsClient.connect()                         │
-│ 1. chrome.runtime.sendMessage(CONNECT)     │
-│ 2. background fetches /events SSE stream   │
-│ 3. tabs.sendMessage(open/message/error)    │
-│ 4. content fetches /health through proxy   │
-│ 5. startHeartbeat() - 30s interval         │
-└────────────────────────────────────────────┘
+```text
+普通网页加载（无 DevTailor 脚本）
+  → 用户从 popup / sidePanel / 快捷键触发“接管当前页”
+  → service worker 校验 http/https，并按顺序注入 MAIN console bridge、MAIN framework bridge、CSS、isolated modules
+  → content-script.js 初始化 Shadow DOM 标记工具条、标记同步与 SSE client
+  → worker 等页面 SSE 连接 Hub 后调用 /activate
+  → storage.session 记录曾注入 tab 与 active tab
+  → 刷新/跳转 complete：曾注入 tab 自动补注入；仅 active tab 重新 activate
 ```
 
-### 2. 发送消息流程
+`chrome://`、扩展商店等受限页面不进入注入流程。console bridge 在接管后才生效，无法恢复接管前日志。
+
+### 2. 实例路由
+
+侧边栏从 `GET /health` 读取按活跃度排序的 `instances` 与 `defaultInstanceId`。选择“自动”时 worker 不附加实例头；选择具体实例时，worker 对 HTTP 和 SSE 统一附加 `X-DevTailor-Instance`。选择存于 `chrome.storage.local`，MV3 worker 启动后的第一条 Hub 请求必须等待恢复完成。离线选择不会改变 Hub 连接状态，只让 `/review` 返回 `instance_offline`。
+
+### 3. 发送消息流程
 
 ```
 User types message
@@ -122,50 +99,31 @@ User types message
 └────────────────────────┘
 ```
 
-### 3. 元素保存/查询流程
+### 3. 元素库使用流程
+
+页内工具条和侧边栏都没有元素库浏览器 UI（原 `element-saver.js` 已删除）。元素库只由 browser tool 经本地链路使用：
 
 ```
-User clicks element in selector mode
+Agent / browser tool
        │
        ▼
 ┌────────────────────────────────────────────┐
-│ elementSaver.handleClick()                 │
-│ 1. Generate selector/xpath                 │
-│ 2. Capture context (a11y, text, box, etc.) │
-│ 3. showSaveCard(review, defaultName)       │
+│ content/modules/browser-actions.js          │
+│  get_element_targets / save_element_target  │
+│  / delete_element_target                    │
 └─────────┬──────────────────────────────────┘
           │
           ▼
 ┌────────────────────────────────────────────┐
-│ elementSaver.submitSaveCard()              │
-│ 1. Get name, description, pagePattern      │
-│ 2. Build payload via elementTargets        │
-│ 3. POST /element-targets                   │
-└────────────────────────────────────────────┘
-
-─────────────────────────────────────────────
-
-User opens element library
-       │
-       ▼
-┌────────────────────────────────────────────┐
-│ elementSaver.showLibraryCard()             │
-│ 1. Create card DOM                         │
-│ 2. loadElementLibrary()                    │
+│ content/modules/element-targets.js          │
+│  resolveParams / savePayload / list / del   │
 └─────────┬──────────────────────────────────┘
           │
           ▼
-┌────────────────────────────────────────────┐
-│ elementSaver.loadElementLibrary()          │
-│ 1. GET /element-targets                   │
-└─────────┬──────────────────────────────────┘
-          │
-          ▼
-┌────────────────────────┐
-│ renderElementLibrary() │
-│ Display list in card   │
-└────────────────────────┘
+   Bridge  /element-targets  (GET/POST/DELETE)
 ```
+
+`content` 仍持有 review 的 selector/xpath/context，`buildTargetPayload` 可把一个 mark 转成元素目标供 browser tool 使用。
 
 ### 4. 设计规范（DESIGN.md）流程
 
@@ -500,9 +458,10 @@ window.__domReview.chatPanel.getMessages()
 window.__domReview.createMessageStore().getAll()  // 仅查看结构，不要直接操作
 ```
 
-### 3. 查看元素库
+### 3. 查看页内工具条与标记状态
 ```javascript
-await window.__domReview.elementTargets.listAllTargets()
+window.__domReview.toolbar?.isHidden?.()
+window.__domReview.store.getAll()          // 页面标记（单一事实来源）
 ```
 
 ### 4. 手动触发重连
@@ -558,6 +517,8 @@ SSE(每个标签页一条, 经 service worker) ─┬─▶ 页内 ws-client（�
 - 侧边栏 → 内容脚本（`chrome.tabs.sendMessage`）：`DT_GET_MARKS`（打开/切换标签时拉取）、`DT_REMOVE_MARK`、`DT_CLEAR_MARKS`、`DT_LOCATE_MARK`、`DT_REMOVE_SCREENSHOT`、`DT_GET_SCREENSHOT_THUMBS`、`DT_BUILD_PAYLOAD`（返回 `{pageUrl, items, screenshots, markIds}`，复用 `prompt-builder.js` 的 `buildPayload`）、`DT_MARKS_SENT/UNSENT/CLEAR_SENT`。托盘从不修改自己的副本，只应用页面回的快照。
 - 工具条 → service worker：`OPEN_SIDE_PANEL {focusInput}`（service worker 调 `chrome.sidePanel.open({tabId})`）；侧边栏加载后发 `DT_SIDEPANEL_READY` 询问是否需要聚焦输入框。
 
-发送：侧边栏 `executeSend` 先 `DT_BUILD_PAYLOAD`，再 `POST /review {pageUrl, userIntent, items, screenshots}`。发送前标记乐观标为“已发送”（不会进入并发 BUILD），`POST /review` 返回 2xx 即清除，非 2xx/网络错误则恢复为未发送（不再等 `done`）。用户消息气泡带 `marks`（编号 chip + 简述 + 截图缩略图）；历史回放里 `marksCore.parseDevTailorPrompt` 识别 prompt-builder 的 Markdown（`## Current Page` / `## User Intent` / `### N \`selector\``）并紧凑渲染，识别失败显示原文。
+发送：侧边栏 `executeSend` 先 `DT_BUILD_PAYLOAD`，再 `POST /review {pageUrl, userIntent, items, screenshots, references?}`。发送前标记乐观标为“已发送”（不会进入并发 BUILD），`POST /review` 返回 2xx 即清除，非 2xx/网络错误则恢复为未发送（不再等 `done`）。用户消息气泡带 `marks`（编号 chip + 简述 + 截图缩略图）；历史回放里 `marksCore.parseDevTailorPrompt` 识别 prompt-builder 的 Markdown（`## Current Page` / `## User Intent` / `### N \`selector\``）并紧凑渲染，识别失败显示原文。
+
+**参考元素（references）**：请求体的 `payload.references` 是独立数组（`id/url/title/selector/note/styles/html/screenshot?`），与 `items`（标记）和 `screenshots`（页面截图附件）互不重叠；采集在页内完成脱敏（见 `docs/HANDOFF.md`「参考元素」），列表由 service worker 存 `chrome.storage.session`（`dt_references`，全局、上限 8）并广播 `DT_REFERENCES_UPDATED` 给页内工具条与侧边栏分区。Hub 在 2xx body 回 `referencesAccepted: <number>`，仅当等于本次条数时扩展才移除这些 id（`DT_REFERENCES_ACCEPTED`）；无该字段＝旧 Hub 不支持，保留待发并提示；失败全部保留。
 
 取消接管：桥接没有显式释放接口，工具条断开本标签的事件流，桥接约 3 秒后释放；侧边栏打开时它自己的事件流也挂着同一个 clientId，释放可能不生效，工具条会提示“关闭侧边栏后可取消接管”。

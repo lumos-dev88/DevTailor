@@ -40,7 +40,6 @@ const rules = [
       /^content\/modules\/browser-console\.js$/,
       /^content\/modules\/screenshot\.js$/,
       /^content\/modules\/element-targets\.js$/,
-      /^content\/modules\/element-saver\.js$/,
     ],
     docs: [
       'docs/HANDOFF.md',

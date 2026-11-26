@@ -83,11 +83,11 @@
       if (event.relatedTarget && container.contains(event.relatedTarget)) event.stopPropagation();
     }, true);
     window.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape' || !selectedId) return;
+      if (event.key !== 'Escape' || event.isComposing || !selectedId) return;
       const path = event.composedPath ? event.composedPath() : [];
       if (!path.includes(container)) return;
       event.stopPropagation();
-      closeFloating();
+      closeFloating({ save: false });
     }, true);
   }
 
@@ -178,6 +178,8 @@
         padding: 0 9px 9px;
       }
       .dt-mark-card-editor {
+        /* Cards live in the page DOM: do not rely on the host page for border-box. */
+        box-sizing: border-box;
         width: 100%;
         min-height: 68px;
         max-height: 128px;
@@ -254,7 +256,7 @@
       selectReview(review.id);
     });
     card.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeFloating();
+      if (event.key === 'Escape' && !event.isComposing) closeFloating({ save: false });
     });
     return card;
   }
@@ -298,13 +300,17 @@
     if (textarea) {
       textarea.addEventListener('click', event => event.stopPropagation());
       textarea.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && !event.shiftKey) {
+        // Respect an IME composition: Enter/Esc while composing belong to the input method.
+        if (event.isComposing) return;
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
           event.preventDefault();
+          event.stopPropagation();
           saveComment(review.id, textarea.value);
           closeFloating();
         } else if (event.key === 'Escape') {
           event.preventDefault();
-          closeFloating();
+          event.stopPropagation();
+          closeFloating({ save: false });
         }
       });
     }
@@ -437,6 +443,10 @@
     if (editor) saveComment(selectedId, editor.value);
   }
 
+  /**
+   * Close the in-place editor and resume picking the next element. `save: false` discards the typed
+   * note (Esc), `resume: false` is for leaving pick mode altogether.
+   */
   function closeFloating(options = {}) {
     if (!selectedId) return;
     if (options.save !== false) saveSelectedComment();
@@ -497,7 +507,7 @@
       closeFloating();
     }, true);
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeFloating();
+      if (event.key === 'Escape' && !event.isComposing) closeFloating({ save: false });
     });
   }
 

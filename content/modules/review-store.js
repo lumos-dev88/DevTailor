@@ -1,10 +1,10 @@
 /**
  * DevTailor — Review Store Module
  *
- * Central CRUD store for review marks. This is the single source of truth for page marks:
- * the toolbar drawer, the in-page badges and (through marks-sync.js) the side panel's mark tray
- * all read from it. The store itself is in-memory; marks-sync.js mirrors it (plus pending screenshots)
- * into chrome.storage.session per tab so a page reload restores them.
+ * Central CRUD store for review marks. This is the single source of truth for page marks: the
+ * in-page badges and (through marks-sync.js) the side panel's mark tray read from it. The store
+ * itself is in-memory; marks-sync.js mirrors it (plus pending screenshots) into
+ * chrome.storage.session per tab so a page reload restores them.
  *
  * Listeners get `(reviews, change)` where change = { type, ids } and type is one of
  * add | update | remove | clear | sent | import.

@@ -1,29 +1,31 @@
 /**
  * DevTailor — Service Worker (Background)
  *
- * Handles:
- * - Keyboard shortcut command relay (Ctrl/Cmd+Shift+X)
- * - Action icon state for allowed tabs
- * - Dynamic content script registration for custom URL patterns
- * - Message relay between popup and content scripts
+ * Handles on-demand page injection/takeover and all Hub HTTP/SSE proxying.
  */
 
-// Pure logic module (no chrome API): builds the X-DevTailor-Project header value.
-// Relative to this worker script (background/), like every other module here.
-importScripts('project-header.js');
+importScripts('instance-header.js', 'injection-state.js', '../content/modules/references-core.js');
 
-const STORAGE_KEY = 'dr_custom_patterns';
-const ENABLED_KEY = 'dr_enabled';
+const LEGACY_PATTERNS_KEY = 'dr_custom_patterns';
+const INSTANCE_KEY = 'dt_selected_instance_id';
+const INJECTED_TABS_KEY = 'dt_injected_tabs';
+const ACTIVE_TAB_KEY = 'dt_active_tab';
 const BRIDGE_URLS = ['http://localhost:34781', 'http://127.0.0.1:34781'];
 const BRIDGE_CONNECT_TIMEOUT_MS = 1500;
 const pendingBrowserActions = new Map();
 const bridgeSseProxies = new Map();
+const injectionPromises = new Map();
+let injectionStateMutation = Promise.resolve();
+let activationMutation = Promise.resolve();
 let sidePanelFocusRequestedAt = 0;
 let preferredBridgeUrlIndex = 0;
-// Project the bridge currently serves (learned from /health). Attached to every
-// Bridge/Hub request as X-DevTailor-Project so a Hub can route to the right project.
-let currentProjectId = '';
-const projectHeader = self.__domReview.projectHeader;
+let selectedInstanceId = '';
+const instanceHeader = self.__domReview.instanceHeader;
+const injectionState = self.__domReview.injectionState;
+const referencesCore = self.__domReview.referencesCore;
+const instanceReady = chrome.storage.local.get(INSTANCE_KEY).then(result => {
+  selectedInstanceId = instanceHeader.normalizeInstanceId(result[INSTANCE_KEY]);
+});
 
 const MAIN_WORLD_START_SCRIPTS = [
   'content/modules/browser-console-bridge.js'
@@ -31,10 +33,11 @@ const MAIN_WORLD_START_SCRIPTS = [
 const MAIN_WORLD_SCRIPTS = [
   'content/modules/framework-bridge.js'
 ];
-// Keep in sync with the isolated-world content_scripts list in manifest.json (order matters).
+// Complete isolated-world on-demand injection list; order matters.
 const ISOLATED_WORLD_SCRIPTS = [
   'content/modules/review-store.js',
   'content/modules/marks-core.js',
+  'content/modules/references-core.js',
   'content/modules/toolbar-core.js',
   'content/modules/element-targets.js',
   'content/modules/selector-generator.js',
@@ -42,7 +45,6 @@ const ISOLATED_WORLD_SCRIPTS = [
   'content/modules/context-capture.js',
   'content/modules/visbug-hit-test.js',
   'content/modules/shadow-ui.js',
-  'content/modules/element-saver.js',
   'content/modules/badges.js',
   'content/modules/sidebar.js',
   'content/modules/bridge-core.js',
@@ -53,101 +55,37 @@ const ISOLATED_WORLD_SCRIPTS = [
   'content/modules/ws-client.js',
   'content/modules/marks-sync.js',
   'content/modules/screenshot.js',
+  'content/modules/references.js',
   'content/modules/selector-mode.js',
   'content/modules/toolbar.js',
-  'content/modules/export-import.js',
   'content/content-script.js'
 ];
 const ISOLATED_WORLD_CSS = ['content/content-style.css'];
-const DEFAULT_PATTERNS = ['*://localhost/*', '*://127.0.0.1/*'];
 
-function stripPort(host) {
-  if (!host) return '';
-  if (host.startsWith('[')) {
-    const end = host.indexOf(']');
-    return end === -1 ? host : host.slice(0, end + 1);
-  }
-  return host.split(':')[0];
-}
-
-function normalizePattern(pattern) {
-  const value = String(pattern || '').trim();
-  if (!value) return null;
-
-  const match = value.match(/^(\*|https?):\/\/([^/]+)(?:\/.*)?$/i);
-  if (match) {
-    const scheme = match[1].toLowerCase();
-    const host = stripPort(match[2].toLowerCase());
-    if (!host || /\s/.test(host)) return null;
-    return `${scheme}://${host}/*`;
-  }
-
+function isInjectableUrl(url) {
   try {
-    const url = new URL(value);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    return `${url.protocol}//${url.hostname.toLowerCase()}/*`;
+    const protocol = new URL(url || '').protocol;
+    return protocol === 'http:' || protocol === 'https:';
   } catch {
-    const host = stripPort(value.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase());
-    if (!host || /\s/.test(host)) return null;
-    return `*://${host}/*`;
+    return false;
   }
 }
 
-async function getCustomPatterns() {
-  const result = await chrome.storage.sync.get(STORAGE_KEY);
-  const rawPatterns = Array.isArray(result[STORAGE_KEY]) ? result[STORAGE_KEY] : [];
-  const patterns = [...new Set(rawPatterns.map(normalizePattern).filter(Boolean))];
-  if (JSON.stringify(rawPatterns) !== JSON.stringify(patterns)) {
-    await saveCustomPatterns(patterns);
-  }
-  return patterns;
-}
-
-async function saveCustomPatterns(patterns) {
-  await chrome.storage.sync.set({ [STORAGE_KEY]: patterns });
-}
-
-async function registerDynamicScripts() {
+async function cleanupLegacyRegistration() {
   try {
-    await chrome.scripting.unregisterContentScripts({ ids: ['dr-custom-console', 'dr-custom-main', 'dr-custom-isolated'] });
-  } catch {
-    // Scripts may not exist yet — ignore
-  }
-
-  const patterns = await getCustomPatterns();
-  if (patterns.length === 0) return;
-
-  await chrome.scripting.registerContentScripts([
-    {
-      id: 'dr-custom-console',
-      matches: patterns,
-      js: MAIN_WORLD_START_SCRIPTS,
-      runAt: 'document_start',
-      world: 'MAIN'
-    },
-    {
-      id: 'dr-custom-main',
-      matches: patterns,
-      js: MAIN_WORLD_SCRIPTS,
-      runAt: 'document_idle',
-      world: 'MAIN'
-    },
-    {
-      id: 'dr-custom-isolated',
-      matches: patterns,
-      js: ISOLATED_WORLD_SCRIPTS,
-      css: ISOLATED_WORLD_CSS,
-      runAt: 'document_idle'
-    }
-  ]);
+    const registered = await chrome.scripting.getRegisteredContentScripts();
+    const ids = registered.map(script => script.id).filter(id => id.startsWith('dr-custom-'));
+    if (ids.length) await chrome.scripting.unregisterContentScripts({ ids });
+  } catch {}
+  await chrome.storage.sync.remove(LEGACY_PATTERNS_KEY).catch(() => {});
 }
 
-async function injectDevTailorIntoTab(tabId) {
-  if (!tabId) return { injected: false, error: 'Missing tabId' };
+async function performInjection(tabId) {
+  if (!tabId) return { injected: false, error: '缺少标签页。' };
   try {
     const tab = await chrome.tabs.get(tabId);
-    if (!await isAllowedPageUrl(tab?.url || '')) {
-      return { injected: false, unsupported: true, error: 'DevTailor only runs on allowed http/https pages.' };
+    if (!isInjectableUrl(tab?.url || '')) {
+      return { injected: false, unsupported: true, error: '此页面不支持注入。请在普通 http/https 网页上使用 DevTailor（Chrome 内置页和扩展商店不可用）。' };
     }
 
     const existing = await chrome.scripting.executeScript({
@@ -167,6 +105,10 @@ async function injectDevTailorIntoTab(tabId) {
           'dom-review-highlights',
           'dom-review-selector-overlay',
           'dom-review-selector-hint',
+          'dom-review-reference-overlay',
+          'dom-review-reference-hint',
+          'dom-review-reference-popup',
+          'dom-review-reference-styles',
           'devtailor-host',
           'devtailor-badges',
           'devtailor-highlights'
@@ -193,39 +135,202 @@ async function injectDevTailorIntoTab(tabId) {
     });
     return { injected: true };
   } catch (err) {
-    return { injected: false, error: err?.message || 'Failed to inject DevTailor into tab' };
+    const detail = err?.message || '注入失败';
+    return { injected: false, error: `无法接管此页面：${detail}。Chrome 内置页和扩展商店不允许扩展注入。` };
   }
+}
+
+async function injectDevTailorIntoTab(tabId) {
+  if (injectionPromises.has(tabId)) return injectionPromises.get(tabId);
+  const promise = performInjection(tabId).finally(() => injectionPromises.delete(tabId));
+  injectionPromises.set(tabId, promise);
+  return promise;
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
   console.log('DevTailor extension installed');
-  await registerDynamicScripts();
+  await cleanupLegacyRegistration();
   if (chrome.sidePanel?.setPanelBehavior) {
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
   }
 });
 
-registerDynamicScripts();
+cleanupLegacyRegistration();
 
 if (chrome.sidePanel?.setPanelBehavior) {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 }
 
-// --- Keyboard shortcut: toggle the marks toolbar drawer ---
+// --- Explicit takeover / keyboard shortcut ---
 
-async function toggleSidebar(tabId) {
-  const injection = await injectDevTailorIntoTab(tabId);
-  if (!injection.injected && !injection.alreadyInjected) return false;
+async function getInjectionSession() {
+  const saved = await chrome.storage.session.get([INJECTED_TABS_KEY, ACTIVE_TAB_KEY]);
+  return {
+    rememberedTabIds: injectionState.normalizeTabIds(saved[INJECTED_TABS_KEY]),
+    activeTabId: Number(saved[ACTIVE_TAB_KEY]) || null,
+  };
+}
+
+async function saveInjectionSession(state) {
+  await chrome.storage.session.set({
+    [INJECTED_TABS_KEY]: state.rememberedTabIds,
+    [ACTIVE_TAB_KEY]: state.activeTabId,
+  });
+}
+
+function mutateInjectionSession(reducer) {
+  const operation = injectionStateMutation.then(async () => {
+    const current = await getInjectionSession();
+    const next = reducer(current);
+    await saveInjectionSession(next);
+    return next;
+  });
+  injectionStateMutation = operation.catch(() => {});
+  return operation;
+}
+
+async function activateInjectedTab(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async () => {
+        const deadline = Date.now() + 6000;
+        const ws = window.__domReview?.wsClient;
+        if (!ws) return { ok: false, error: 'DevTailor 页面客户端尚未就绪。' };
+        ws.connect?.();
+        while (Date.now() < deadline && ws.getStatus?.() !== 'connected') {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (ws.getStatus?.() !== 'connected') return { ok: false, error: 'Hub 未连接，请确认 devtailor-hub 正在运行。' };
+        return await ws.activate();
+      },
+    });
+    const result = results?.[0]?.result;
+    return result && result.ok !== false ? { ok: true, ...result } : { ok: false, error: result?.error || '接管当前页失败。' };
+  } catch (err) {
+    return { ok: false, error: err?.message || '接管当前页失败。' };
+  }
+}
+
+function queueActivation(tabId, claimOwnership) {
+  const operation = activationMutation.then(async () => {
+    if (!claimOwnership) {
+      const current = await getInjectionSession();
+      if (current.activeTabId !== Number(tabId)) return { ok: false, stale: true };
+    }
+    const activation = await activateInjectedTab(tabId);
+    if (activation.ok && claimOwnership) {
+      await mutateInjectionSession(current => injectionState.afterTakeover(current.rememberedTabIds, tabId));
+    }
+    return activation;
+  });
+  activationMutation = operation.catch(() => {});
+  return operation;
+}
+
+// --- Reference elements: the single writer of the pending list ---
+// chrome.storage.session holds the global list (not per tab); every write goes through one serialised
+// mutation so two concurrent ADDs cannot overwrite each other with a stale whole table. Content
+// scripts send MSG.ADD; the side panel sends note edits / removals / clears. Each change is
+// broadcast to extension pages (DT_REFERENCES_UPDATED).
+
+const REFERENCES_KEY = 'dt_references';
+let referencesMutation = Promise.resolve();
+
+function readReferences() {
+  return chrome.storage.session.get(REFERENCES_KEY).then((res) => (
+    Array.isArray(res[REFERENCES_KEY]) ? res[REFERENCES_KEY] : []
+  ));
+}
+
+function broadcastReferences(list) {
+  const message = { type: referencesCore.MSG.UPDATED, references: list };
+  chrome.runtime.sendMessage(message).catch(() => {}); // no side panel / page listener is normal
+}
+
+/**
+ * Read-only check for the page: is `tabId` the one the user is looking at? A background tab must
+ * not produce a "reference screenshot" of whatever page happens to be frontmost.
+ */
+async function referenceTabCheck(tabId) {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const foreground = Boolean(tab && Number(tab.id) === Number(tabId));
+    return { ok: true, match: foreground, foreground };
+  } catch {
+    return { ok: true, match: false, foreground: false };
+  }
+}
+
+/**
+ * Apply `reducer` to the stored list and return its result (the caller turns it into a response).
+ * Quota failures are reported back instead of being swallowed: the page keeps the entry and tells
+ * the user the reference was not saved.
+ */
+function mutateReferences(reducer) {
+  const operation = referencesMutation.then(async () => {
+    const current = await readReferences();
+    const outcome = reducer(current);
+    if (!outcome.changed) return outcome;
+    try {
+      await chrome.storage.session.set({ [REFERENCES_KEY]: outcome.list });
+    } catch (err) {
+      console.warn('[DevTailor] storing references failed:', err && err.message);
+      return { ok: false, error: `storage_failed:${(err && err.message) || 'quota'}`, list: current };
+    }
+    broadcastReferences(outcome.list);
+    return outcome;
+  });
+  referencesMutation = operation.catch((err) => {
+    console.warn('[DevTailor] reference mutation failed:', err && err.message);
+    return { ok: false, error: String((err && err.message) || err) };
+  });
+  return operation;
+}
+
+/**
+ * Ctrl/Cmd+Shift+X. A page that is not taken over gets injected + taken over, but never when some
+ * other tab already owns the takeover (the toolbar only appears/hides there). With no owner the
+ * previous behaviour applies: take this page over.
+ */
+async function handleToggleCommand(tabId) {
+  const session = await getInjectionSession();
+  if (session.activeTabId != null && Number(session.activeTabId) !== Number(tabId)) {
+    const injection = await injectDevTailorIntoTab(tabId);
+    return injection.injected || injection.alreadyInjected
+      ? toggleToolbar(tabId)
+      : { ok: false, action: 'show', error: injection.error || '注入失败' };
+  }
+  const takenOver = Number(session.activeTabId) === Number(tabId);
+  if (!takenOver) {
+    const takeover = await takeoverTab(tabId);
+    return takeover.ok ? { ok: true, action: 'takeover' } : { ok: false, action: 'takeover', error: takeover.error || '接管当前页失败。' };
+  }
+  return toggleToolbar(tabId);
+}
+
+function toggleToolbar(tabId) {
   return chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
       const toolbar = window.__domReview && window.__domReview.toolbar;
-      if (!toolbar) return false;
-      window.__domReview.wsClient?.connect?.();
-      if (toolbar.isOpen()) toolbar.close(); else toolbar.open(false);
-      return toolbar.isOpen();
+      if (!toolbar) return { ok: false, error: '工具条未加载，请刷新页面' };
+      const visible = toolbar.toggleVisibility();
+      return { ok: true, visible };
     }
-  }).catch(() => {});
+  }).then(results => results?.[0]?.result || { ok: false, error: '切换工具条失败' })
+    .catch(err => ({ ok: false, error: err?.message || '切换工具条失败' }));
+}
+
+async function takeoverTab(tabId) {
+  const injection = await injectDevTailorIntoTab(tabId);
+  if (!injection.injected && !injection.alreadyInjected) return { ok: false, ...injection };
+  await mutateInjectionSession(current => ({
+    rememberedTabIds: injectionState.normalizeTabIds([...current.rememberedTabIds, tabId]),
+    activeTabId: current.activeTabId,
+  }));
+  const activation = await queueActivation(tabId, true);
+  return { ...injection, ...activation };
 }
 
 function executeRunJsInTab(tabId, message, sendResponse) {
@@ -323,64 +428,19 @@ function executeRunJsInTab(tabId, message, sendResponse) {
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'toggle-sidebar') {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (tab && tab.id) toggleSidebar(tab.id);
+      if (tab && tab.id) handleToggleCommand(tab.id).catch(() => {});
     });
   }
 });
 
-// --- Tab URL detection for action icon title ---
-
-function urlMatchesPattern(url, pattern) {
-  try {
-    const parsedUrl = new URL(url);
-    const parsedPattern = String(pattern || '').match(/^(\*|https?):\/\/([^/]+)(\/.*)$/i);
-    if (!parsedPattern) return false;
-
-    const scheme = parsedPattern[1].toLowerCase();
-    const hostPattern = stripPort(parsedPattern[2].toLowerCase());
-    const urlScheme = parsedUrl.protocol.replace(':', '').toLowerCase();
-    const urlHost = parsedUrl.hostname.toLowerCase();
-
-    if (!['http', 'https'].includes(urlScheme)) return false;
-    if (scheme !== '*' && scheme !== urlScheme) return false;
-    if (hostPattern === '*') return true;
-    if (hostPattern.startsWith('*.')) {
-      const suffix = hostPattern.slice(2);
-      return urlHost === suffix || urlHost.endsWith(`.${suffix}`);
-    }
-    return urlHost === hostPattern;
-  } catch {
-    return false;
-  }
-}
-
-async function isAllowedPageUrl(url) {
-  try {
-    const parsedUrl = new URL(url || '');
-    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return false;
-  } catch {
-    return false;
-  }
-
-  const customPatterns = await getCustomPatterns();
-  const allPatterns = [...DEFAULT_PATTERNS, ...customPatterns];
-  return allPatterns.some(pattern => urlMatchesPattern(url, pattern));
-}
-
 async function updateActionState(tabId, url) {
-  if (!url) return;
-  const customPatterns = await getCustomPatterns();
-  const allPatterns = [...DEFAULT_PATTERNS, ...customPatterns];
-  const isAllowed = allPatterns.some(p => urlMatchesPattern(url, p));
-
-  if (isAllowed) {
-    chrome.action.setTitle({ tabId, title: 'DevTailor — marks toolbar on this page' });
-    chrome.action.setBadgeText({ tabId, text: '' });
-  } else {
-    chrome.action.setTitle({ tabId, title: 'DevTailor — site not allowed' });
-    chrome.action.setBadgeText({ tabId, text: '!' });
-    chrome.action.setBadgeBackgroundColor({ color: '#64748b' });
-  }
+  const supported = isInjectableUrl(url);
+  chrome.action.setTitle({
+    tabId,
+    title: supported ? 'DevTailor — 点击后可接管当前页' : 'DevTailor — 此页面不支持注入',
+  });
+  chrome.action.setBadgeText({ tabId, text: supported ? '' : '!' });
+  if (!supported) chrome.action.setBadgeBackgroundColor({ color: '#64748b' });
 }
 
 function rememberBrowserAction(tabId, requestId, action) {
@@ -451,6 +511,12 @@ function stopBridgeSseProxy(tabId, clientId) {
   try { existing.controller.abort(); } catch {}
 }
 
+async function restartBridgeSseProxies() {
+  const proxies = [...bridgeSseProxies.values()].map(({ tabId, clientId }) => ({ tabId, clientId }));
+  for (const proxy of proxies) stopBridgeSseProxy(proxy.tabId, proxy.clientId);
+  await Promise.all(proxies.map(proxy => startBridgeSseProxy(proxy.tabId, proxy.clientId)));
+}
+
 function orderedBridgeUrls() {
   return [
     ...BRIDGE_URLS.slice(preferredBridgeUrlIndex),
@@ -463,25 +529,9 @@ function rememberBridgeUrl(bridgeUrl) {
   if (index >= 0) preferredBridgeUrlIndex = index;
 }
 
-/**
- * MV3 recycles the worker, which drops currentProjectId. The /health bodies the
- * worker proxies carry the project, so re-learn it from there (content scripts
- * heartbeat /health every 30s and the side panel polls it). Only a parseable,
- * header-safe id is adopted: a details-less /health (untrusted caller) must not
- * wipe a project we already know.
- */
-function rememberProjectFromHealth(path, bodyText) {
-  if (!/^\/health(?:[/?#]|$)/.test(path)) return;
-  try {
-    const info = JSON.parse(bodyText);
-    const projectId = projectHeader.normalizeProjectId(info?.projectId || '');
-    if (projectId) currentProjectId = projectId;
-  } catch {
-    // Not JSON (or truncated) — keep the project we already know.
-  }
-}
-
 async function fetchBridgeUrl(bridgeUrl, path, options = {}) {
+  // The first request after an MV3 worker restart must wait for local selection restoration.
+  await instanceReady;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BRIDGE_CONNECT_TIMEOUT_MS);
   const externalSignal = options.signal;
@@ -495,16 +545,15 @@ async function fetchBridgeUrl(bridgeUrl, path, options = {}) {
     // Extension service-worker GETs carry no Origin header, so the bridge guard
     // identifies the extension by this custom header (pages cannot send it without
     // a CORS preflight that the guard refuses). Do not drop it.
-    // X-DevTailor-Project rides along (only when a project id is known) so the Hub
-    // can tell which project this client belongs to; both the plain proxy requests
-    // and the SSE /events stream go through here.
-    // The external abort listener stays attached after the response arrives: for a
+    // A concrete instance selection is attached uniformly to HTTP and SSE requests.
+    // Automatic mode sends no instance header. The external abort listener stays
+    // attached after the response arrives: for a
     // streaming response (SSE) the caller aborts later to close the connection.
     return await fetch(`${bridgeUrl}${path}`, {
       ...options,
       headers: {
         ...(options.headers || {}),
-        ...projectHeader.buildProjectHeaders(currentProjectId),
+        ...instanceHeader.buildInstanceHeaders(selectedInstanceId),
         'X-DevTailor-Client': chrome.runtime.id,
       },
       signal: controller.signal,
@@ -585,7 +634,7 @@ async function startBridgeSseProxy(tabId, clientId) {
 
   const key = bridgeProxyKey(tabId, clientId);
   const controller = new AbortController();
-  bridgeSseProxies.set(key, { controller, clientId });
+  bridgeSseProxies.set(key, { controller, tabId, clientId });
 
   (async () => {
     let lastError = null;
@@ -669,7 +718,6 @@ async function bridgeProxyRequest(message) {
         });
         const text = await response.text();
         rememberBridgeUrl(bridgeUrl);
-        rememberProjectFromHealth(path, text);
         return {
           ok: response.ok,
           status: response.status,
@@ -708,9 +756,18 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'loading' || changeInfo.url) {
     postBrowserActionNavigation(tabId, changeInfo.url || tab.url);
   }
-  if (changeInfo.url) {
-    await updateActionState(tabId, changeInfo.url);
-  }
+  if (changeInfo.url) await updateActionState(tabId, changeInfo.url);
+  const saved = await getInjectionSession();
+  const action = injectionState.navigationAction({
+    tabId,
+    status: changeInfo.status,
+    rememberedTabIds: saved.rememberedTabIds,
+    activeTabId: saved.activeTabId,
+    url: tab.url,
+  });
+  if (!action.inject) return;
+  const injection = await injectDevTailorIntoTab(tabId);
+  if (action.activate && (injection.injected || injection.alreadyInjected)) await queueActivation(tabId, false);
 });
 
 // Content scripts mirror marks + screenshots here so they survive a page reload (see marks-sync.js).
@@ -722,8 +779,11 @@ try {
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  // A closed tab can never come back: drop its saved marks and screenshots.
+  // A closed tab can never come back: drop its saved marks, injection and ownership state.
   try { chrome.storage.session.remove(`dt_state_${tabId}`); } catch {}
+  mutateInjectionSession(state =>
+    injectionState.afterTabClosed(state.rememberedTabIds, state.activeTabId, tabId)
+  ).catch(() => {});
   for (const [key, proxy] of bridgeSseProxies) {
     if (!key.startsWith(`${tabId}:`)) continue;
     bridgeSseProxies.delete(key);
@@ -787,6 +847,122 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'TAKEOVER_TAB') {
+    (async () => {
+      let tabId = message.tabId || sender.tab?.id || null;
+      if (!tabId) {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        tabId = tab?.id || null;
+      }
+      // Explicit "接管当前页" in the popup / side panel still switches the takeover. Only the
+      // keyboard shortcut treats an owned takeover as untouchable (see handleToggleCommand).
+      sendResponse(await takeoverTab(tabId));
+    })().catch(err => sendResponse({ ok: false, error: err?.message || '接管当前页失败。' }));
+    return true;
+  }
+
+  if (message.type === 'RELEASE_TAKEOVER') {
+    // The page toolbar asked to stop being the taken-over tab. Clear only this tab's ownership,
+    // keeping it in `dt_injected_tabs` so a refresh re-injects without re-taking over.
+    const tabId = sender.tab?.id ?? null;
+    if (tabId == null) {
+      sendResponse({ ok: false, error: '无法确定要取消接管的标签页。' });
+      return false;
+    }
+    mutateInjectionSession(current =>
+      injectionState.afterRelease(current.rememberedTabIds, current.activeTabId, tabId)
+    ).then(next => sendResponse({
+      ok: true,
+      released: next.activeTabId == null,
+      activeTabId: next.activeTabId,
+    })).catch(err => sendResponse({ ok: false, error: err?.message || '取消接管失败。' }));
+    return true;
+  }
+
+  // --- Reference elements (single writer lives here, see mutateReferences) ---
+  if (message.type === referencesCore.MSG.ADD) {
+    (async () => {
+      const raw = message.reference;
+      if (!referencesCore.isValidAddMessage(message)) {
+        sendResponse({ ok: false, error: 'invalid_reference' });
+        return;
+      }
+      const checked = referencesCore.validateIncomingReference(raw);
+      if (!checked.ok) { sendResponse({ ok: false, error: checked.error }); return; }
+      const outcome = await mutateReferences((current) => {
+        const next = referencesCore.addReference(current, checked.reference);
+        return { changed: next.ok, list: next.list, full: Boolean(next.full), error: next.error };
+      });
+      sendResponse(outcome.ok
+        ? { ok: true, reference: outcome.list[outcome.list.length - 1], count: outcome.list.length }
+        : { ok: false, error: outcome.error || 'invalid_reference', full: Boolean(outcome.full), count: outcome.list.length });
+    })();
+    return true;
+  }
+
+  if (message.type === referencesCore.MSG.UPDATE_NOTE) {
+    (async () => {
+      if (!referencesCore.isValidUpdateMessage(message)) {
+        sendResponse({ ok: false, error: 'invalid_message' });
+        return;
+      }
+      const outcome = await mutateReferences((current) => {
+        const next = referencesCore.updateNote(current, message.id, message.note);
+        return { changed: next.changed, list: next.list };
+      });
+      // `changed:false` is a successful no-op (same note / unknown id), not an error.
+      sendResponse({ ok: true, updated: outcome.changed, count: outcome.list.length });
+    })();
+    return true;
+  }
+
+  if (message.type === referencesCore.MSG.REMOVE) {
+    (async () => {
+      if (typeof message.id !== 'string' || !message.id) {
+        sendResponse({ ok: false, error: 'invalid_id' });
+        return;
+      }
+      const outcome = await mutateReferences((current) => {
+        const next = referencesCore.removeReference(current, message.id);
+        return { changed: next.ok, list: next.list };
+      });
+      sendResponse(outcome.ok ? { ok: true, removed: outcome.changed, count: outcome.list.length } : outcome);
+    })();
+    return true;
+  }
+
+  if (message.type === referencesCore.MSG.CLEAR) {
+    (async () => {
+      const outcome = await mutateReferences(() => ({ changed: true, list: [] }));
+      sendResponse(outcome.ok ? { ok: true, cleared: true, count: 0 } : outcome);
+    })();
+    return true;
+  }
+
+  /** Only these ids leave the list after a Hub accepted them; ids added meanwhile survive. */
+  if (message.type === referencesCore.MSG.ACCEPTED) {
+    (async () => {
+      const sentIds = Array.isArray(message.ids) ? message.ids.filter((id) => typeof id === 'string') : [];
+      const outcome = await mutateReferences((current) => ({
+        changed: current.some((ref) => sentIds.includes(ref.id)),
+        list: referencesCore.acceptSent(current, sentIds),
+      }));
+      sendResponse(outcome.ok ? { ok: true, count: outcome.list.length } : outcome);
+    })();
+    return true;
+  }
+
+  if (message.type === referencesCore.MSG.GET) {
+    readReferences().then(list => sendResponse({ ok: true, references: list })).catch(err =>
+      sendResponse({ ok: false, error: err?.message || '读取参考元素失败' }));
+    return true;
+  }
+
+  if (message.type === 'DT_REFERENCE_TAB_CHECK') {
+    referenceTabCheck(sender.tab?.id ?? null).then(sendResponse);
+    return true;
+  }
+
   if (message.type === 'CAPTURE_VISIBLE_TAB') {
     chrome.tabs.captureVisibleTab(sender.tab?.windowId, {
       format: 'jpeg',
@@ -836,73 +1012,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === 'SET_PROJECT_ID') {
-    // Content scripts and the side panel report the project they read from /health.
-    // Only a header-safe id is kept ([A-Za-z0-9_-]); anything else means "no project"
-    // and drops the header (see background/project-header.js).
-    currentProjectId = projectHeader.normalizeProjectId(message.projectId || '');
-    sendResponse({ ok: true, projectId: currentProjectId });
-    return false;
+  if (message.type === 'GET_INSTANCE_SELECTION') {
+    instanceReady.then(() => sendResponse({ instanceId: selectedInstanceId }));
+    return true;
   }
 
-  if (message.type === 'GET_ENABLED') {
-    chrome.storage.sync.get(ENABLED_KEY).then(result => {
-      sendResponse(result[ENABLED_KEY] !== false);
+  if (message.type === 'SET_INSTANCE_SELECTION') {
+    instanceReady.then(async () => {
+      selectedInstanceId = instanceHeader.normalizeInstanceId(message.instanceId || '');
+      await chrome.storage.local.set({ [INSTANCE_KEY]: selectedInstanceId });
+      await restartBridgeSseProxies();
+      sendResponse({ ok: true, instanceId: selectedInstanceId });
     });
-    return true;
-  }
-
-  if (message.type === 'SET_ENABLED') {
-    chrome.storage.sync.set({ [ENABLED_KEY]: message.enabled }).then(() => {
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
-  if (message.type === 'GET_CUSTOM_PATTERNS') {
-    getCustomPatterns().then(sendResponse);
-    return true;
-  }
-
-  if (message.type === 'ADD_CUSTOM_PATTERN') {
-    (async () => {
-      const pattern = message.pattern;
-      const tabId = message.tabId;
-      const tabUrl = message.url || '';
-      const patterns = await getCustomPatterns();
-      let alreadyExists = false;
-      if (patterns.includes(pattern)) {
-        alreadyExists = true;
-      } else {
-        patterns.push(pattern);
-        await saveCustomPatterns(patterns);
-        await registerDynamicScripts();
-      }
-
-      let activation = { injected: false };
-      if (tabId && tabUrl && urlMatchesPattern(tabUrl, pattern)) {
-        activation = await injectDevTailorIntoTab(tabId);
-        await updateActionState(tabId, tabUrl);
-      }
-      sendResponse({ success: true, alreadyExists, patterns, ...activation });
-    })();
-    return true;
-  }
-
-  if (message.type === 'REMOVE_CUSTOM_PATTERN') {
-    (async () => {
-      const pattern = message.pattern;
-      let patterns = await getCustomPatterns();
-      patterns = patterns.filter(p => p !== pattern);
-      await saveCustomPatterns(patterns);
-      await registerDynamicScripts();
-      try {
-        await chrome.permissions.remove({ origins: [pattern] });
-      } catch {
-        // Permission may not exist or can't be revoked — ignore
-      }
-      sendResponse({ success: true, patterns });
-    })();
     return true;
   }
 });

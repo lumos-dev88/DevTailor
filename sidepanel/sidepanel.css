@@ -219,14 +219,16 @@ body {
   color: var(--dt-text-primary);
 }
 
-.topbar__project {
-  min-width: 0;
+.topbar__instance {
+  min-width: 90px;
+  max-width: 190px;
   flex: 1 1 auto;
-  overflow: hidden;
-  color: var(--muted-2);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--dt-text-primary);
+  font: 11px system-ui, sans-serif;
 }
 
 .topbar__actions {
@@ -1338,6 +1340,57 @@ textarea::placeholder {
   color: #b91c1c;
 }
 
+.mark-tray__link--danger {
+  color: #dc2626;
+}
+
+.tray-chip__act {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tray-chip__act svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tray-chip__act:hover {
+  background: rgba(100, 116, 139, 0.18);
+  color: var(--text);
+}
+
+.tray-chip__act--danger:hover {
+  background: rgba(239, 68, 68, 0.14);
+  color: #b91c1c;
+}
+
+.tray-note {
+  flex: 1 1 100%;
+  min-width: 0;
+  height: 26px;
+  margin-top: 2px;
+  padding: 0 8px;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+}
+
 .tray-shot {
   position: relative;
   display: inline-flex;
@@ -1411,6 +1464,121 @@ textarea::placeholder {
   justify-content: flex-end;
   gap: 4px;
   margin-top: 6px;
+}
+
+/* ── References tray (参考元素: 缩略图 + 来源 + 备注) ── */
+.ref-tray {
+  flex: 0 0 auto;
+  margin: 0 12px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.ref-tray[hidden] {
+  display: none;
+}
+
+.ref-card {
+  display: flex;
+  gap: 8px;
+  padding: 7px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.ref-card:first-child {
+  border-top: 0;
+}
+
+.ref-card__thumb {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.ref-card__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ref-card__body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ref-card__top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ref-card__source {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--dt-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ref-card__note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ref-card__selector {
+  overflow: hidden;
+  color: var(--muted-2);
+  font-family: var(--dt-font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ref-card__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ref-card__btn {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ref-card__btn:hover {
+  border-color: var(--border-strong);
+}
+
+.ref-card__btn--danger {
+  color: #dc2626;
+}
+
+.ref-card .tray-note {
+  flex: 1 1 auto;
+  max-width: 190px;
+  margin-top: 0;
 }
 
 /* ── Design spec (DESIGN.md) manager ─────────────── */

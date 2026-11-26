@@ -2,8 +2,7 @@
  * DevTailor — Marks core (pure logic, no DOM)
  *
  * Everything about page marks that does not touch the DOM:
- *   - how a mark is described (`tag#id.class`), searched (tokens, substring, case-insensitive)
- *     and highlighted (segments / excerpts);
+ *   - how a mark is described (`tag#id.class`);
  *   - the minimal mark/screenshot snapshot the content script broadcasts to the side panel
  *     (`DT_MARKS_CHANGED` -> service worker -> `DT_MARKS_UPDATED`), see docs/ARCHITECTURE.md;
  *   - the command handler the content script runs for the side panel (`DT_*` messages);
@@ -37,6 +36,7 @@
     UPDATED: 'DT_MARKS_UPDATED', // service worker -> extension pages (adds tabId)
     GET: 'DT_GET_MARKS',
     REMOVE: 'DT_REMOVE_MARK',
+    UPDATE: 'DT_UPDATE_MARK',
     CLEAR: 'DT_CLEAR_MARKS',
     LOCATE: 'DT_LOCATE_MARK',
     REMOVE_SHOT: 'DT_REMOVE_SCREENSHOT',
@@ -62,14 +62,6 @@
   function truncate(value, max) {
     const text = String(value == null ? '' : value);
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-  }
-
-  function firstLine(value) {
-    return String(value == null ? '' : value).split(/\r?\n/).find((line) => line.trim()) || '';
-  }
-
-  function escapeRegExp(value) {
-    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   function escapeHtml(value) {
@@ -128,7 +120,7 @@
     };
   }
 
-  /** The searchable facts about a mark. */
+  /** The broadcastable facts about a mark. */
   function markFields(mark) {
     const d = describeMark(mark);
     const fw = frameworkOf(mark);
@@ -145,100 +137,6 @@
       component: fw.component,
       file: fw.file,
     };
-  }
-
-  // -------------------------------------------------------------- search
-
-  /** Whitespace-split, lower-cased, de-duplicated. Empty/blank query -> []. */
-  function tokenize(query) {
-    const seen = new Set();
-    const tokens = [];
-    for (const raw of str(query).split(/\s+/)) {
-      const token = raw.toLowerCase();
-      if (token && !seen.has(token)) {
-        seen.add(token);
-        tokens.push(token);
-      }
-    }
-    return tokens;
-  }
-
-  function matchMark(mark, tokens) {
-    if (!tokens.length) return true;
-    const f = markFields(mark);
-    const haystack = [f.index, f.desc, f.tag, f.id, f.classes, f.selector, f.text, f.comment, f.component, f.file]
-      .join('\n')
-      .toLowerCase();
-    return tokens.every((token) => haystack.includes(token));
-  }
-
-  /** Filter only (never mutates). Each hit keeps its original position in `marks`. */
-  function searchMarks(marks, query) {
-    const list = Array.isArray(marks) ? marks : [];
-    const tokens = tokenize(query);
-    const hits = [];
-    list.forEach((mark, position) => {
-      if (mark && matchMark(mark, tokens)) hits.push({ mark, position });
-    });
-    return { tokens, hits, total: list.length };
-  }
-
-  /** Merged [start, end) ranges of every token occurrence in `text`, case-insensitive. */
-  function findRanges(text, tokens) {
-    const source = str(text);
-    const ranges = [];
-    for (const token of tokens || []) {
-      if (!token) continue;
-      const re = new RegExp(escapeRegExp(token), 'gi');
-      let m;
-      while ((m = re.exec(source))) {
-        if (m[0].length === 0) { re.lastIndex++; continue; }
-        ranges.push([m.index, m.index + m[0].length]);
-      }
-    }
-    ranges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const merged = [];
-    for (const r of ranges) {
-      const last = merged[merged.length - 1];
-      if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
-      else merged.push([r[0], r[1]]);
-    }
-    return merged;
-  }
-
-  /** Split `text` into [{ text, hit }] so a renderer can wrap hits in <mark>. */
-  function highlightSegments(text, tokens) {
-    const source = str(text);
-    const ranges = findRanges(source, tokens);
-    if (!ranges.length) return source ? [{ text: source, hit: false }] : [];
-    const out = [];
-    let at = 0;
-    for (const [start, end] of ranges) {
-      if (start > at) out.push({ text: source.slice(at, start), hit: false });
-      out.push({ text: source.slice(start, end), hit: true });
-      at = end;
-    }
-    if (at < source.length) out.push({ text: source.slice(at), hit: false });
-    return out;
-  }
-
-  /** A window of at most `max` chars around the first hit (so a hit past the cut stays visible). */
-  function excerpt(text, tokens, max = 80) {
-    const source = str(text).replace(/\s+/g, ' ').trim();
-    if (source.length <= max) return source;
-    const ranges = findRanges(source, tokens);
-    if (!ranges.length) return `${source.slice(0, max - 1)}…`;
-    const [start, end] = ranges[0];
-    const span = end - start;
-    let from = Math.max(0, start - Math.floor((max - Math.min(span, max)) / 3));
-    let to = Math.min(source.length, from + max);
-    from = Math.max(0, to - max);
-    return `${from > 0 ? '…' : ''}${source.slice(from, to)}${to < source.length ? '…' : ''}`;
-  }
-
-  /** Segments -> escaped HTML with <mark class="dt-hit">. */
-  function segmentsToHtml(segments) {
-    return segments.map((s) => (s.hit ? `<mark class="dt-hit">${escapeHtml(s.text)}</mark>` : escapeHtml(s.text))).join('');
   }
 
   // ------------------------------------------------------------ snapshot
@@ -317,6 +215,11 @@
         const exists = Boolean(ctx.store.get ? ctx.store.get(msg.id) : ctx.store.getAll().some((m) => m.id === msg.id));
         if (exists) ctx.store.remove(msg.id);
         return { ok: true, removed: exists, snapshot: snapshot() };
+      }
+      case MSG.UPDATE: {
+        const exists = Boolean(ctx.store.get ? ctx.store.get(msg.id) : ctx.store.getAll().some((m) => m.id === msg.id));
+        if (exists && typeof msg.changes === 'object' && msg.changes) ctx.store.update(msg.id, msg.changes);
+        return { ok: true, updated: exists, snapshot: snapshot() };
       }
       case MSG.CLEAR:
         ctx.store.clear();
@@ -428,6 +331,7 @@
     }
     return {
       refresh: () => run({ type: MSG.GET }),
+      updateMark: (id, changes) => run({ type: MSG.UPDATE, id, changes }),
       removeMark: (id) => run({ type: MSG.REMOVE, id }),
       clearMarks: () => run({ type: MSG.CLEAR }),
       removeScreenshot: (id) => run({ type: MSG.REMOVE_SHOT, id }),
@@ -591,19 +495,11 @@
     MSG,
     colorFor,
     truncate,
-    firstLine,
     escapeHtml,
     parseOpenTag,
     parseSelectorTail,
     describeMark,
     markFields,
-    tokenize,
-    matchMark,
-    searchMarks,
-    findRanges,
-    highlightSegments,
-    excerpt,
-    segmentsToHtml,
     toBroadcastMark,
     toBroadcastShot,
     buildSnapshot,
