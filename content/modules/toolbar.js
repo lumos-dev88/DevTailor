@@ -51,9 +51,9 @@
       pointer-events: auto; font-family: var(--dt-font); font-size: var(--dt-font-size);
       color: var(--dt-text-primary); visibility: hidden; touch-action: none;
       background: var(--dt-bg-tertiary);
-      border: 1px solid rgba(255,255,255,0.08); border-left: 0;
-      border-radius: 0 12px 12px 0;
-      box-shadow: 2px 4px 16px rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
     }
     .dt-tb.is-ready { visibility: visible; }
     .dt-tb.is-dragging { cursor: grabbing; opacity: 0.92; }
@@ -75,12 +75,15 @@
     .dt-b[aria-disabled="true"]:hover { background: transparent; color: var(--dt-text-secondary); }
 
     .dt-tip {
-      display: none; position: absolute; left: calc(100% + 8px); top: 50%; transform: translateY(-50%);
+      display: none; position: absolute; top: 50%; transform: translateY(-50%);
       z-index: 5; width: max-content; max-width: 250px; padding: 7px 9px; border-radius: var(--dt-radius-sm);
       background: #0b1220; color: var(--dt-text-primary); border: 1px solid rgba(255,255,255,0.1);
       font-size: 12px; line-height: 1.5; text-align: left; white-space: pre-line; pointer-events: none;
       box-shadow: var(--dt-shadow);
     }
+    /* tooltip pops out on the side with more room: right when docked left, left when docked right */
+    .dt-tb:not(.is-tip-left) .dt-tip { left: calc(100% + 8px); }
+    .dt-tb.is-tip-left .dt-tip { right: calc(100% + 8px); }
     .dt-b:hover .dt-tip, .dt-b:focus-visible .dt-tip { display: block; }
 
     .dt-count {
@@ -98,7 +101,7 @@
     .dt-hl { position: fixed; left: 0; top: 0; width: 0; height: 0; display: none; pointer-events: none; z-index: 1; border: 2px solid var(--dt-accent); border-radius: 3px; background: rgba(59,130,246,0.12); box-shadow: 0 0 0 1px rgba(255,255,255,0.6); }
     .dt-hl.is-pulse { animation: dt-hl-pulse 0.55s ease-in-out 2; }
     @keyframes dt-hl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-    .dt-toast { position: fixed; left: ${BAR_W + 12}px; bottom: 20px; max-width: min(320px, calc(100vw - 80px)); padding: 8px 12px; border-radius: var(--dt-radius); background: #0b1220; color: var(--dt-text-primary); border: 1px solid rgba(255,255,255,0.12); box-shadow: var(--dt-shadow); font-size: 12px; line-height: 1.5; white-space: pre-line; opacity: 0; transform: translateY(6px); transition: opacity .14s, transform .14s; pointer-events: none; }
+    .dt-toast { position: fixed; left: 0; top: 0; max-width: min(320px, calc(100vw - 80px)); padding: 8px 12px; border-radius: var(--dt-radius); background: #0b1220; color: var(--dt-text-primary); border: 1px solid rgba(255,255,255,0.12); box-shadow: var(--dt-shadow); font-size: 12px; line-height: 1.5; white-space: pre-line; opacity: 0; transform: translateY(6px); transition: opacity .14s, transform .14s; pointer-events: none; }
     .dt-toast.is-show { opacity: 1; transform: none; }
     @media (prefers-reduced-motion: reduce) { .dt-hl.is-pulse { animation: none; } .dt-toast { transition: none; } }
   `;
@@ -179,7 +182,25 @@
     const pos = tcore().resolvePosition(state, window.innerWidth, window.innerHeight, width, height);
     el.tb.style.left = `${pos.left}px`;
     el.tb.style.top = `${pos.top}px`;
+    // Tooltip flips to the side with more room: only pop left when the right side would clip.
+    const rightRoom = window.innerWidth - (pos.left + width);
+    el.tb.classList.toggle('is-tip-left', rightRoom < width + 16);
+    placeToast();
     return pos;
+  }
+
+  /** Toast follows the bar instead of a fixed corner; clamped to stay on screen. */
+  function placeToast() {
+    if (!built || !el.toast) return;
+    const { width } = barBox();
+    const left = Number.isFinite(state.left) ? state.left : 0;
+    const top = Number.isFinite(state.top) ? state.top : 0;
+    // Prefer the bar's right side when there is room, otherwise its left; never overlap the bar.
+    const onRight = left + width + 12 + Math.min(320, window.innerWidth - 80) <= window.innerWidth;
+    const x = onRight ? left + width + 12 : Math.max(0, left - 12 - Math.min(320, window.innerWidth - 80));
+    const y = Math.min(window.innerHeight - 60, top);
+    el.toast.style.left = `${x}px`;
+    el.toast.style.top = `${y}px`;
   }
 
   function hideHighlight() {
@@ -248,8 +269,7 @@
       );
       state.left = pos.left;
       state.top = pos.top;
-      el.tb.style.left = `${pos.left}px`;
-      el.tb.style.top = `${pos.top}px`;
+      applyPosition();
     });
     function end(e) {
       if (!drag) return;
@@ -278,6 +298,7 @@
   function toast(message, ms = 3200) {
     if (!built) return;
     el.toast.textContent = message;
+    placeToast();
     el.toast.classList.add('is-show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.toast.classList.remove('is-show'), ms);
