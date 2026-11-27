@@ -347,8 +347,14 @@ test('sidepanel.js has no processing lock: send never disables for a running tur
   const handleSend = /async function handleSend\(\) \{[\s\S]*?\n  \}\n/.exec(js);
   assert.ok(handleSend);
   assert.doesNotMatch(handleSend[0], /handleStop/);
-  // the send button is only disabled by the in-flight POST or by an empty composer
-  assert.match(js, /sendBtn\.disabled = sendInProgress \|\| !\(connected && \(hasText \|\| hasImages \|\| hasPageContext\)\)/);
+  // the send button is only disabled by the in-flight POST or by having nothing to send;
+  // 纯聊天（文字/图片）不依赖接管，标记/参考仍要求 clientId。
+  const sendState = /function updateSendState\(\) \{[\s\S]*?\n  \}/.exec(js);
+  assert.ok(sendState, 'updateSendState not found');
+  assert.match(sendState[0], /const canSend = hasText \|\| hasImages \|\| hasPageContext;/);
+  assert.match(sendState[0], /sendBtn\.disabled = sendInProgress \|\| !canSend;/);
+  assert.match(sendState[0], /const hasReferences = clientId && referencesTray\.count\(\) > 0;/);
+  assert.match(sendState[0], /const hasPageContext = Boolean\(clientId\) && \(markTray\.hasContent\(\) \|\| hasReferences\);/);
   // separate cancel button, hidden by default
   assert.match(html, /id="cancel-btn"[^>]*\bhidden\b/);
   assert.match(js, /cancelBtn\.hidden = !cancellable/);

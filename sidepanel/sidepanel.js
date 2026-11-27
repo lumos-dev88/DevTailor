@@ -57,6 +57,18 @@
 
   /* ── State ────────────────────────────────────── */
   let clientId = null;
+  // The panel's own SSE identity (`panel_<tabId>`). Used to subscribe to /events so replies and
+  // card events reach it even when no tab is taken over.
+  let panelClientId = null;
+  let panelSseConnecting = false;
+  let panelTabId = null;
+  // 侧边栏是窗口级的：关闭请求按窗口匹配（worker 推 DT_SIDEPANEL_CLOSE_REQUEST 时带 windowId）。
+  let panelWindowId = null;
+  // 面板自身加载时间，用于判断它是否先于关闭请求存在。
+  const panelLoadedAt = Date.now();
+  // 面板实例标识：快速连点时旧实例的 beforeunload CLOSED 可能晚于新实例的 READY 到达，
+  // worker 靠它区分「旧实例的迟到通知」和「当前实例的关闭」，避免误清新面板的状态。
+  const panelToken = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   let bridgeReachable = false;
   let sseConnected = false;
   // 发送即完成（像聊天）：没有「处理中」锁。sendInProgress 只在 POST /review 在途的几十毫秒内
@@ -124,14 +136,63 @@
     return m ? Number(m[1]) : null;
   }
 
-  async function activeBrowserTabId() {
+  /** The focused browser tab (null when the only tab is an extension page). */
+  async function activeBrowserTab() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (!tab || tab.id == null || /^chrome-extension:/.test(tab.url || '')) return null;
-      return tab.id;
+      return tab;
     } catch {
       return null;
     }
+  }
+
+  async function activeBrowserTabId() {
+    const tab = await activeBrowserTab();
+    return tab ? tab.id : null;
+  }
+
+  /**
+   * The panel's own SSE client id: `panel_<tabId>` of the focused browser tab (or `panel_panel`
+   * when there is none). Its own stream is only opened while no tab is taken over: with a takeover
+   * the panel piggybacks on that tab's stream and filtering by `tabId === clientId`.
+   */
+  async function ensurePanelClientId() {
+    const tab = await activeBrowserTab();
+    const tabId = tab ? tab.id : null;
+    panelWindowId = tab ? (tab.windowId ?? null) : null;
+    const next = tabId == null ? 'panel_panel' : `panel_${tabId}`;
+    // 接管后侧边栏跟随该 tab 的流，自己的流只是兜底：已开就保持不变，避免多余断开。
+    if (next === panelClientId || (clientId && panelTabId != null)) return panelClientId;
+    const previous = panelClientId;
+    panelClientId = next;
+    panelTabId = tabId;
+    if (previous && previous !== next) {
+      sseConnected = false;
+      runtimeMessage({ type: 'DEVTAILOR_SIDEPANEL_PROXY_DISCONNECT', clientId: previous }).catch(() => {});
+    }
+    // 没接管时才开自己的流；接管后跟随该 tab 的流（tabId 变化时由 refreshStatus 重新判断）。
+    if (!clientId) connectPanelSse();
+    return panelClientId;
+  }
+
+  /**
+   * Open the panel's own Hub SSE stream through the background proxy (no page involved). The panel
+   * has no `sender.tab`, so it supplies the synthetic key (`panel_<tabId>`); registering the id lets
+   * the worker route runtime broadcasts to this stream.
+   */
+  function connectPanelSse() {
+    if (!bridgeReachable || !panelClientId || panelSseConnecting) return;
+    panelSseConnecting = true;
+    // Register first so the worker knows this synthetic id, then open the proxy stream.
+    runtimeMessage({ type: 'DEVTAILOR_SIDEPANEL_PROXY_CONNECT', clientId: panelClientId }).catch(() => {});
+    runtimeMessage({
+      type: 'DEVTAILOR_SIDEPANEL_PROXY_CONNECT_STREAM',
+      clientId: panelClientId,
+      tabId: panelTabId,
+    })
+      .catch(() => {})
+      .finally(() => { panelSseConnecting = false; });
   }
 
   /** The tray follows the taken-over tab; without a takeover it shows the focused browser tab. */
@@ -292,6 +353,8 @@
       clientId = null;
       syncedSessionKey = null;
       syncSerial++;
+      // Hub 不可用时先别急着开自己的流（会失败并重试）；下次轮询再连。
+      await ensurePanelClientId();
       applyMeta(meta);
       updateSendState();
       followTray();
@@ -305,6 +368,8 @@
     runtimeLabel.textContent = body.agentLabel || body.agentKey || '-';
     activeTab.textContent = body.activeClientId || '未接管';
     clientId = body.activeClientId || null;
+    // 没接管时侧边栏用自己的 SSE 流收回复；接管后跟随该 tab 的流即可。
+    await ensurePanelClientId();
     applyMeta(meta);
     updateSendState();
     followTray();
@@ -390,15 +455,16 @@
   function updateSendState() {
     const hasText = promptEl.value.trim().length > 0;
     const hasImages = (imageManager?.count?.() || 0) > 0;
-    // References count as page context on their own: a message with only references is sendable.
-    const hasReferences = referencesTray.count() > 0;
-    const hasPageContext = markTray.hasContent() || hasReferences;
-    const connected = Boolean(clientId);
+    // 标记和参考元素都依附页面：只有已接管（clientId）时才随消息发送。
+    const hasReferences = clientId && referencesTray.count() > 0;
+    const hasPageContext = Boolean(clientId) && (markTray.hasContent() || hasReferences);
+    // 纯聊天（文字 / 图片）不依赖接管：没接管也能发，不带页面上下文。
+    const canSend = hasText || hasImages || hasPageContext;
 
-    sendBtn.disabled = sendInProgress || !(connected && (hasText || hasImages || hasPageContext));
+    sendBtn.disabled = sendInProgress || !canSend;
 
     // 取消按钮不参与发送：只在「有可取消的东西」时出现（未决审批/提问卡，或工具正在运行）。
-    const cancellable = connected && hasCancellable();
+    const cancellable = (Boolean(clientId) || Boolean(panelClientId)) && hasCancellable();
     cancelBtn.hidden = !cancellable;
     cancelBtn.disabled = cancelInFlight;
     cancelBtn.textContent = cancelInFlight ? '取消中…' : '取消';
@@ -636,10 +702,13 @@
   function handleSseMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
 
-    // The side panel hears every connected tab's stream; per-client events carry the receiver's
-    // tabId, so keep only the ones addressed to the tab we follow (approvals have no tabId).
-    if (msg.tabId && clientId && msg.tabId !== clientId) return;
-    if (msg.tabId && !clientId && msg.type !== 'active_client') return;
+    // Follow the taken-over tab while a takeover exists, otherwise the panel's own stream. Per-client
+    // events carry the receiver's tabId, so keep only the ones addressed to that client id.
+    const ownClient = clientId || panelClientId;
+    if (msg.tabId && ownClient && msg.tabId !== ownClient) return;
+    if (msg.tabId && !ownClient && msg.type !== 'active_client') return;
+    // 卡片事件可能不带 tabId：明确发给别的 client 的（approval_pending / question_pending）跳过。
+    if (!msg.tabId && msg.targetClientId && ownClient && msg.targetClientId !== ownClient) return;
 
     if (msg.type === 'session_reset') {
       syncSerial++;
@@ -726,6 +795,20 @@
     }
   }
 
+  /** True when the SSE event belongs to this panel's own stream (no taken-over tab). */
+  /**
+   * True when the event belongs to this panel's own stream. The worker broadcasts one copy per known
+   * panel id, so a copy tagged with our id can still originate from another stream (the page tab's);
+   * `clientId` carries the stream that produced it, and only our own id counts.
+   */
+  function isPanelEvent(message) {
+    return Boolean(
+      panelClientId
+      && message.panelClientId === panelClientId
+      && message.clientId === panelClientId,
+    );
+  }
+
   /* ── SSE listener ─────────────────────────────── */
   chrome.runtime.onMessage.addListener((message) => {
     if (message && message.type === 'DT_MARKS_UPDATED') {
@@ -740,10 +823,23 @@
       focusComposer();
       return;
     }
+    // Second toolbar click while the panel is open: no sidePanel.close(), so the worker asks us.
+    // Window-scoped: only close when the request targets our window (or is broadcast without one).
+    if (message && message.type === 'DT_SIDEPANEL_CLOSE_REQUEST') {
+      const sameWindow = message.windowId == null || message.windowId === panelWindowId;
+      // notBefore is the click timestamp for this close request. If stale state made that click's
+      // open() create this panel, panelLoadedAt >= notBefore and it must stay open.
+      const preExisting = message.notBefore == null || panelLoadedAt < message.notBefore;
+      if (sameWindow && preExisting) window.close();
+      return;
+    }
     if (!message || message.type !== 'DEVTAILOR_SIDEPANEL_PROXY_EVENT') return;
 
-    // Open/error events name the tab stream they belong to; ignore other tabs' streams.
-    if (message.clientId && clientId && message.clientId !== clientId) return;
+    // One lifecycle event per open stream reaches us (the worker tags each copy). With a takeover we
+    // follow that tab's stream; without one we follow our own `panel_<tabId>` stream.
+    const followsPanelStream = !clientId && isPanelEvent(message);
+    const isTabStream = Boolean(clientId && message.clientId === clientId);
+    if (!followsPanelStream && !isTabStream) return;
 
     if (message.event === 'open') {
       sseConnected = true;
@@ -772,27 +868,40 @@
       toolStatus.clear();
       setPip('offline');
       bridgeStatus.textContent = '连接断开';
+      // 面板自己的流断了就重连（下一次 refreshStatus 也会带起）。
+      if (followsPanelStream) setTimeout(connectPanelSse, 1000);
       return;
     }
   });
 
   /* ── Send flow ─────────────────────────────────── */
   async function executeSend(text, images) {
-    if (!clientId) {
-      showHint(bridgeReachable ? '未接管当前标签：请点击侧边栏顶部“接管当前页”。' : core.errorInfo('bridge_offline').text);
+    // 发送只依赖 Hub 连接：没接管时发纯聊天（文字 / 图片，不带页面上下文），接管后照旧带页面数据。
+    if (!bridgeReachable) {
+      showHint(core.errorInfo('bridge_offline').text);
+      return { ok: false };
+    }
+
+    const sendClientId = clientId || panelClientId || (await ensurePanelClientId());
+    if (!sendClientId) {
+      showHint(core.errorInfo('bridge_offline').text);
       return { ok: false };
     }
 
     // The page owns the marks and its screenshots: ask the followed tab for the payload parts.
-    const parts = await markTray.controller.buildPayload();
+    // Without a takeover there is no page context to collect (marks/references belong to a page).
+    const parts = clientId ? await markTray.controller.buildPayload() : null;
     const pageImages = parts ? parts.screenshots : [];
     const allImages = [...pageImages, ...images];
     const markIds = parts ? parts.markIds : [];
     const sentMarks = markTray.model.getState().marks.filter((m) => markIds.includes(m.id));
 
-    // 参考元素 come from the global list, never from the page's marks/screenshots.
+    // 参考元素 come from the global list, never from the page's marks/screenshots. They describe a
+    // page, so they are only sent together with a takeover (clientId present).
     const referencesCore = window.__domReview.referencesCore;
-    const referenceList = await runtimeMessage({ type: referencesCore.MSG.GET });
+    const referenceList = clientId
+      ? await runtimeMessage({ type: referencesCore.MSG.GET })
+      : { ok: true, references: [] };
     const sentReferences = referencesCore.toSendReferences(referenceList && referenceList.ok ? referenceList.references : []);
     const sentReferenceIds = sentReferences.map((ref) => ref.id);
 
@@ -806,8 +915,8 @@
         screenshot: allImages[0] || null,
         references: sentReferences,
       },
-      clientId,
-      tabId: clientId,
+      clientId: sendClientId,
+      tabId: sendClientId,
     };
 
     // Mark optimistically BEFORE the request so the marks are never picked up by a concurrent BUILD.
@@ -847,7 +956,7 @@
       }
     }
     // Accepted: screenshots are consumed and the sent marks are cleared now (the user bubble keeps a copy).
-    if (pageImages.length) await markTray.controller.markSent([], true);
+    if (pageImages.length && clientId) await markTray.controller.markSent([], true);
     settleSentMarks('done');
     return {
       ok: true,
@@ -865,10 +974,12 @@
 
     const text = promptEl.value.trim();
     const pendingImages = imageManager?.getImages?.() || [];
-    if (!text && pendingImages.length === 0 && !markTray.hasContent() && referencesTray.count() === 0) return;
+    // 没接管时只有文字 / 图片可发（标记和参考依附页面，不算可发送内容）。
+    const hasPageContext = Boolean(clientId) && (markTray.hasContent() || referencesTray.count() > 0);
+    if (!text && pendingImages.length === 0 && !hasPageContext) return;
 
-    if (!clientId) {
-      showHint(bridgeReachable ? '未接管当前标签：请点击侧边栏顶部“接管当前页”。' : core.errorInfo('bridge_offline').text);
+    if (!bridgeReachable) {
+      showHint(core.errorInfo('bridge_offline').text);
       return;
     }
 
@@ -894,7 +1005,7 @@
         );
         if (echoed) {
           // The bridge echo carries text and images only: keep the marks on the bubble.
-          if (result.marks.length) messageStore.update(echoed.id, (m) => { m.marks = result.marks; });
+          if (result.marks && result.marks.length) messageStore.update(echoed.id, (m) => { m.marks = result.marks; });
         } else {
           conversation.addUserMessage({ content: optimisticContent, images: result.images.slice(), marks: result.marks });
         }
@@ -911,12 +1022,15 @@
 
   /** 取消当前任务（不阻塞发送）。nothing_to_cancel 不是错误：只给个轻提示。 */
   async function handleStop() {
-    if (cancelInFlight || !clientId) return;
+    if (cancelInFlight) return;
+    // /cancel 只作用于某个客户端：没接管时用侧边栏自己的 clientId。
+    const targetClientId = clientId || panelClientId || (await ensurePanelClientId());
+    if (!targetClientId) return;
 
     cancelInFlight = true;
     updateSendState();
     try {
-      const res = await call('/cancel', { method: 'POST', body: { clientId, tabId: clientId } });
+      const res = await call('/cancel', { method: 'POST', body: { clientId: targetClientId, tabId: targetClientId } });
       if (!res.ok) {
         showHint(core.failureInfo(res).text);
         return;
@@ -952,12 +1066,14 @@
 
   /* ── New session (POST /new-session) ──────────── */
   async function startNewSession() {
-    if (!clientId) {
-      showHint(bridgeReachable ? '未接管当前标签：请点击侧边栏顶部“接管当前页”。' : core.errorInfo('bridge_offline').text);
+    // 新会话只影响展示层，不依赖接管：没接管时用侧边栏自己的 clientId。
+    if (!bridgeReachable) {
+      showHint(core.errorInfo('bridge_offline').text);
       return;
     }
+    const targetClientId = clientId || (await ensurePanelClientId());
     newSessionBtn.disabled = true;
-    const res = await call('/new-session', { method: 'POST', body: { clientId, tabId: clientId } });
+    const res = await call('/new-session', { method: 'POST', body: { clientId: targetClientId, tabId: targetClientId } });
     newSessionBtn.disabled = false;
     if (!res.ok) {
       showHint(core.failureInfo(res).text);
@@ -1127,7 +1243,13 @@
     if (!promptEl.disabled) promptEl.focus();
   }
 
-  chrome.tabs.onActivated.addListener(() => { if (!clientId) followTray(); });
+  chrome.tabs.onActivated.addListener(() => {
+    if (!clientId) {
+      // The panel's own stream follows the focused tab; reconnect under the new id.
+      ensurePanelClientId();
+      followTray();
+    }
+  });
   chrome.tabs.onUpdated.addListener((tabId, info) => {
     if (info.status !== 'complete') return;
     if (tabId === markTray.model.getState().tabId) markTray.controller.refresh();
@@ -1137,24 +1259,44 @@
     if (tabId === markTray.model.getState().tabId) markTray.follow(null);
   });
 
-  // The side panel opens itself (toolbar button / shortcut) and may be asked to focus the composer.
-  try {
-    chrome.runtime.sendMessage({ type: 'DT_SIDEPANEL_READY' }, (res) => {
-      void chrome.runtime.lastError;
-      if (res && res.focusInput) focusComposer();
-    });
-  } catch { /* service worker not reachable */ }
+  // Hub / worker restart dropped the panel's own stream: open a fresh one once it is reachable.
+  window.addEventListener('focus', () => {
+    if (bridgeReachable && !sseConnected && !clientId) connectPanelSse();
+  });
+
+  // The side panel opens itself (toolbar button / shortcut) and may be asked to focus the composer
+  // or to close itself (a second click on the toolbar button; Chrome has no sidePanel.close()).
 
   /* ── Init ──────────────────────────────────────── */
   applyMeta(meta);
   updateSendState();
   referencesTray.refresh();
-  runtimeMessage({ type: 'GET_INSTANCE_SELECTION' }).then(result => {
-    selectedInstanceId = result.instanceId || '';
-    refreshStatus({ forceSessionSync: true, syncReason: 'initial' });
+  // 面板的 clientId / SSE 流不依赖接管：先确定自己的身份（含 windowId），再声明就绪，
+  // 这样 READY 的关闭兜底能按窗口匹配。
+  ensurePanelClientId().finally(() => {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'DT_SIDEPANEL_READY',
+        tabId: panelTabId, windowId: panelWindowId, loadedAt: panelLoadedAt, panelToken,
+      }, (res) => {
+        void chrome.runtime.lastError;
+        if (res && res.focusInput) focusComposer();
+        if (res && res.closePanel) window.close();
+      });
+    } catch { /* service worker not reachable */ }
+    runtimeMessage({ type: 'GET_INSTANCE_SELECTION' }).then(result => {
+      selectedInstanceId = result.instanceId || '';
+      refreshStatus({ forceSessionSync: true, syncReason: 'initial' });
+    });
   });
   pollTimer = setInterval(refreshStatus, 30000);
+  // The worker forgets an open panel on restart: clear its own entry and our stream when the panel
+  // closes (chrome.sidePanel has no close API, so this fires for every close path).
   window.addEventListener('beforeunload', () => {
     if (pollTimer) clearInterval(pollTimer);
+    runtimeMessage({ type: 'DT_SIDEPANEL_CLOSED', tabId: panelTabId, windowId: panelWindowId, panelToken }).catch(() => {});
+    if (panelClientId) {
+      runtimeMessage({ type: 'DEVTAILOR_SIDEPANEL_PROXY_DISCONNECT', clientId: panelClientId }).catch(() => {});
+    }
   });
 })();

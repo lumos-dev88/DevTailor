@@ -15,9 +15,47 @@ const BRIDGE_CONNECT_TIMEOUT_MS = 1500;
 const pendingBrowserActions = new Map();
 const bridgeSseProxies = new Map();
 const injectionPromises = new Map();
+// The side panel subscribes under a synthetic id (`panel_<tabId>`) so it can receive replies when
+// no tab is taken over; these ids are registered/removed by the panel itself.
+const sidePanelClientIds = new Set();
 let injectionStateMutation = Promise.resolve();
 let activationMutation = Promise.resolve();
 let sidePanelFocusRequestedAt = 0;
+// Windows whose side panel is open. The side panel is per-window (only one at a time), and Chrome
+// has no close API, so remember which window's panel is open: clicking the toolbar button again
+// makes the worker tell that window's panel to close itself. The worker is killed after ~30s idle,
+// so this Set is only an in-memory mirror of chrome.storage.session, which survives worker
+// restarts and is cleared when the browser closes or the extension reloads. Without persistence
+// the first click after a worker restart forgets the panel is open and the toggle does nothing.
+const sidePanelOpenWindows = new Set();
+const SIDE_PANEL_OPEN_WINDOWS_KEY = 'dt_side_panel_open_windows';
+let sidePanelWindowsMutation = Promise.resolve();
+const sidePanelWindowsHydrated = (async () => {
+  const stored = await chrome.storage.session.get(SIDE_PANEL_OPEN_WINDOWS_KEY).catch(() => null);
+  for (const winKey of stored?.[SIDE_PANEL_OPEN_WINDOWS_KEY] ?? []) sidePanelOpenWindows.add(winKey);
+})();
+
+function persistSidePanelWindows() {
+  // Serialize writes so overlapping open/close events cannot drop each other's update.
+  sidePanelWindowsMutation = sidePanelWindowsMutation.catch(() => {}).then(() =>
+    chrome.storage.session.set({ [SIDE_PANEL_OPEN_WINDOWS_KEY]: [...sidePanelOpenWindows] })
+  );
+}
+// Live panel instance token per window (winKey -> token). Rapid toggling can reload the panel
+// before the old instance's beforeunload CLOSED lands: the stale notice must not wipe the new
+// instance's state. In-memory only — a worker restart just loses the READY it would compare with,
+// and a CLOSED with no known token is still honoured.
+const sidePanelWindowTokens = new Map();
+// Toggle coalescing per window (winKey -> busy-until timestamp): a toggle takes hundreds of ms to
+// settle (the panel document has to load, beforeunload notices travel late). Clicks landing inside
+// the window are swallowed instead of interleaving with the in-flight decision — rapid clicking
+// must not be able to corrupt the open/close state at all.
+const sidePanelToggleBusy = new Map();
+const SIDE_PANEL_TOGGLE_COALESCE_MS = 500;
+// Timestamp of the latest "the panel is already open -> ask it to close" request, and the window it
+// was meant for (so one window's close request cannot close another window's panel).
+let sidePanelCloseRequestedAt = 0;
+let sidePanelCloseRequestedWindowId = null;
 let preferredBridgeUrlIndex = 0;
 let selectedInstanceId = '';
 const instanceHeader = self.__domReview.instanceHeader;
@@ -147,19 +185,18 @@ async function injectDevTailorIntoTab(tabId) {
   return promise;
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
-  console.log('DevTailor extension installed');
-  await cleanupLegacyRegistration();
-  if (chrome.sidePanel?.setPanelBehavior) {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
-  }
-});
-
-cleanupLegacyRegistration();
-
+// The extension action owns popup.html, so the browser's default action click must not open the
+// side panel; opening stays explicit via OPEN_SIDE_PANEL.
 if (chrome.sidePanel?.setPanelBehavior) {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 }
+
+chrome.runtime.onInstalled.addListener(async () => {
+  console.log('DevTailor extension installed');
+  await cleanupLegacyRegistration();
+});
+
+cleanupLegacyRegistration();
 
 // --- Explicit takeover / keyboard shortcut ---
 
@@ -488,19 +525,25 @@ function bridgeProxyKey(tabId, clientId) {
 }
 
 function sendBridgeProxyEvent(tabId, payload) {
-  if (!tabId) return;
+  // The panel has no tab: it still needs its own stream's lifecycle events.
   const message = {
     type: 'DEVTAILOR_BRIDGE_PROXY_EVENT',
     ...payload,
   };
-  chrome.tabs.sendMessage(tabId, message).catch(() => {});
+  if (tabId) chrome.tabs.sendMessage(tabId, message).catch(() => {});
 
-  // Also forward to sidePanel so it can piggyback on the active tab's SSE stream.
-  chrome.runtime.sendMessage({
-    type: 'DEVTAILOR_SIDEPANEL_PROXY_EVENT',
-    tabId,
-    ...payload,
-  }).catch(() => {});
+  // Also forward to the side panel. It listens to one stream at a time: the taken-over tab's while
+  // a takeover exists, otherwise its own synthetic stream (`panel_<tabId>`). The panel picks the
+  // copy whose `panelClientId` matches the stream it follows, so simply send one copy per known
+  // panel stream.
+  for (const panelClientId of sidePanelClientIds) {
+    chrome.runtime.sendMessage({
+      type: 'DEVTAILOR_SIDEPANEL_PROXY_EVENT',
+      tabId,
+      panelClientId,
+      ...payload,
+    }).catch(() => {});
+  }
 }
 
 function stopBridgeSseProxy(tabId, clientId) {
@@ -795,7 +838,29 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GET_TAB_ID') {
+    // The panel has no `sender.tab`; it resolves the id through chrome.tabs.query itself.
     sendResponse({ tabId: sender.tab?.id ?? null });
+    return false;
+  }
+
+  // The panel owns its synthetic client id: it derives and registers it so the runtime broadcast
+  // knows where to forward replies and card events while no tab is taken over.
+  if (message.type === 'DEVTAILOR_SIDEPANEL_PROXY_CONNECT') {
+    if (typeof message.clientId === 'string' && message.clientId) sidePanelClientIds.add(message.clientId);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'DEVTAILOR_SIDEPANEL_PROXY_DISCONNECT') {
+    const clientId = typeof message.clientId === 'string' ? message.clientId : '';
+    if (clientId) {
+      sidePanelClientIds.delete(clientId);
+      // The stream was opened under the panel's tab id (or null), so the exact key is unknown here:
+      // drop every proxy registered under this synthetic client id.
+      const stale = [...bridgeSseProxies.values()].filter((proxy) => proxy.clientId === clientId);
+      for (const proxy of stale) stopBridgeSseProxy(proxy.tabId, proxy.clientId);
+    }
+    sendResponse({ ok: true });
     return false;
   }
 
@@ -810,7 +875,72 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'DT_SIDEPANEL_READY') {
-    sendResponse({ focusInput: Date.now() - sidePanelFocusRequestedAt < 5000 });
+    // Close fallback for a panel that was still loading when the second toolbar click happened: it
+    // never heard DT_SIDEPANEL_CLOSE_REQUEST, so it asks on load. Window-scoped and time-boxed.
+    const closeRequested = Date.now() - sidePanelCloseRequestedAt < 5000
+      && sidePanelCloseRequestedWindowId != null && sidePanelCloseRequestedWindowId === message.windowId
+      && (message.loadedAt == null || message.loadedAt < sidePanelCloseRequestedAt);
+    const winKey = message.windowId ?? (message.tabId != null ? message.tabId : null);
+    // Register the live instance so a superseded panel's late CLOSED can be told apart.
+    if (winKey != null && message.panelToken != null) sidePanelWindowTokens.set(winKey, message.panelToken);
+    if (closeRequested) {
+      // Consume the request so a later panel load does not close itself again.
+      sidePanelCloseRequestedAt = 0;
+      sidePanelCloseRequestedWindowId = null;
+      if (winKey != null) {
+        sidePanelOpenWindows.delete(winKey);
+        persistSidePanelWindows();
+      }
+    } else {
+      // READY can reveal stale persisted state. Hydrate first so healing this window cannot overwrite
+      // keys restored for other windows on a cold worker start.
+      sidePanelWindowsHydrated.then(() => {
+        if (winKey != null) {
+          sidePanelOpenWindows.add(winKey);
+          persistSidePanelWindows();
+        }
+      });
+    }
+    sendResponse({
+      focusInput: Date.now() - sidePanelFocusRequestedAt < 5000,
+      closePanel: closeRequested,
+    });
+    return false;
+  }
+
+  if (message.type === 'DT_SIDEPANEL_CLOSED') {
+    const tabId = message.tabId ?? null;
+    const winKey = message.windowId ?? (tabId != null ? tabId : null);
+    // Rapid toggling: the panel can be closed and re-opened before the old instance's beforeunload
+    // notice lands. A CLOSED from a token we already replaced with a newer READY is stale — the
+    // live instance owns the state now, so ignore it entirely (state + streams).
+    const knownToken = winKey != null ? sidePanelWindowTokens.get(winKey) : undefined;
+    if (message.panelToken != null && knownToken !== undefined && knownToken !== message.panelToken) {
+      sendResponse({ ok: true, stale: true });
+      return false;
+    }
+    // A beforeunload message can wake a cold worker: run the delete after hydration settles, or it
+    // lands on an empty Set and hydration re-adds the stale window.
+    sidePanelWindowsHydrated.then(() => {
+      if (winKey != null) {
+        sidePanelOpenWindows.delete(winKey);
+        sidePanelWindowTokens.delete(winKey);
+      } else {
+        sidePanelOpenWindows.clear();
+        sidePanelWindowTokens.clear();
+      }
+      persistSidePanelWindows();
+    });
+    // The panel is gone: drop its synthetic id and its event stream, or they linger until the
+    // worker restarts (the panel's own DISCONNECT is best-effort during beforeunload).
+    const closedPanelId = tabId != null ? `panel_${tabId}` : null;
+    const closedIds = closedPanelId ? [closedPanelId] : [...sidePanelClientIds];
+    for (const id of closedIds) {
+      sidePanelClientIds.delete(id);
+      const stale = [...bridgeSseProxies.values()].filter((proxy) => proxy.clientId === id);
+      for (const proxy of stale) stopBridgeSseProxy(proxy.tabId, proxy.clientId);
+    }
+    sendResponse({ ok: true });
     return false;
   }
 
@@ -818,20 +948,69 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const tabId = message.tabId || sender.tab?.id || null;
       const windowId = message.windowId || sender.tab?.windowId || null;
-      // sidePanel.open must run inside the user gesture that triggered this message: no awaits before it.
-      if (message.focusInput) sidePanelFocusRequestedAt = Date.now();
-      if (tabId) {
-        await chrome.sidePanel.open({ tabId });
-      } else if (windowId) {
-        await chrome.sidePanel.open({ windowId });
-      } else {
-        throw new Error('No active tab or window for side panel');
+      const target = tabId ? { tabId } : (windowId ? { windowId } : null);
+      if (!target) throw new Error('No active tab or window for side panel');
+      const openKey = windowId ?? tabId ?? '';
+      // Swallow clicks that land while a toggle is still settling: letting them through interleaves
+      // open/close decisions and races the panel load. Sync check — the gesture is untouched.
+      const now = Date.now();
+      const busyUntil = sidePanelToggleBusy.get(openKey) ?? 0;
+      if (now < busyUntil) {
+        sendResponse({ ok: true, throttled: true });
+        return;
       }
+      sidePanelToggleBusy.set(openKey, now + SIDE_PANEL_TOGGLE_COALESCE_MS);
+      // chrome.sidePanel.open() is gesture-gated: it must run in the same synchronous turn as the
+      // click that produced this message — no awaits before the call (an awaited storage read or
+      // message roundtrip in between makes Chrome reject it with "may only be called in response
+      // to a user gesture"). On an already-open panel the call is a harmless no-op, so call it
+      // unconditionally and decide open-vs-close afterwards.
+      const openPromise = chrome.sidePanel.open(target);
+      const clickAt = now;
+      if (message.focusInput) sidePanelFocusRequestedAt = clickAt;
+      // Settle the storage hydration on a cold worker start before deciding.
+      await sidePanelWindowsHydrated;
+      // The side panel is per-window: if this window's panel is already open, clicking the toolbar
+      // button means "close it", no matter which tab was used to open it. Chrome has no close API:
+      // a loaded panel never asks again, so push the request; a panel still loading learns it from
+      // the DT_SIDEPANEL_READY reply (closePanel) instead.
+      const wasOpen = sidePanelOpenWindows.has(openKey);
+      if (wasOpen) {
+        // The open() above was a no-op (the panel was already open); this click means "close".
+        sidePanelOpenWindows.delete(openKey);
+        persistSidePanelWindows();
+        sidePanelCloseRequestedAt = clickAt;
+        sidePanelCloseRequestedWindowId = windowId ?? null;
+        // notBefore lets a panel that THIS click's open() just created (stale open-state, no live
+        // panel) ignore the request instead of closing right after opening; a panel that existed
+        // before the click closes itself.
+        chrome.runtime.sendMessage({
+          type: 'DT_SIDEPANEL_CLOSE_REQUEST', tabId, windowId, notBefore: clickAt,
+        }).catch(() => {
+          // No panel listening: the state was stale and the open() above (re)opened it. Its
+          // DT_SIDEPANEL_READY will re-mark the window as open.
+        });
+        openPromise.catch(() => {});
+        sendResponse({ ok: true, opened: false });
+        return;
+      }
+      // Mark optimistically BEFORE awaiting the open promise: while the panel document is loading
+      // (hundreds of ms) a rapid second click must already see "open" so it toggles to close
+      // instead of racing into another open decision.
+      sidePanelOpenWindows.add(openKey);
+      persistSidePanelWindows();
+      try {
+        await openPromise;
+      } catch (err) {
+        sidePanelOpenWindows.delete(openKey);
+        persistSidePanelWindows();
+        throw err;
+      }
+      sendResponse({ ok: true, opened: true });
       if (message.focusInput) {
         // An already-open panel hears this; a panel that is still loading asks DT_SIDEPANEL_READY.
         setTimeout(() => chrome.runtime.sendMessage({ type: 'DT_SIDEPANEL_FOCUS_INPUT' }).catch(() => {}), 300);
       }
-      sendResponse({ ok: true });
     })().catch(err => {
       sendResponse({ ok: false, error: err?.message || 'Failed to open side panel' });
     });
@@ -996,6 +1175,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const tabId = sender.tab?.id ?? null;
       const result = await startBridgeSseProxy(tabId, message.clientId);
+      sendResponse(result);
+    })();
+    return true;
+  }
+
+  if (message.type === 'DEVTAILOR_SIDEPANEL_PROXY_CONNECT_STREAM') {
+    (async () => {
+      // The panel has no sender.tab: it supplies the synthetic stream key explicitly.
+      const result = await startBridgeSseProxy(message.tabId ?? null, message.clientId);
       sendResponse(result);
     })();
     return true;

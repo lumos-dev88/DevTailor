@@ -184,7 +184,7 @@ Bridge 拥有展示会话：
 - stream/tool_status/error 等运行事件必须携带 display `sessionId`；前端只接收当前会话的运行事件，避免新建/切换后旧 turn 回流污染当前 UI。
 - 用户主动新建会话的 `session_reset` 只清空当前展示，不插入“会话已重建”提示；Bridge 重启等异常 reset 才展示提示。
 - 会话标题优先采用 agent runtime 的 `session_info` 更新，Bridge 持久化后通过 SSE `session_info` 同步给前端；首条用户消息截断标题只是 fallback。
-- 前端发送只依赖 Bridge 连接状态，不依赖当前 tab 是否已接管；未接管时仍可发送消息（标记不会随消息发送，用 R 添加为参考），browser tools 如需页面操作会继续路由到当前已接管 tab，若没有 active tab 则返回结构化错误。
+- 前端发送只依赖 Hub 连接状态，不依赖当前 tab 是否已接管：未接管时发纯聊天（文字 / 图片，不带页面上下文，`clientId` 用侧边栏自己的 `panel_<tabId>`，回复经它自己的 SSE 流回传）；接管后照旧带 URL / 标记 / 参考。标记和参考元素依附页面，只有接管时才随消息发送。browser tools 如需页面操作会继续路由到当前已接管 tab，若没有 active tab 则返回结构化错误。
 
 前端 `chrome.storage.local` 只适合缓存草稿、待发送图片、控件状态等轻量 UI 状态。不要让它成为聊天记录的权威来源，也不要把它当作 Agent 上下文。
 
